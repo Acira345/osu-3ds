@@ -5,11 +5,11 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
+#include <cstdint>
 #include "OszExtractor.hpp"
 
 struct GameSettings {
     // Área de la "Tablet" en la pantalla inferior (320x240)
-    // tabletScale = 1.0f -> 320x240 completo; 0.5f -> 160x120 (doble sensibilidad, menos movimiento de muñeca)
     float tabletScale   = 1.0f;
     float tabletCenterX = 160.0f;
     float tabletCenterY = 120.0f;
@@ -23,10 +23,12 @@ struct GameSettings {
     int musicVolume   = 85;  // 0 .. 100 %
     int sfxVolume     = 100; // 0 .. 100 %
     int audioOffsetMs = 0;   // -150 .. +150 ms
+    bool songPreview  = true;
 
-    // Opciones visuales y de juego
-    float cursorScale = 1.0f; // 0.5 .. 2.0
-    bool noFail       = false;
+    // Opciones visuales, Skin y Mods
+    float cursorScale   = 1.0f; // 0.5 .. 2.0
+    int skinIndex       = 0;
+    uint32_t activeMods = 0;
 
     void clampValues() {
         tabletScale = std::max(0.30f, std::min(1.00f, tabletScale));
@@ -41,6 +43,7 @@ struct GameSettings {
         sfxVolume     = std::max(0, std::min(100, sfxVolume));
         audioOffsetMs = std::max(-150, std::min(150, audioOffsetMs));
         cursorScale   = std::max(0.5f, std::min(2.0f, cursorScale));
+        if (skinIndex < 0) skinIndex = 0;
     }
 
     void getTabletRect(float& outX, float& outY, float& outW, float& outH) const {
@@ -56,8 +59,6 @@ struct GameSettings {
         tabletCenterY = 120.0f;
     }
 
-    // Convierte un punto de la pantalla táctil (0..320, 0..240) a coordenadas osu!pixels (0..512, 0..384)
-    // según el área activa configurada por el jugador.
     void mapTouchToOsu(float touchX, float touchY, float& outOsuX, float& outOsuY) const {
         float rx, ry, rw, rh;
         getTabletRect(rx, ry, rw, rh);
@@ -90,8 +91,10 @@ struct GameSettings {
             else if (key == "musicVolume")   musicVolume   = std::atoi(val.c_str());
             else if (key == "sfxVolume")     sfxVolume     = std::atoi(val.c_str());
             else if (key == "audioOffsetMs") audioOffsetMs = std::atoi(val.c_str());
+            else if (key == "songPreview")   songPreview   = (std::atoi(val.c_str()) != 0);
             else if (key == "cursorScale")   cursorScale   = std::strtof(val.c_str(), nullptr);
-            else if (key == "noFail")        noFail        = (std::atoi(val.c_str()) != 0);
+            else if (key == "skinIndex")     skinIndex     = std::atoi(val.c_str());
+            else if (key == "activeMods")    activeMods    = static_cast<uint32_t>(std::atoi(val.c_str()));
         }
         clampValues();
         return true;
@@ -110,8 +113,10 @@ struct GameSettings {
         f << "musicVolume="   << musicVolume << "\n";
         f << "sfxVolume="     << sfxVolume << "\n";
         f << "audioOffsetMs=" << audioOffsetMs << "\n";
+        f << "songPreview="   << (songPreview ? 1 : 0) << "\n";
         f << "cursorScale="   << cursorScale << "\n";
-        f << "noFail="        << (noFail ? 1 : 0) << "\n";
+        f << "skinIndex="     << skinIndex << "\n";
+        f << "activeMods="    << activeMods << "\n";
         return true;
     }
 };

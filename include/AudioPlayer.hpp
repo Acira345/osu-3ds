@@ -40,6 +40,7 @@ private:
     int musicChannel = 0;
     u32 sampleRate = 44100;
     u16 musicChannels = 2;
+    float speedRate = 1.0f;
 
     float musicGain = 0.85f;
     float sfxGain = 1.0f;
@@ -52,6 +53,8 @@ private:
     u64 pauseStartTick = 0;
     int leadInDurationMs = 0;
 
+    std::string loadedMusicPath = "";
+
     // 0: Normal, 1: Whistle, 2: Clap (Canales DSP 1, 2 y 3)
     WavSample hitSounds[3];
 
@@ -59,8 +62,8 @@ private:
         if (!dspReady) return;
         float mix[12];
         std::memset(mix, 0, sizeof(mix));
-        mix[0] = gain; // Front Left
-        mix[1] = gain; // Front Right
+        mix[0] = gain;
+        mix[1] = gain;
         ndspChnSetMix(chn, mix);
     }
 
@@ -79,6 +82,7 @@ private:
             return false;
         }
 
+        u16 audioFormat = 1;
         while (!std::feof(f)) {
             char chunkId[4];
             u32 chunkSize = 0;
@@ -86,7 +90,6 @@ private:
             if (std::fread(&chunkSize, 4, 1, f) != 1) break;
 
             if (std::memcmp(chunkId, "fmt ", 4) == 0) {
-                u16 audioFormat = 0;
                 std::fread(&audioFormat, 2, 1, f);
                 std::fread(&out.channels, 2, 1, f);
                 std::fread(&out.sampleRate, 4, 1, f);
@@ -94,6 +97,10 @@ private:
                 std::fread(&out.bitsPerSample, 2, 1, f);
                 if (chunkSize > 16) std::fseek(f, chunkSize - 16, SEEK_CUR);
             } else if (std::memcmp(chunkId, "data", 4) == 0) {
+                // Solo PCM sin comprimir (formato 1) y 8/16 bits soportados por NDSP
+                if (audioFormat != 1 || (out.bitsPerSample != 8 && out.bitsPerSample != 16) || chunkSize > 2 * 1024 * 1024) {
+                    break;
+                }
                 out.freeData();
                 out.data = static_cast<u8*>(linearAlloc(chunkSize));
                 if (out.data) {
@@ -154,12 +161,29 @@ public:
             ndspSetOutputMode(NDSP_OUTPUT_STEREO);
             dspReady = true;
 
-            loadWavFile("romfs:/drum-hitnormal2.wav", hitSounds[0]);
-            loadWavFile("romfs:/drum-hitwhistle2.wav", hitSounds[1]);
-            loadWavFile("romfs:/drum-hitclap2.wav", hitSounds[2]);
+            loadSkinHitsounds(
+                "romfs:/drum-hitnormal2.wav",
+                "romfs:/drum-hitwhistle2.wav",
+                "romfs:/drum-hitclap2.wav"
+            );
             setVolumes(85, 100);
         }
         return true;
+    }
+
+    void loadSkinHitsounds(const std::string& normalPath, const std::string& whistlePath, const std::string& clapPath) {
+        if (!dspReady) return;
+        for (int c = 1; c <= 3; ++c) ndspChnReset(c);
+
+        if (!loadWavFile(normalPath, hitSounds[0])) {
+            loadWavFile("romfs:/drum-hitnormal2.wav", hitSounds[0]);
+        }
+        if (!loadWavFile(whistlePath, hitSounds[1])) {
+            loadWavFile("romfs:/drum-hitwhistle2.wav", hitSounds[1]);
+        }
+        if (!loadWavFile(clapPath, hitSounds[2])) {
+            loadWavFile("romfs:/drum-hitclap2.wav", hitSounds[2]);
+        }
     }
 
     void setVolumes(int musicVolPct, int sfxVolPct) {
@@ -179,7 +203,10 @@ public:
         if ((hitSoundMask & 8) || (hitSoundMask & 4)) triggerWavChannel(3, hitSounds[2]);
     }
 
-    bool startMusic(const std::string& filepath, int leadInMs = 0) {
+    const std::string& getLoadedMusicPath() const { return loadedMusicPath; }
+    bool getIsPlaying() const { return isPlaying; }
+
+    bool startMusic(const std::string& filepath, int leadInMs = 0, float rate = 1.0f) {
         stopMusic();
         if (!dspReady && !initDSPAndHitsounds()) return false;
 
@@ -187,15 +214,17 @@ public:
             return false;
         }
 
+        loadedMusicPath = filepath;
         sampleRate = (mp3.info.hz > 0) ? static_cast<u32>(mp3.info.hz) : 44100;
         musicChannels = (mp3.info.channels == 1) ? 1 : 2;
+        speedRate = std::max(0.5f, std::min(2.0f, rate));
         isLoaded = true;
         isPaused = false;
         eofReached = false;
 
         ndspChnReset(musicChannel);
         ndspChnSetInterp(musicChannel, NDSP_INTERP_POLYPHASE);
-        ndspChnSetRate(musicChannel, sampleRate);
+        ndspChnSetRate(musicChannel, static_cast<float>(sampleRate) * speedRate);
         ndspChnSetFormat(
             musicChannel,
             (musicChannels == 1) ? NDSP_FORMAT_MONO_PCM16 : NDSP_FORMAT_STEREO_PCM16
@@ -263,7 +292,7 @@ public:
         if (!isPlaying || isPaused) return;
 
         if (inLeadIn) {
-            u64 elapsed = osGetTime() - leadInStartTick;
+            u64 elapsed = static_cast<u64>((osGetTime() - leadInStartTick) * speedRate);
             if (static_cast<int>(elapsed) >= leadInDurationMs) {
                 beginNDSPPlayback();
             }
@@ -287,7 +316,7 @@ public:
         if (!isPlaying || sampleRate == 0) return 0;
         if (inLeadIn) {
             u64 now = isPaused ? pauseStartTick : osGetTime();
-            int elapsed = static_cast<int>(now - leadInStartTick);
+            int elapsed = static_cast<int>((now - leadInStartTick) * speedRate);
             return elapsed - leadInDurationMs;
         }
         u64 currentSamples = totalSamplesPlayed + ndspChnGetSamplePos(musicChannel);
@@ -306,6 +335,7 @@ public:
             isPlaying = false;
             isPaused = false;
             inLeadIn = false;
+            loadedMusicPath = "";
             ndspChnReset(musicChannel);
             mp3dec_ex_close(&mp3);
             if (audioBuffer[0]) { linearFree(audioBuffer[0]); audioBuffer[0] = nullptr; }

@@ -115,7 +115,8 @@ main.o: C:/Users/Diyel/osu-3ds/source/main.cpp \
  C:/Users/Diyel/osu-3ds/include/minimp3_ex.h \
  C:/Users/Diyel/osu-3ds/include/minimp3.h \
  C:/Users/Diyel/osu-3ds/include/SongManager.hpp \
- C:/Users/Diyel/osu-3ds/include/OszExtractor.hpp
+ C:/Users/Diyel/osu-3ds/include/OszExtractor.hpp \
+ C:/Users/Diyel/osu-3ds/include/Settings.hpp
 C:/msys64/opt/devkitpro/libctru/include/3ds.h:
 C:/msys64/opt/devkitpro/libctru/include/3ds/types.h:
 C:/msys64/opt/devkitpro/libctru/include/3ds/result.h:
@@ -233,3 +234,4 @@ C:/Users/Diyel/osu-3ds/include/minimp3_ex.h:
 C:/Users/Diyel/osu-3ds/include/minimp3.h:
 C:/Users/Diyel/osu-3ds/include/SongManager.hpp:
 C:/Users/Diyel/osu-3ds/include/OszExtractor.hpp:
+C:/Users/Diyel/osu-3ds/include/Settings.hpp:

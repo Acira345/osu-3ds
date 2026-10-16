@@ -35,6 +35,15 @@ struct TimingPoint {
     int volume = 100;
 };
 
+struct SliderTick {
+    float x = 0.0f;
+    float y = 0.0f;
+    int time = 0;
+    bool hit = false;
+    SliderTick(float _x = 0.0f, float _y = 0.0f, int _t = 0)
+        : x(_x), y(_y), time(_t), hit(false) {}
+};
+
 struct HitCircle {
     float x = 0.0f;
     float y = 0.0f;
@@ -53,6 +62,7 @@ struct HitCircle {
     float pixelLength = 0.0f;
     std::vector<Vec2> sliderPath;
     std::vector<int> edgeHitSounds;
+    std::vector<SliderTick> sliderTicks;
 
     // Estado para Spinners
     float spinnerProgress = 0.0f;
@@ -707,6 +717,22 @@ struct Beatmap {
 
                         float slideDuration = (c.pixelLength / (100.0f * diff.sliderMultiplier * svMult)) * beatLen;
                         c.endTime = c.time + static_cast<int>(slideDuration * c.repeats);
+
+                        // Generar Slider Ticks intermedios según SliderTickRate
+                        float tickIntervalMs = (diff.sliderTickRate > 0.1f) ? (beatLen / diff.sliderTickRate) : beatLen;
+                        if (tickIntervalMs >= 40.0f && slideDuration > tickIntervalMs * 1.15f) {
+                            for (int rep = 0; rep < c.repeats; ++rep) {
+                                int spanStart = c.time + static_cast<int>(rep * slideDuration);
+                                int spanEnd   = c.time + static_cast<int>((rep + 1) * slideDuration);
+                                for (float tOffset = tickIntervalMs; tOffset < slideDuration - 18.0f; tOffset += tickIntervalMs) {
+                                    int tickTime = (rep % 2 == 0)
+                                        ? (spanStart + static_cast<int>(tOffset))
+                                        : (spanEnd - static_cast<int>(tOffset));
+                                    Vec2 pos = c.getSliderBallPos(tickTime);
+                                    c.sliderTicks.push_back(SliderTick(pos.x, pos.y, tickTime));
+                                }
+                            }
+                        }
                     }
                     circles.push_back(c);
                 }
@@ -721,5 +747,35 @@ struct Beatmap {
             return !circles.empty();
         }
         return (circleCount + sliderCount + spinnerCount) > 0;
+    }
+
+    // Aplica modificadores de juego (EZ = 2, HR = 8) sobre la dificultad y geometría
+    void applyMods(uint32_t mods) {
+        if (mods & (1u << 1)) { // MOD_EZ
+            diff.cs *= 0.5f;
+            diff.ar *= 0.5f;
+            diff.od *= 0.5f;
+            diff.hp *= 0.5f;
+            diff.calculateDerivedValues();
+        }
+        if (mods & (1u << 3)) { // MOD_HR
+            diff.cs = std::min(10.0f, diff.cs * 1.3f);
+            diff.ar = std::min(10.0f, diff.ar * 1.4f);
+            diff.od = std::min(10.0f, diff.od * 1.4f);
+            diff.hp = std::min(10.0f, diff.hp * 1.4f);
+            diff.calculateDerivedValues();
+
+            for (auto& c : circles) {
+                if (!c.isSpinner) {
+                    c.y = 384.0f - c.y;
+                    for (auto& pt : c.sliderPath) {
+                        pt.y = 384.0f - pt.y;
+                    }
+                    for (auto& tk : c.sliderTicks) {
+                        tk.y = 384.0f - tk.y;
+                    }
+                }
+            }
+        }
     }
 };

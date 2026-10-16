@@ -261,17 +261,18 @@ inline void ensureDirectoryRecursive(const std::string& path) {
 }
 
 inline bool shouldExtractFile(const std::string& filename) {
-    // Ignorar videos pesados o storyboards innecesarios para ahorrar espacio y tiempo en la 3DS
+    // Extraer archivos de mapas (.osu), configuración de skins (.ini) y audio (.mp3, .wav, .ogg)
+    // Ignoramos PNG/JPG/MP4 pesados para mantener 60 FPS y extracción rápida en la 3DS
     size_t dot = filename.find_last_of('.');
     if (dot == std::string::npos) return false;
     std::string ext = filename.substr(dot);
     for (char& c : ext) {
         if (c >= 'A' && c <= 'Z') c = c - 'A' + 'a';
     }
-    return (ext == ".osu" || ext == ".mp3" || ext == ".wav" || ext == ".ogg");
+    return (ext == ".osu" || ext == ".ini" || ext == ".mp3" || ext == ".wav" || ext == ".ogg");
 }
 
-// Extrae un archivo .osz en destFolder usando el Central Directory del ZIP
+// Extrae un archivo .osz o .osk en destFolder usando el Central Directory del ZIP
 inline bool extractOszFile(const std::string& oszPath, const std::string& destFolder) {
     FILE* f = std::fopen(oszPath.c_str(), "rb");
     if (!f) return false;
@@ -400,8 +401,8 @@ inline bool extractOszFile(const std::string& oszPath, const std::string& destFo
     return extractedCount > 0;
 }
 
-// Escanea una carpeta en busca de archivos .osz, los descomprime en songsRoot/<nombre>/ y elimina el .osz
-inline int extractAllPendingOsz(const std::string& searchFolder, const std::string& songsRoot) {
+// Escanea una carpeta en busca de archivos con la extensión indicada (.osz o .osk), los descomprime y elimina el paquete
+inline int extractAllPendingArchives(const std::string& searchFolder, const std::string& destRoot, const std::string& targetExt = ".osz") {
     DIR* dir = opendir(searchFolder.c_str());
     if (!dir) return 0;
 
@@ -414,23 +415,23 @@ inline int extractAllPendingOsz(const std::string& searchFolder, const std::stri
             for (char& c : ext) {
                 if (c >= 'A' && c <= 'Z') c = c - 'A' + 'a';
             }
-            if (ext == ".osz") {
+            if (ext == targetExt) {
                 std::string folderName = name.substr(0, name.size() - 4);
                 for (char& c : folderName) {
                     if (c == ':' || c == '*' || c == '?' || c == '"' || c == '<' || c == '>' || c == '|') {
                         c = '_';
                     }
                 }
-                std::string fullOszPath = searchFolder;
-                if (!fullOszPath.empty() && fullOszPath.back() != '/') fullOszPath += '/';
-                fullOszPath += name;
+                std::string fullArchPath = searchFolder;
+                if (!fullArchPath.empty() && fullArchPath.back() != '/') fullArchPath += '/';
+                fullArchPath += name;
 
-                std::string destDir = songsRoot;
+                std::string destDir = destRoot;
                 if (!destDir.empty() && destDir.back() != '/') destDir += '/';
                 destDir += folderName;
 
-                if (extractOszFile(fullOszPath, destDir)) {
-                    std::remove(fullOszPath.c_str());
+                if (extractOszFile(fullArchPath, destDir)) {
+                    std::remove(fullArchPath.c_str());
                     extractedSets++;
                 }
             }
@@ -438,6 +439,14 @@ inline int extractAllPendingOsz(const std::string& searchFolder, const std::stri
     }
     closedir(dir);
     return extractedSets;
+}
+
+inline int extractAllPendingOsz(const std::string& searchFolder, const std::string& songsRoot) {
+    return extractAllPendingArchives(searchFolder, songsRoot, ".osz");
+}
+
+inline int extractAllPendingOsk(const std::string& searchFolder, const std::string& skinsRoot) {
+    return extractAllPendingArchives(searchFolder, skinsRoot, ".osk");
 }
 
 } // namespace OszExtractor
