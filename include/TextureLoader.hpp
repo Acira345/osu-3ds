@@ -34,10 +34,111 @@ struct LoadedTexture {
         }
     }
 
+    // Resultado de decodificacion en CPU (ya en formato Morton de la PICA200), listo para subir a GPU
+    struct Decoded {
+        u32* data = nullptr;
+        u32 texW = 0, texH = 0, dstW = 0, dstH = 0;
+        void release() { if (data) { std::free(data); data = nullptr; } }
+    };
+
+    // Decodifica + escala + swizzle. Solo CPU/heap: seguro para ejecutarse en un hilo secundario.
+    static bool decode(const std::string& path, int maxW, int maxH, Decoded& out) {
+        out = Decoded();
+        int srcW = 0, srcH = 0, channels = 0;
+        unsigned char* pixels = stbi_load(path.c_str(), &srcW, &srcH, &channels, 4);
+        if (!pixels || srcW <= 0 || srcH <= 0) {
+            if (pixels) stbi_image_free(pixels);
+            return false;
+        }
+
+        // Escalar proporcionalmente para ajustarse a los límites de memoria y GPU de la 3DS
+        float scale = 1.0f;
+        if (srcW > maxW || srcH > maxH) {
+            float sx = static_cast<float>(maxW) / static_cast<float>(srcW);
+            float sy = static_cast<float>(maxH) / static_cast<float>(srcH);
+            scale = std::min(sx, sy);
+        }
+
+        u32 dstW = std::max<u32>(1, std::min<u32>(512, static_cast<u32>(std::round(srcW * scale))));
+        u32 dstH = std::max<u32>(1, std::min<u32>(512, static_cast<u32>(std::round(srcH * scale))));
+        u32 texW = nextPow2(dstW);
+        u32 texH = nextPow2(dstH);
+
+        u32* outBuf = static_cast<u32*>(std::calloc(texW * texH, sizeof(u32)));
+        if (!outBuf) {
+            stbi_image_free(pixels);
+            return false;
+        }
+
+        // Tabla de entrelazado Morton para tiles de 8x8 de la GPU PICA200
+        static const u8 mortonLUT[8] = { 0, 1, 4, 5, 16, 17, 20, 21 };
+        u32 tilesPerRow = texW >> 3;
+
+        for (u32 dy = 0; dy < dstH; ++dy) {
+            u32 sy = std::min(static_cast<u32>(srcH - 1), (dy * static_cast<u32>(srcH)) / dstH);
+            const unsigned char* srcRow = pixels + (sy * srcW * 4);
+
+            // Invertir eje Y en memoria de textura para coincidir con coordenadas UV de citro2d
+            u32 memY = (texH - 1) - dy;
+            u32 tileY = memY >> 3;
+            u32 inTileY = mortonLUT[memY & 7] << 1;
+
+            for (u32 dx = 0; dx < dstW; ++dx) {
+                u32 sx = std::min(static_cast<u32>(srcW - 1), (dx * static_cast<u32>(srcW)) / dstW);
+                const unsigned char* p = srcRow + (sx * 4);
+
+                // Formato GPU_RGBA8 en PICA200: [A, B, G, R] en little-endian = (r<<24)|(g<<16)|(b<<8)|a
+                u32 rgba8 = (static_cast<u32>(p[0]) << 24) | (static_cast<u32>(p[1]) << 16) |
+                            (static_cast<u32>(p[2]) << 8) | static_cast<u32>(p[3]);
+
+                u32 tileX = dx >> 3;
+                u32 inTileX = mortonLUT[dx & 7];
+                u32 tileIndex = (tileY * tilesPerRow) + tileX;
+                outBuf[(tileIndex << 6) | inTileY | inTileX] = rgba8;
+            }
+        }
+
+        stbi_image_free(pixels);
+        out.data = outBuf;
+        out.texW = texW; out.texH = texH;
+        out.dstW = dstW; out.dstH = dstH;
+        return true;
+    }
+
+    // Sube un resultado decodificado a la GPU (rapido: solo memcpy). Debe llamarse en el hilo principal.
+    bool upload(const Decoded& d, const std::string& path) {
+        if (!d.data) return false;
+        unload();
+        if (!C3D_TexInit(&tex, d.texW, d.texH, GPU_RGBA8)) return false;
+        C3D_TexSetFilter(&tex, GPU_LINEAR, GPU_LINEAR);
+        C3D_TexSetWrap(&tex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
+        std::memcpy(tex.data, d.data, d.texW * d.texH * sizeof(u32));
+        GSPGPU_FlushDataCache(tex.data, d.texW * d.texH * sizeof(u32));
+
+        subtex.width  = static_cast<u16>(d.dstW);
+        subtex.height = static_cast<u16>(d.dstH);
+        subtex.left   = 0.0f;
+        subtex.top    = 1.0f;
+        subtex.right  = static_cast<float>(d.dstW) / static_cast<float>(d.texW);
+        subtex.bottom = 1.0f - (static_cast<float>(d.dstH) / static_cast<float>(d.texH));
+
+        image.tex    = &tex;
+        image.subtex = &subtex;
+        loaded       = true;
+        sourcePath   = path;
+        return true;
+    }
+
+    // Carga sincrona (usada para sprites de skin pequeños)
     bool loadFromFile(const std::string& path, int maxW = 256, int maxH = 192) {
         if (path.empty()) return false;
         if (loaded && sourcePath == path) return true;
-        unload();
+        Decoded d;
+        if (!decode(path, maxW, maxH, d)) { unload(); return false; }
+        bool ok = upload(d, path);
+        d.release();
+        return ok;
+    }
 
         int srcW = 0, srcH = 0, channels = 0;
         unsigned char* pixels = stbi_load(path.c_str(), &srcW, &srcH, &channels, 4);

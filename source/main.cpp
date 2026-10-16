@@ -13,6 +13,7 @@
 #include "ScoreManager.hpp"
 #include "WifiServer.hpp"
 #include "TextureLoader.hpp"
+#include "UiKit.hpp"
 
 // Aumentar pila del hilo principal en la 3DS a 256 KB (por defecto libctru asigna solo 32 KB)
 extern "C" {
@@ -129,8 +130,7 @@ void drawStatBar(C2D_TextBuf buf, float x, float y, const char* label, float val
     float barH = 6.5f;
     float fillRatio = std::max(0.0f, std::min(1.0f, val / 10.0f));
 
-    C2D_DrawRectSolid(barX, barY, 0.2f, barW, barH, bgClr);
-    C2D_DrawRectSolid(barX, barY, 0.3f, barW * fillRatio, barH, fillClr);
+    Ui::statBar(barX, barY, barW, barH, 0.2f, fillRatio, fillClr);
 }
 
 int main(int argc, char* argv[]) {
@@ -241,6 +241,7 @@ int main(int argc, char* argv[]) {
     int count300 = 0, count100 = 0, count50 = 0, countMiss = 0;
     std::vector<HitPopup> popups;
     int animTick = 0;
+    float carouselPos = 0.0f;
 
     auto updateSongPreview = [&]() {
         if (songMgr.sets.empty()) {
@@ -414,36 +415,55 @@ int main(int argc, char* argv[]) {
             C2D_TargetClear(topScreen, clrBgDark);
             C2D_SceneBegin(topScreen);
 
-            float pulse = std::sin(animTick * 0.07f) * 4.5f;
-            float logoX = 110.0f;
-            float logoY = 115.0f;
-            float logoR = 60.0f + pulse;
+            Ui::backdrop(400.0f, 240.0f, static_cast<float>(animTick), Ui::rgba(34, 14, 56), Ui::rgba(10, 7, 22), clrPrimary, 0.02f);
 
-            drawRing(logoX, logoY, logoR + 9.0f, 2.0f, C2D_Color32(activeSkin.comboColors[0].r, activeSkin.comboColors[0].g, activeSkin.comboColors[0].b, 90), 32);
-            C2D_DrawCircleSolid(logoX, logoY, 0.2f, logoR, clrPrimary);
-            drawRing(logoX, logoY, logoR, 3.5f, clrWhite, 32);
-            drawCenteredText(textBuf, logoX, logoY - 8.0f, 0.95f, clrWhite, "osu!");
-            drawCenteredText(textBuf, logoX, logoY + 20.0f, 0.50f, clrCursor, "3DS Edition");
+            // Logo que late al ritmo, con ondas y resplandor
+            float beat = std::pow(std::max(0.0f, std::sin(animTick * 0.105f)), 8.0f);
+            float logoX = 118.0f;
+            float logoY = 118.0f;
+            float logoR = 56.0f + beat * 7.0f;
+
+            for (int k = 0; k < 3; ++k) {
+                float phase = std::fmod(animTick * 0.012f + k / 3.0f, 1.0f);
+                Ui::ring(logoX, logoY, 0.15f, logoR + phase * 60.0f, 2.0f, Ui::withAlpha(clrPrimary, static_cast<u8>((1.0f - phase) * 95.0f)), 40);
+            }
+            Ui::glow(logoX, logoY, 0.16f, logoR * 1.9f, Ui::rgba(255, 102, 170, 130), 6);
+            C2D_DrawCircleSolid(logoX + 3.0f, logoY + 5.0f, 0.18f, logoR, Ui::rgba(0, 0, 0, 120));
+            C2D_DrawCircleSolid(logoX, logoY, 0.2f, logoR, Ui::rgba(255, 98, 168, 255));
+            C2D_DrawCircleSolid(logoX - logoR * 0.22f, logoY - logoR * 0.28f, 0.21f, logoR * 0.6f, Ui::rgba(255, 255, 255, 30));
+            Ui::ring(logoX, logoY, 0.25f, logoR, 3.5f, clrWhite, 40);
+            drawCenteredText(textBuf, logoX, logoY - 6.0f, 1.10f, clrWhite, "osu!");
+            drawCenteredText(textBuf, logoX, logoY + 24.0f, 0.46f, Ui::rgba(255, 235, 245), "3DS Edition");
 
             const char* menuLabels[4] = { "JUGAR", "DESCARGAR WI-FI", "CONFIGURACION", "SALIR" };
             for (int i = 0; i < 4; ++i) {
                 bool sel = (mainMenuOption == i);
-                float bx = sel ? 198.0f : 208.0f;
-                float by = 28.0f + i * 43.0f;
-                float bw = 180.0f;
-                float bh = 34.0f;
+                float bx = sel ? 206.0f : 224.0f;
+                float by = 32.0f + i * 46.0f;
+                float bw = 210.0f;
+                float bh = 36.0f;
 
                 const RGBColor& c = activeSkin.comboColors[i % activeSkin.comboColors.size()];
-                u32 bg = sel ? C2D_Color32(c.r, c.g, c.b, 235) : clrPanelBg;
-                C2D_DrawRectSolid(bx, by, 0.2f, bw, bh, bg);
-                if (sel) drawRectOutline(bx, by, bw, bh, 2.0f, clrWhite);
-                drawCenteredText(textBuf, bx + bw * 0.5f, by + bh * 0.5f, 0.48f, clrWhite, menuLabels[i]);
+                u32 base = C2D_Color32(c.r, c.g, c.b, 255);
+                Ui::slantRect(bx + 2.0f, by + 3.0f, bw, bh, 12.0f, 0.18f, Ui::rgba(0, 0, 0, 90));
+                if (sel) {
+                    Ui::slantRectGrad(bx, by, bw, bh, 12.0f, 0.2f, Ui::brighten(base, 1.0f), Ui::lerpColor(base, Ui::rgba(40, 30, 70), 0.6f));
+                    C2D_DrawLine(bx + 12.0f, by, clrWhite, bx + bw, by, clrWhite, 1.5f, 0.22f);
+                } else {
+                    Ui::slantRectGrad(bx, by, bw, bh, 12.0f, 0.2f, Ui::rgba(40, 35, 62, 225), Ui::rgba(22, 19, 36, 225));
+                    C2D_DrawLine(bx + 12.0f, by, base, bx, by + bh, base, 3.0f, 0.22f);
+                }
+                drawCenteredText(textBuf, bx + bw * 0.5f + 6.0f, by + bh * 0.5f, 0.50f, clrWhite, menuLabels[i]);
             }
 
-            drawText(textBuf, 12.0f, 218.0f, 0.40f, clrMuted, "Arr/Abj + A o Toca la pantalla inferior");
+            Ui::gradV(0.0f, 214.0f, 400.0f, 26.0f, 0.3f, Ui::rgba(14, 11, 26, 120), Ui::rgba(14, 11, 26, 250));
+            drawText(textBuf, 10.0f, 221.0f, 0.38f, clrMuted, "Arr/Abj + A o toca la pantalla inferior");
+            drawText(textBuf, 330.0f, 221.0f, 0.38f, Ui::rgba(150, 215, 255), "v2.0");
 
             C2D_TargetClear(bottomScreen, clrTabletBg);
             C2D_SceneBegin(bottomScreen);
+
+            Ui::backdrop(320.0f, 240.0f, static_cast<float>(animTick), Ui::rgba(26, 20, 44), Ui::rgba(12, 10, 22), clrPrimary, 0.02f);
 
             for (int i = 0; i < 4; ++i) {
                 bool sel = (mainMenuOption == i);
@@ -453,22 +473,28 @@ int main(int argc, char* argv[]) {
                 float bh = 36.0f;
 
                 const RGBColor& c = activeSkin.comboColors[i % activeSkin.comboColors.size()];
-                u32 bg = sel ? C2D_Color32(c.r, c.g, c.b, 235) : clrPanelBg;
-                C2D_DrawRectSolid(bx, by, 0.2f, bw, bh, bg);
-                drawRectOutline(bx, by, bw, bh, sel ? 2.0f : 1.0f, sel ? clrWhite : clrMuted);
-                drawCenteredText(textBuf, bx + bw * 0.5f, by + bh * 0.5f, 0.50f, clrWhite, menuLabels[i]);
+                u32 base = C2D_Color32(c.r, c.g, c.b, 255);
+                Ui::slantRect(bx + 2.0f, by + 3.0f, bw, bh, 10.0f, 0.18f, Ui::rgba(0, 0, 0, 90));
+                if (sel) {
+                    Ui::slantRectGrad(bx, by, bw, bh, 10.0f, 0.2f, base, Ui::lerpColor(base, Ui::rgba(40, 30, 70), 0.6f));
+                    C2D_DrawLine(bx + 10.0f, by, clrWhite, bx + bw, by, clrWhite, 1.5f, 0.22f);
+                } else {
+                    Ui::slantRectGrad(bx, by, bw, bh, 10.0f, 0.2f, Ui::rgba(40, 35, 62, 225), Ui::rgba(22, 19, 36, 225));
+                    C2D_DrawLine(bx + 10.0f, by, base, bx, by + bh, base, 3.0f, 0.22f);
+                }
+                drawCenteredText(textBuf, bx + bw * 0.5f + 5.0f, by + bh * 0.5f, 0.50f, clrWhite, menuLabels[i]);
             }
 
-            C2D_DrawRectSolid(10.0f, 190.0f, 0.2f, 300.0f, 42.0f, clrPanelBg);
+            Ui::panel(10.0f, 188.0f, 300.0f, 44.0f, 0.2f, Ui::rgba(30, 27, 44, 235), clr300);
             char summary1[96];
             std::snprintf(summary1, sizeof(summary1), "Area Tablet: %d%% | Modo: %s | Offset: %+dms",
                 static_cast<int>(std::round(settings.tabletScale * 100.0f)),
                 settings.tapWithStylus ? "Touch+Btn" : "Hibrido PC",
                 settings.audioOffsetMs);
-            drawCenteredText(textBuf, 160.0f, 202.0f, 0.37f, clr300, summary1);
+            drawCenteredText(textBuf, 160.0f, 201.0f, 0.37f, clr300, summary1);
 
             std::string skinLine = "Skin: " + truncateString(activeSkin.name, 24) + " | Mods: " + formatModsString(settings.activeMods);
-            drawCenteredText(textBuf, 160.0f, 220.0f, 0.37f, clrCursor, skinLine.c_str());
+            drawCenteredText(textBuf, 160.0f, 219.0f, 0.37f, clrCursor, skinLine.c_str());
 
             C3D_FrameEnd(0);
             continue;
@@ -934,77 +960,151 @@ int main(int argc, char* argv[]) {
 
             if (bgTex.loaded) {
                 bgTex.drawRect(0.0f, 0.0f, 400.0f, 240.0f, 0.02f, 255);
-                u8 dimAlpha = static_cast<u8>((settings.bgDim * 240) / 100);
-                C2D_DrawRectSolid(0.0f, 0.0f, 0.04f, 400.0f, 240.0f, C2D_Color32(14, 12, 22, dimAlpha));
+                u8 dimAlpha = static_cast<u8>((settings.bgDim * 200) / 100);
+                C2D_DrawRectSolid(0.0f, 0.0f, 0.04f, 400.0f, 240.0f, Ui::rgba(14, 12, 22, dimAlpha));
+            } else {
+                Ui::backdrop(400.0f, 240.0f, static_cast<float>(animTick), Ui::rgba(30, 18, 54), Ui::rgba(10, 8, 22), clrPrimary, 0.02f);
             }
+            // Vineta izquierda para dar legibilidad al panel de informacion
+            Ui::gradH(0.0f, 0.0f, 240.0f, 240.0f, 0.05f, Ui::rgba(8, 6, 16, 220), Ui::rgba(8, 6, 16, 0));
 
-            C2D_DrawRectSolid(0.0f, 0.0f, 0.1f, 400.0f, 34.0f, C2D_Color32(30, 27, 44, 230));
-            drawText(textBuf, 12.0f, 8.0f, 0.54f, clrPrimary, "Selecciona un Beatmap");
-
+            // Cabecera
+            Ui::gradV(0.0f, 0.0f, 400.0f, 30.0f, 0.3f, Ui::rgba(18, 15, 32, 245), Ui::rgba(18, 15, 32, 150));
+            C2D_DrawRectSolid(0.0f, 29.0f, 0.31f, 400.0f, 1.5f, Ui::withAlpha(clrPrimary, 200));
+            drawText(textBuf, 12.0f, 6.0f, 0.55f, clrWhite, "Seleccion de Cancion");
             char headerInfo[96];
-            std::snprintf(headerInfo, sizeof(headerInfo), "Cancion %d/%d",
+            std::snprintf(headerInfo, sizeof(headerInfo), "%d / %d",
                 songMgr.sets.empty() ? 0 : (selectedSet + 1),
                 static_cast<int>(songMgr.sets.size()));
-            drawText(textBuf, 290.0f, 10.0f, 0.45f, clrMuted, headerInfo);
+            Ui::pill(334.0f, 6.0f, 56.0f, 18.0f, 0.32f, Ui::rgba(60, 50, 90, 230));
+            drawCenteredText(textBuf, 362.0f, 15.0f, 0.40f, clrWhite, headerInfo, 0.9f);
+
+            carouselPos = Ui::approach(carouselPos, static_cast<float>(selectedSet), 0.22f);
 
             if (songMgr.sets.empty()) {
-                drawText(textBuf, 20.0f, 95.0f, 0.5f, clrMiss, "No se encontraron beatmaps (.osu / .osz)");
-                drawText(textBuf, 20.0f, 120.0f, 0.43f, clrWhite, "Coloca carpetas o archivos .osz en:");
-                drawText(textBuf, 20.0f, 140.0f, 0.45f, clr300, "sdmc:/3ds/osu-3ds/songs/");
+                Ui::panel(40.0f, 70.0f, 320.0f, 100.0f, 0.3f, Ui::rgba(30, 27, 44, 235), clrMiss);
+                drawText(textBuf, 56.0f, 82.0f, 0.5f, clrMiss, "No se encontraron beatmaps (.osu / .osz)");
+                drawText(textBuf, 56.0f, 110.0f, 0.43f, clrWhite, "Coloca carpetas o archivos .osz en:");
+                drawText(textBuf, 56.0f, 130.0f, 0.45f, clr300, "sdmc:/3ds/osu-3ds/songs/");
             } else {
-                const auto& curSet = songMgr.sets[selectedSet];
+                const int nSets = static_cast<int>(songMgr.sets.size());
 
-                C2D_DrawRectSolid(12.0f, 42.0f, 0.1f, 376.0f, 46.0f, C2D_Color32(30, 27, 44, 215));
-                std::string songHeader = std::string(curSet.fromRomfs ? "[ROM] " : "[SD] ") + truncateString(curSet.title, 38);
-                drawText(textBuf, 20.0f, 47.0f, 0.52f, clrCursor, songHeader.c_str());
+                // ---- Carrusel de canciones (derecha), la seleccionada sale hacia la izquierda ----
+                for (int off = -4; off <= 4; ++off) {
+                    int idx = selectedSet + off;
+                    if (idx < 0 || idx >= nSets) continue;
+                    float rel = idx - carouselPos;
+                    float dist = std::fabs(rel);
+                    if (dist > 4.2f) continue;
+                    const auto& cs = songMgr.sets[idx];
+                    if (cs.difficulties.empty()) continue;
 
-                std::string artistLine = "Artista: " + truncateString(curSet.artist, 42);
-                drawText(textBuf, 20.0f, 67.0f, 0.42f, clrMuted, artistLine.c_str());
+                    bool sel = (idx == selectedSet);
+                    float focus = std::max(0.0f, 1.0f - dist);
+                    float cardH = 36.0f + focus * 12.0f;
+                    float cy = 122.0f + rel * 44.0f;
+                    float cx = 214.0f - focus * 40.0f + std::max(0.0f, dist - 1.0f) * 6.0f;
+                    float cardY = cy - cardH * 0.5f;
+                    float cardW = 400.0f - cx + 14.0f;
+                    if (cardY > 240.0f || cardY + cardH < 30.0f) continue;
 
-                int totalDiffs = static_cast<int>(curSet.difficulties.size());
-                int maxVisible = 4;
-                int startIdx = std::max(0, std::min(selectedDiff - 1, totalDiffs - maxVisible));
-                int endIdx   = std::min(totalDiffs, startIdx + maxVisible);
+                    float maxStars = cs.difficulties.back().starRating;
+                    u32 starClr = getStarRatingColor(getModAdjustedStars(maxStars, settings.activeMods));
+                    u8 fade = static_cast<u8>(255.0f * std::max(0.35f, 1.0f - dist * 0.18f));
 
-                for (int i = startIdx; i < endIdx; ++i) {
-                    int row = i - startIdx;
-                    float yPos = 98.0f + row * 26.0f;
-                    bool isSel = (i == selectedDiff);
-
-                    if (isSel) {
-                        C2D_DrawRectSolid(16.0f, yPos - 2.0f, 0.1f, 368.0f, 22.0f, C2D_Color32(55, 45, 78, 225));
-                    } else {
-                        C2D_DrawRectSolid(16.0f, yPos - 2.0f, 0.08f, 368.0f, 22.0f, C2D_Color32(22, 20, 34, 175));
+                    u32 leftC  = sel ? Ui::withAlpha(Ui::brighten(starClr, 0.85f), 245) : Ui::rgba(36, 32, 56, fade);
+                    u32 rightC = sel ? Ui::rgba(52, 40, 86, 245) : Ui::rgba(22, 19, 36, fade);
+                    C2D_DrawTriangle(cx + 14.0f + 2.0f, cardY + 3.0f, Ui::rgba(0, 0, 0, 80), cx + cardW + 2.0f, cardY + 3.0f, Ui::rgba(0, 0, 0, 80), cx + 2.0f, cardY + cardH + 3.0f, Ui::rgba(0, 0, 0, 80), 0.09f);
+                    Ui::slantRectGrad(cx, cardY, cardW, cardH, 14.0f, 0.1f, leftC, rightC);
+                    // borde de acento
+                    C2D_DrawLine(cx + 14.0f, cardY, starClr, cx, cardY + cardH, starClr, sel ? 3.0f : 2.0f, 0.12f);
+                    if (sel) {
+                        C2D_DrawLine(cx + 14.0f, cardY, Ui::rgba(255, 255, 255, 220), cx + cardW, cardY, Ui::rgba(255, 255, 255, 220), 1.5f, 0.12f);
+                        C2D_DrawLine(cx, cardY + cardH, Ui::rgba(255, 255, 255, 120), cx + cardW - 14.0f, cardY + cardH, Ui::rgba(255, 255, 255, 120), 1.5f, 0.12f);
                     }
 
-                    float modStars = getModAdjustedStars(curSet.difficulties[i].starRating, settings.activeMods);
-                    u32 starClr = getStarRatingColor(modStars);
-                    char starTag[24];
-                    std::snprintf(starTag, sizeof(starTag), "*%.2f", modStars);
-                    drawText(textBuf, 22.0f, yPos, 0.45f, starClr, starTag);
+                    u32 titleClr = sel ? clrWhite : Ui::rgba(215, 210, 235, fade);
+                    drawText(textBuf, cx + 22.0f, cardY + 4.0f, sel ? 0.50f : 0.43f, titleClr, truncateString(cs.title, sel ? 26 : 24).c_str(), 0.6f);
+                    drawText(textBuf, cx + 22.0f, cardY + (sel ? 22.0f : 19.0f), 0.34f, Ui::rgba(190, 185, 215, fade), truncateString(cs.artist, 26).c_str(), 0.6f);
+                    if (sel) {
+                        drawText(textBuf, cx + 22.0f, cardY + 34.0f, 0.30f, Ui::rgba(255, 224, 120, 255),
+                                 truncateString("mapeado por " + cs.difficulties[std::min(selectedDiff, (int)cs.difficulties.size() - 1)].creator, 30).c_str(), 0.6f);
+                    }
 
-                    u32 color = isSel ? clrCursor : clrWhite;
-                    const auto* rec = scoreMgr.getRecord(curSet.difficulties[i].osuPath);
-                    std::string gradeTag = rec ? ("[" + rec->bestGrade + "] ") : "";
-                    std::string verLabel = truncateString(curSet.difficulties[i].version, 23);
-                    char lineStr[128];
-                    std::snprintf(lineStr, sizeof(lineStr), "%s[%s] (%d obj)",
-                        gradeTag.c_str(),
-                        verLabel.c_str(),
-                        curSet.difficulties[i].totalObjects());
-                    drawText(textBuf, 72.0f, yPos, 0.45f, color, lineStr);
+                    char sTag[16];
+                    std::snprintf(sTag, sizeof(sTag), "*%.2f", getModAdjustedStars(maxStars, settings.activeMods));
+                    float pw = 40.0f;
+                    Ui::pill(400.0f - pw - 6.0f, cardY + cardH * 0.5f - 7.0f, pw, 14.0f, 0.5f, Ui::withAlpha(starClr, fade));
+                    drawCenteredText(textBuf, 400.0f - pw * 0.5f - 6.0f, cardY + cardH * 0.5f, 0.32f, Ui::rgba(20, 16, 30), sTag, 0.7f);
+                }
+
+                // ---- Panel de informacion (izquierda) ----
+                const auto& curSet = songMgr.sets[selectedSet];
+                const int totalDiffs = static_cast<int>(curSet.difficulties.size());
+                const int dIdx = std::max(0, std::min(selectedDiff, totalDiffs - 1));
+
+                Ui::panel(8.0f, 36.0f, 166.0f, 74.0f, 0.3f, Ui::rgba(24, 21, 40, 225), clrPrimary);
+                drawText(textBuf, 16.0f, 40.0f, 0.50f, clrWhite, truncateString(curSet.title, 22).c_str(), 0.6f);
+                drawText(textBuf, 16.0f, 58.0f, 0.40f, clrCursor, truncateString(curSet.artist, 26).c_str(), 0.6f);
+                if (totalDiffs > 0) {
+                    const auto& dd = curSet.difficulties[dIdx];
+                    drawText(textBuf, 16.0f, 73.0f, 0.34f, clrMuted, truncateString("Mapa por " + dd.creator, 28).c_str(), 0.6f);
+                    char cnt[64];
+                    std::snprintf(cnt, sizeof(cnt), "%d circ  %d sld  %d spn", dd.circleCount, dd.sliderCount, dd.spinnerCount);
+                    drawText(textBuf, 16.0f, 88.0f, 0.34f, Ui::rgba(150, 215, 255), cnt, 0.6f);
+                }
+
+                // ---- Burbujas de dificultad (estilo lazer) ----
+                if (totalDiffs > 0) {
+                    Ui::panel(8.0f, 118.0f, 166.0f, 86.0f, 0.3f, Ui::rgba(24, 21, 40, 225));
+                    const int maxB = 8;
+                    int bStart = std::max(0, std::min(dIdx - maxB / 2, totalDiffs - maxB));
+                    int bEnd = std::min(totalDiffs, bStart + maxB);
+                    for (int i = bStart; i < bEnd; ++i) {
+                        float bx = 22.0f + (i - bStart) * 19.0f;
+                        float by = 136.0f;
+                        bool isSel = (i == dIdx);
+                        float st = getModAdjustedStars(curSet.difficulties[i].starRating, settings.activeMods);
+                        u32 sc = getStarRatingColor(st);
+                        if (isSel) {
+                            Ui::glow(bx, by, 0.35f, 15.0f, Ui::withAlpha(sc, 140), 4);
+                            C2D_DrawCircleSolid(bx, by, 0.4f, 9.5f, sc);
+                            Ui::ring(bx, by, 0.45f, 11.5f, 1.5f, clrWhite, 18);
+                        } else {
+                            C2D_DrawCircleSolid(bx, by, 0.4f, 6.0f, Ui::withAlpha(sc, 190));
+                        }
+                    }
+                    const auto& sd = curSet.difficulties[dIdx];
+                    float selStars = getModAdjustedStars(sd.starRating, settings.activeMods);
+                    u32 selClr = getStarRatingColor(selStars);
+                    drawText(textBuf, 14.0f, 154.0f, 0.42f, clrWhite, truncateString(sd.version, 24).c_str(), 0.6f);
+                    char sl[48];
+                    std::snprintf(sl, sizeof(sl), "*%.2f", selStars);
+                    Ui::pill(14.0f, 172.0f, 46.0f, 15.0f, 0.5f, selClr);
+                    drawCenteredText(textBuf, 37.0f, 179.5f, 0.34f, Ui::rgba(20, 16, 30), sl, 0.7f);
+                    const auto* rec = scoreMgr.getRecord(sd.osuPath);
+                    if (rec) {
+                        std::snprintf(sl, sizeof(sl), "%s  %.1f%%", rec->bestGrade.c_str(), rec->bestAcc);
+                        drawText(textBuf, 68.0f, 172.0f, 0.38f, clr100, sl, 0.6f);
+                        std::snprintf(sl, sizeof(sl), "%.0f pp", rec->bestPP);
+                        drawText(textBuf, 68.0f, 186.0f, 0.34f, clr300, sl, 0.6f);
+                    } else {
+                        drawText(textBuf, 68.0f, 174.0f, 0.34f, clrMuted, "Sin record", 0.6f);
+                    }
                 }
             }
 
-            C2D_DrawRectSolid(0.0f, 212.0f, 0.1f, 400.0f, 28.0f, C2D_Color32(30, 27, 44, 235));
-            drawText(textBuf, 6.0f, 218.0f, 0.38f, clr300,
-                "A: Jugar | SELECT: Mods | Y: Descargar Wi-Fi | X: Config | B: Menu");
+            // Barra inferior de atajos
+            Ui::gradV(0.0f, 212.0f, 400.0f, 28.0f, 0.3f, Ui::rgba(18, 15, 32, 170), Ui::rgba(18, 15, 32, 250));
+            drawText(textBuf, 6.0f, 220.0f, 0.36f, clr300,
+                "A: Jugar | SELECT: Mods | Y: Wi-Fi | X: Config | B: Menu");
 
             // --- PANTALLA INFERIOR: DETALLES, ESTRELLAS, PP Y RECORD O SELECTOR DE MODS ---
             C2D_TargetClear(bottomScreen, clrTabletBg);
             C2D_SceneBegin(bottomScreen);
 
-            C2D_DrawRectSolid(10.0f, 10.0f, 0.1f, 300.0f, 220.0f, clrPanelBg);
+            Ui::backdrop(320.0f, 240.0f, static_cast<float>(animTick), Ui::rgba(26, 20, 44), Ui::rgba(12, 10, 22), clrPrimary, 0.02f);
+            Ui::panel(10.0f, 10.0f, 300.0f, 220.0f, 0.1f, Ui::rgba(30, 27, 44, 235), clrPrimary);
 
             if (modMenuOpen) {
                 drawText(textBuf, 20.0f, 16.0f, 0.48f, clrCursor, "Selector de Modificadores (Mods)");
@@ -1154,47 +1254,75 @@ int main(int argc, char* argv[]) {
 
             if (bgTex.loaded) {
                 bgTex.drawRect(0.0f, 0.0f, 400.0f, 240.0f, 0.02f, 255);
-                C2D_DrawRectSolid(0.0f, 0.0f, 0.04f, 400.0f, 240.0f, C2D_Color32(14, 12, 22, 210));
+                C2D_DrawRectSolid(0.0f, 0.0f, 0.04f, 400.0f, 240.0f, Ui::rgba(14, 12, 22, 190));
+            } else {
+                Ui::backdrop(400.0f, 240.0f, static_cast<float>(animTick), Ui::rgba(30, 18, 54), Ui::rgba(10, 8, 22), gradeClr, 0.02f);
             }
 
-            C2D_DrawRectSolid(0.0f, 0.0f, 0.1f, 400.0f, 34.0f, C2D_Color32(30, 27, 44, 235));
-            drawText(textBuf, 12.0f, 8.0f, 0.52f, clrWhite,
-                stageFailed ? "PARTIDA FALLIDA" : (newRecordAchieved ? "RESULTADOS - NUEVO RECORD!" : "RESULTADOS DEL BEATMAP"));
+            Ui::gradV(0.0f, 0.0f, 400.0f, 30.0f, 0.3f, Ui::rgba(18, 15, 32, 245), Ui::rgba(18, 15, 32, 150));
+            C2D_DrawRectSolid(0.0f, 29.0f, 0.31f, 400.0f, 1.5f, Ui::withAlpha(gradeClr, 220));
+            drawText(textBuf, 12.0f, 6.0f, 0.55f, clrWhite,
+                stageFailed ? "PARTIDA FALLIDA" : (newRecordAchieved ? "RESULTADOS - NUEVO RECORD!" : "RESULTADOS"));
 
-            C2D_DrawCircleSolid(90.0f, 124.0f, 0.2f, 50.0f, clrPanelBg);
-            drawRing(90.0f, 124.0f, 50.0f, 3.0f, gradeClr, 28);
-            drawCenteredText(textBuf, 90.0f, 121.0f, 1.25f, gradeClr, grade);
+            // Rango gigante con resplandor pulsante
+            float gPulse = 1.0f + std::sin(animTick * 0.08f) * 0.03f;
+            Ui::glow(88.0f, 124.0f, 0.15f, 78.0f * gPulse, Ui::withAlpha(gradeClr, 120), 6);
+            C2D_DrawCircleSolid(90.0f, 128.0f, 0.18f, 52.0f, Ui::rgba(0, 0, 0, 110));
+            C2D_DrawCircleSolid(88.0f, 124.0f, 0.2f, 52.0f, Ui::rgba(24, 20, 40, 245));
+            Ui::ring(88.0f, 124.0f, 0.25f, 52.0f * gPulse, 4.0f, gradeClr, 40);
+            drawCenteredText(textBuf, 88.0f, 120.0f, 1.55f, gradeClr, grade);
 
+            // Panel de resultados
             char buf[96];
-            std::snprintf(buf, sizeof(buf), "Puntuacion: %07d", score);
-            drawText(textBuf, 165.0f, 42.0f, 0.48f, clrWhite, buf);
-
+            Ui::panel(158.0f, 38.0f, 234.0f, 62.0f, 0.3f, Ui::rgba(24, 21, 40, 230), gradeClr);
+            drawText(textBuf, 168.0f, 42.0f, 0.36f, clrMuted, "PUNTUACION");
+            std::snprintf(buf, sizeof(buf), "%07d", score);
+            drawText(textBuf, 168.0f, 54.0f, 0.78f, clrWhite, buf);
             float modStars = getModAdjustedStars(beatmap.starRating, settings.activeMods);
-            std::snprintf(buf, sizeof(buf), "Performance: %.1f pp (*%.2f)", lastEarnedPP, modStars);
-            drawText(textBuf, 165.0f, 64.0f, 0.46f, clrCursor, buf);
+            std::snprintf(buf, sizeof(buf), "%.1f pp", lastEarnedPP);
+            Ui::pill(318.0f, 46.0f, 66.0f, 18.0f, 0.5f, Ui::rgba(70, 55, 110, 240));
+            drawCenteredText(textBuf, 351.0f, 55.0f, 0.42f, clr300, buf, 0.9f);
+            std::snprintf(buf, sizeof(buf), "*%.2f", modStars);
+            Ui::pill(318.0f, 70.0f, 66.0f, 16.0f, 0.5f, getStarRatingColor(modStars));
+            drawCenteredText(textBuf, 351.0f, 78.0f, 0.36f, Ui::rgba(20, 16, 30), buf, 0.9f);
 
-            std::snprintf(buf, sizeof(buf), "Precision: %.2f%% | Combo: %dx", acc, maxCombo);
-            drawText(textBuf, 165.0f, 86.0f, 0.44f, clr300, buf);
+            // Precision con barra
+            Ui::panel(158.0f, 106.0f, 234.0f, 34.0f, 0.3f, Ui::rgba(24, 21, 40, 230));
+            std::snprintf(buf, sizeof(buf), "Precision %.2f%%", acc);
+            drawText(textBuf, 168.0f, 109.0f, 0.40f, clr300, buf);
+            std::snprintf(buf, sizeof(buf), "Combo %dx", maxCombo);
+            drawText(textBuf, 320.0f, 109.0f, 0.40f, clrCursor, buf);
+            Ui::statBar(168.0f, 128.0f, 214.0f, 6.0f, 0.4f, acc / 100.0f, clr300);
 
+            // Contadores 300 / 100 / 50 / Miss
+            const char* hitLbl[4] = { "300", "100", "50", "X" };
+            int hitCnt[4] = { count300, count100, count50, countMiss };
+            u32 hitClr[4] = { clr300, clr100, clr50, clrMiss };
+            for (int i = 0; i < 4; ++i) {
+                float hx = 158.0f + i * 59.5f;
+                Ui::panel(hx, 146.0f, 55.0f, 44.0f, 0.3f, Ui::rgba(24, 21, 40, 230));
+                C2D_DrawRectSolid(hx, 146.0f, 0.4f, 55.0f, 3.0f, hitClr[i]);
+                drawCenteredText(textBuf, hx + 27.5f, 160.0f, 0.42f, hitClr[i], hitLbl[i], 0.9f);
+                std::snprintf(buf, sizeof(buf), "%d", hitCnt[i]);
+                drawCenteredText(textBuf, hx + 27.5f, 177.0f, 0.50f, clrWhite, buf, 0.9f);
+            }
             std::string modStr = "Mods: " + formatModsString(settings.activeMods);
-            drawText(textBuf, 165.0f, 108.0f, 0.41f, clrMuted, modStr.c_str());
+            drawText(textBuf, 160.0f, 196.0f, 0.36f, clrMuted, modStr.c_str());
 
-            std::snprintf(buf, sizeof(buf), "300: %-4d   100: %-4d", count300, count100);
-            drawText(textBuf, 165.0f, 134.0f, 0.45f, clr100, buf);
-
-            std::snprintf(buf, sizeof(buf), "50:  %-4d   Miss: %-4d", count50, countMiss);
-            drawText(textBuf, 165.0f, 156.0f, 0.45f, clrMiss, buf);
-
-            C2D_DrawRectSolid(0.0f, 212.0f, 0.1f, 400.0f, 28.0f, C2D_Color32(30, 27, 44, 235));
-            drawCenteredText(textBuf, 200.0f, 226.0f, 0.44f, clr300, "A: Reintentar | B: Volver a Canciones");
+            Ui::gradV(0.0f, 212.0f, 400.0f, 28.0f, 0.3f, Ui::rgba(18, 15, 32, 170), Ui::rgba(18, 15, 32, 250));
+            drawCenteredText(textBuf, 200.0f, 227.0f, 0.42f, clr300, "A: Reintentar | B: Volver a Canciones");
 
             C2D_TargetClear(bottomScreen, clrTabletBg);
             C2D_SceneBegin(bottomScreen);
-            drawCenteredText(textBuf, 160.0f, 95.0f, 0.50f, clrWhite, truncateString(beatmap.title, 34).c_str());
-            std::snprintf(buf, sizeof(buf), "[%s] - %.1f pp", truncateString(beatmap.version, 22).c_str(), lastEarnedPP);
-            drawCenteredText(textBuf, 160.0f, 120.0f, 0.46f, clr300, buf);
+            Ui::backdrop(320.0f, 240.0f, static_cast<float>(animTick), Ui::rgba(26, 20, 44), Ui::rgba(12, 10, 22), gradeClr, 0.02f);
+            Ui::panel(20.0f, 70.0f, 280.0f, 80.0f, 0.2f, Ui::rgba(30, 27, 44, 240), gradeClr);
+            drawCenteredText(textBuf, 160.0f, 95.0f, 0.52f, clrWhite, truncateString(beatmap.title, 32).c_str());
+            std::snprintf(buf, sizeof(buf), "[%s]  %.1f pp", truncateString(beatmap.version, 22).c_str(), lastEarnedPP);
+            drawCenteredText(textBuf, 160.0f, 122.0f, 0.44f, clr300, buf);
             if (newRecordAchieved) {
-                drawCenteredText(textBuf, 160.0f, 150.0f, 0.52f, clrCursor, "NUEVO RECORD PERSONAL GUARDADO!");
+                float flash = 0.65f + 0.35f * std::sin(animTick * 0.2f);
+                Ui::pill(40.0f, 168.0f, 240.0f, 24.0f, 0.3f, Ui::withAlpha(clrCursor, static_cast<u8>(255.0f * flash)));
+                drawCenteredText(textBuf, 160.0f, 180.0f, 0.46f, Ui::rgba(20, 16, 30), "NUEVO RECORD PERSONAL!", 0.9f);
             }
             C3D_FrameEnd(0);
             continue;
@@ -1784,22 +1912,36 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        // Barra de Vida (HP Bar)
-        C2D_DrawRectSolid(6.0f, 8.0f, 0.3f, 140.0f, 7.0f, clrKeyIdle);
+        // Barra de Vida (HP Bar) con degradado y borde
         u32 hpClr = (hp > 0.5f) ? clr100 : ((hp > 0.25f) ? clr50 : clrMiss);
-        C2D_DrawRectSolid(6.0f, 8.0f, 0.35f, 140.0f * hp, 7.0f, hpClr);
+        C2D_DrawRectSolid(5.0f, 5.0f, 0.29f, 148.0f, 11.0f, Ui::rgba(0, 0, 0, 170));
+        C2D_DrawRectSolid(7.0f, 7.0f, 0.3f, 144.0f, 7.0f, clrKeyIdle);
+        if (hp > 0.0f) Ui::gradH(7.0f, 7.0f, 144.0f * hp, 7.0f, 0.35f, Ui::brighten(hpClr, 0.6f), hpClr);
+        if (hp < 0.25f) {
+            float blink = 0.5f + 0.5f * std::sin(animTick * 0.35f);
+            C2D_DrawRectSolid(5.0f, 5.0f, 0.4f, 148.0f, 11.0f, Ui::rgba(255, 60, 60, static_cast<int>(60 * blink)));
+        }
+
+        // Barra de progreso de la cancion
+        if (!beatmap.circles.empty()) {
+            float endT = static_cast<float>(beatmap.circles.back().endTime + 1000);
+            float prog = std::max(0.0f, std::min(1.0f, static_cast<float>(songTime) / std::max(1.0f, endT)));
+            C2D_DrawRectSolid(5.0f, 18.0f, 0.3f, 148.0f, 2.0f, Ui::rgba(255, 255, 255, 40));
+            C2D_DrawRectSolid(5.0f, 18.0f, 0.35f, 148.0f * prog, 2.0f, clrPrimary);
+        }
 
         // HUD: Score, Accuracy, Live PP, Mods y Combo
         char hudStr[64];
+        Ui::gradH(300.0f, 2.0f, 100.0f, 52.0f, 0.28f, Ui::rgba(10, 8, 20, 0), Ui::rgba(10, 8, 20, 170));
         std::snprintf(hudStr, sizeof(hudStr), "%07d", score);
-        drawText(textBuf, 325.0f, 5.0f, 0.45f, clrWhite, hudStr);
+        drawText(textBuf, 322.0f, 3.0f, 0.62f, clrWhite, hudStr);
 
         int totalJudged = count300 + count100 + count50 + countMiss;
         float acc = (totalJudged > 0)
             ? ((count300 * 300.0f + count100 * 100.0f + count50 * 50.0f) / (totalJudged * 300.0f)) * 100.0f
             : 100.0f;
         std::snprintf(hudStr, sizeof(hudStr), "%.1f%%", acc);
-        drawText(textBuf, 340.0f, 20.0f, 0.40f, clr300, hudStr);
+        drawText(textBuf, 340.0f, 24.0f, 0.40f, clr300, hudStr);
 
         float livePP = calculatePP(
             beatmap.starRating,
@@ -1811,11 +1953,11 @@ int main(int argc, char* argv[]) {
             settings.activeMods
         );
         std::snprintf(hudStr, sizeof(hudStr), "%.0fpp", livePP);
-        drawText(textBuf, 345.0f, 34.0f, 0.36f, clrPrimary, hudStr);
+        drawText(textBuf, 345.0f, 38.0f, 0.36f, clrPrimary, hudStr);
 
         if (settings.activeMods != MOD_NONE) {
             std::string mTag = formatModsString(settings.activeMods);
-            drawText(textBuf, 330.0f, 48.0f, 0.34f, clrCursor, mTag.c_str());
+            drawText(textBuf, 330.0f, 52.0f, 0.34f, clrCursor, mTag.c_str());
         }
 
         std::snprintf(hudStr, sizeof(hudStr), "%dx", combo);

@@ -123,7 +123,8 @@ main.o: C:/Users/Diyel/osu-3ds/source/main.cpp \
  C:/Users/Diyel/osu-3ds/include/WifiServer.hpp \
  C:/msys64/opt/devkitpro/libctru/include/arpa/inet.h \
  C:/Users/Diyel/osu-3ds/include/TextureLoader.hpp \
- C:/Users/Diyel/osu-3ds/include/stb_image.h
+ C:/Users/Diyel/osu-3ds/include/stb_image.h \
+ C:/Users/Diyel/osu-3ds/include/UiKit.hpp
 C:/msys64/opt/devkitpro/libctru/include/3ds.h:
 C:/msys64/opt/devkitpro/libctru/include/3ds/types.h:
 C:/msys64/opt/devkitpro/libctru/include/3ds/result.h:
@@ -249,3 +250,4 @@ C:/Users/Diyel/osu-3ds/include/WifiServer.hpp:
 C:/msys64/opt/devkitpro/libctru/include/arpa/inet.h:
 C:/Users/Diyel/osu-3ds/include/TextureLoader.hpp:
 C:/Users/Diyel/osu-3ds/include/stb_image.h:
+C:/Users/Diyel/osu-3ds/include/UiKit.hpp:
