@@ -25,9 +25,10 @@ struct GameSettings {
     int audioOffsetMs = 0;   // -150 .. +150 ms
     bool songPreview  = true;
 
-    // Opciones visuales, Skin y Mods
+    // Opciones visuales, Skin, Atenuación de Fondo y Mods
     float cursorScale   = 1.0f; // 0.5 .. 2.0
     int skinIndex       = 0;
+    int bgDim           = 75;   // 20 .. 100 % (Atenuación del fondo de la canción)
     uint32_t activeMods = 0;
 
     void clampValues() {
@@ -43,6 +44,7 @@ struct GameSettings {
         sfxVolume     = std::max(0, std::min(100, sfxVolume));
         audioOffsetMs = std::max(-150, std::min(150, audioOffsetMs));
         cursorScale   = std::max(0.5f, std::min(2.0f, cursorScale));
+        bgDim         = std::max(20, std::min(100, bgDim));
         if (skinIndex < 0) skinIndex = 0;
     }
 
@@ -94,6 +96,7 @@ struct GameSettings {
             else if (key == "songPreview")   songPreview   = (std::atoi(val.c_str()) != 0);
             else if (key == "cursorScale")   cursorScale   = std::strtof(val.c_str(), nullptr);
             else if (key == "skinIndex")     skinIndex     = std::atoi(val.c_str());
+            else if (key == "bgDim")         bgDim         = std::atoi(val.c_str());
             else if (key == "activeMods")    activeMods    = static_cast<uint32_t>(std::atoi(val.c_str()));
         }
         clampValues();
@@ -116,6 +119,7 @@ struct GameSettings {
         f << "songPreview="   << (songPreview ? 1 : 0) << "\n";
         f << "cursorScale="   << cursorScale << "\n";
         f << "skinIndex="     << skinIndex << "\n";
+        f << "bgDim="         << bgDim << "\n";
         f << "activeMods="    << activeMods << "\n";
         return true;
     }

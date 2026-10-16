@@ -41,6 +41,11 @@ GRAPHICS	:=	gfx
 ROMFS		:=	romfs
 GFXBUILD	:=	$(ROMFS)/gfx
 
+APP_TITLE       := osu! 3DS Edition
+APP_DESCRIPTION := Port de osu!standard con Wi-Fi, Skins, Fondos y PP
+APP_AUTHOR      := Diyel
+ICON            := icon.png
+
 #---------------------------------------------------------------------------------
 # options for code generation
 #---------------------------------------------------------------------------------
@@ -147,17 +152,23 @@ ifneq ($(ROMFS),)
 	export _3DSXFLAGS += --romfs=$(CURDIR)/$(ROMFS)
 endif
 
-.PHONY: all clean
+.PHONY: all clean cia
 
 #---------------------------------------------------------------------------------
 all:
 	@mkdir -p $(BUILD) $(GFXBUILD)
 	@$(MAKE) --no-print-directory -C $(BUILD) -f $(CURDIR)/Makefile
+	@bannertool makebanner -i $(CURDIR)/banner.png -a $(CURDIR)/banner.wav -o $(BUILD)/banner.bnr > /dev/null
+	@rm -f $(CURDIR)/$(TARGET).cia
+	@makerom -f cia -o $(CURDIR)/$(TARGET).cia -DAPP_ENCRYPTED=false -rsf $(CURDIR)/cia.rsf -target t -exefslogo -elf $(CURDIR)/$(TARGET).elf -icon $(CURDIR)/$(TARGET).smdh -banner $(BUILD)/banner.bnr
+	@echo built ... $(TARGET).cia
+
+cia: all
 
 #---------------------------------------------------------------------------------
 clean:
 	@echo clean ...
-	@rm -fr $(BUILD) $(TARGET).3dsx $(OUTPUT).smdh $(TARGET).elf
+	@rm -fr $(BUILD) $(TARGET).3dsx $(TARGET).cia $(OUTPUT).smdh $(TARGET).elf
 
 
 #---------------------------------------------------------------------------------

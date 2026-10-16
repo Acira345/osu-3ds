@@ -261,15 +261,19 @@ inline void ensureDirectoryRecursive(const std::string& path) {
 }
 
 inline bool shouldExtractFile(const std::string& filename) {
-    // Extraer archivos de mapas (.osu), configuración de skins (.ini) y audio (.mp3, .wav, .ogg)
-    // Ignoramos PNG/JPG/MP4 pesados para mantener 60 FPS y extracción rápida en la 3DS
+    // Extraer archivos de mapas (.osu), configuración de skins (.ini), audio (.mp3, .wav, .ogg)
+    // e imágenes de fondo/skins (.jpg, .jpeg, .png), omitiendo duplicados @2x de alta resolución
     size_t dot = filename.find_last_of('.');
     if (dot == std::string::npos) return false;
-    std::string ext = filename.substr(dot);
-    for (char& c : ext) {
+    std::string lowName = filename;
+    for (char& c : lowName) {
         if (c >= 'A' && c <= 'Z') c = c - 'A' + 'a';
     }
-    return (ext == ".osu" || ext == ".ini" || ext == ".mp3" || ext == ".wav" || ext == ".ogg");
+    if (lowName.find("@2x.") != std::string::npos) return false;
+
+    std::string ext = lowName.substr(dot);
+    return (ext == ".osu" || ext == ".ini" || ext == ".mp3" || ext == ".wav" ||
+            ext == ".ogg" || ext == ".jpg" || ext == ".jpeg" || ext == ".png");
 }
 
 // Extrae un archivo .osz o .osk en destFolder usando el Central Directory del ZIP

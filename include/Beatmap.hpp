@@ -163,6 +163,8 @@ struct Beatmap {
     std::string folderPath = "";
     std::string audioFilename = "audio.mp3";
     std::string fullAudioPath = "";
+    std::string backgroundFilename = "";
+    std::string fullBackgroundPath = "";
     int audioLeadIn = 0;
     int previewTime = -1;
     float stackLeniency = 0.7f;
@@ -174,6 +176,9 @@ struct Beatmap {
     std::string version = "Normal";
 
     BeatmapDifficulty diff;
+    float starRating = 1.5f;
+    int maxPossibleCombo = 0;
+
     std::vector<TimingPoint> timingPoints;
     std::vector<RGBColor> customComboColors;
     std::vector<HitCircle> circles;
@@ -181,6 +186,12 @@ struct Beatmap {
     int circleCount = 0;
     int sliderCount = 0;
     int spinnerCount = 0;
+
+    struct StrainSample {
+        float x;
+        float y;
+        int time;
+    };
 
     static inline std::string trim(const std::string& s) {
         size_t start = s.find_first_not_of(" \t\r\n");
@@ -212,7 +223,7 @@ struct Beatmap {
         return path.substr(0, slash + 1);
     }
 
-    // Resuelve la ruta del archivo de audio buscando coincidencia exacta o insensible a mayúsculas
+    // Resuelve la ruta del archivo de audio (.mp3, .ogg, .wav) buscando coincidencia exacta o insensible a mayúsculas
     static std::string resolveAudioPath(const std::string& folder, const std::string& audioName) {
         std::string direct = folder + audioName;
         FILE* f = std::fopen(direct.c_str(), "rb");
@@ -221,7 +232,6 @@ struct Beatmap {
             return direct;
         }
 
-        // Búsqueda insensible a mayúsculas/minúsculas dentro de la carpeta
         std::string dirPath = folder;
         if (dirPath.size() > 1 && dirPath.back() == '/' && dirPath.find(":/") != dirPath.size() - 2) {
             dirPath.pop_back();
@@ -229,7 +239,7 @@ struct Beatmap {
         DIR* dir = opendir(dirPath.c_str());
         if (dir) {
             std::string targetLower = toLower(audioName);
-            std::string fallbackMp3 = "";
+            std::string fallbackAudio = "";
             struct dirent* entry;
             while ((entry = readdir(dir)) != nullptr) {
                 std::string candidate = entry->d_name;
@@ -238,17 +248,130 @@ struct Beatmap {
                     closedir(dir);
                     return folder + candidate;
                 }
-                if (fallbackMp3.empty() && candLower.size() > 4 &&
-                    candLower.substr(candLower.size() - 4) == ".mp3") {
-                    fallbackMp3 = folder + candidate;
+                if (fallbackAudio.empty() && candLower.size() > 4) {
+                    std::string ext = candLower.substr(candLower.size() - 4);
+                    if (ext == ".mp3" || ext == ".ogg") {
+                        fallbackAudio = folder + candidate;
+                    }
                 }
             }
             closedir(dir);
-            if (!fallbackMp3.empty()) return fallbackMp3;
+            if (!fallbackAudio.empty()) return fallbackAudio;
         }
 
-        // Fallback final al audio integrado en romfs
         return "romfs:/audio.mp3";
+    }
+
+    // Resuelve la ruta de la imagen de fondo (.jpg, .jpeg, .png) de la canción
+    static std::string resolveBackgroundPath(const std::string& folder, const std::string& bgName) {
+        if (folder.empty() || folder == "romfs:/") return "";
+
+        if (!bgName.empty()) {
+            std::string direct = folder + bgName;
+            FILE* f = std::fopen(direct.c_str(), "rb");
+            if (f) {
+                std::fclose(f);
+                return direct;
+            }
+        }
+
+        std::string dirPath = folder;
+        if (dirPath.size() > 1 && dirPath.back() == '/' && dirPath.find(":/") != dirPath.size() - 2) {
+            dirPath.pop_back();
+        }
+        DIR* dir = opendir(dirPath.c_str());
+        if (!dir) return "";
+
+        std::string targetLower = toLower(bgName);
+        std::string fallbackImg = "";
+        struct dirent* entry;
+        while ((entry = readdir(dir)) != nullptr) {
+            std::string candidate = entry->d_name;
+            std::string candLower = toLower(candidate);
+            if (!targetLower.empty() && candLower == targetLower) {
+                closedir(dir);
+                return folder + candidate;
+            }
+            if (fallbackImg.empty() && candLower.size() > 4) {
+                if (candLower.rfind(".jpg") == candLower.size() - 4 ||
+                    candLower.rfind(".png") == candLower.size() - 4 ||
+                    (candLower.size() > 5 && candLower.rfind(".jpeg") == candLower.size() - 5)) {
+                    fallbackImg = folder + candidate;
+                }
+            }
+        }
+        closedir(dir);
+        return fallbackImg;
+    }
+
+    // Calcula las Estrellas (★ Star Rating) estilo osu!standard analizando saltos (Aim) y velocidad (Speed)
+    float computeStarRatingFromSamples(const std::vector<StrainSample>& samples) const {
+        if (samples.size() < 2) return 1.0f;
+
+        std::vector<float> aimPeaks;
+        std::vector<float> speedPeaks;
+        aimPeaks.reserve(64);
+        speedPeaks.reserve(64);
+
+        const int sectionLen = 400;
+        int currentSectionEnd = samples.front().time + sectionLen;
+        float curAimStrain = 0.0f;
+        float curSpeedStrain = 0.0f;
+        float maxAimInSec = 0.0f;
+        float maxSpeedInSec = 0.0f;
+        float radius = std::max(22.0f, diff.radiusOsu);
+
+        for (size_t i = 1; i < samples.size(); ++i) {
+            int t = samples[i].time;
+            while (t > currentSectionEnd) {
+                aimPeaks.push_back(maxAimInSec);
+                speedPeaks.push_back(maxSpeedInSec);
+                curAimStrain *= 0.35f;
+                curSpeedStrain *= 0.35f;
+                maxAimInSec = curAimStrain;
+                maxSpeedInSec = curSpeedStrain;
+                currentSectionEnd += sectionLen;
+            }
+
+            float dt = std::max(25.0f, static_cast<float>(samples[i].time - samples[i - 1].time));
+            float dx = samples[i].x - samples[i - 1].x;
+            float dy = samples[i].y - samples[i - 1].y;
+            float dist = std::sqrt(dx * dx + dy * dy);
+
+            float decay = std::pow(0.18f, dt / 1000.0f);
+            float normDist = dist / radius;
+
+            float aimAdd = (std::pow(normDist, 0.92f) * 26.0f) / std::pow(dt, 0.56f);
+            float speedAdd = 22.0f / std::pow(std::max(45.0f, dt), 0.58f);
+
+            curAimStrain = curAimStrain * decay + aimAdd;
+            curSpeedStrain = curSpeedStrain * decay + speedAdd;
+
+            if (curAimStrain > maxAimInSec) maxAimInSec = curAimStrain;
+            if (curSpeedStrain > maxSpeedInSec) maxSpeedInSec = curSpeedStrain;
+        }
+        aimPeaks.push_back(maxAimInSec);
+        speedPeaks.push_back(maxSpeedInSec);
+
+        std::sort(aimPeaks.begin(), aimPeaks.end(), std::greater<float>());
+        std::sort(speedPeaks.begin(), speedPeaks.end(), std::greater<float>());
+
+        float aimTotal = 0.0f, speedTotal = 0.0f;
+        float w = 1.0f;
+        for (size_t i = 0; i < aimPeaks.size() && i < 64; ++i) {
+            aimTotal += aimPeaks[i] * w;
+            speedTotal += speedPeaks[i] * w;
+            w *= 0.90f;
+        }
+
+        float aimStars = std::sqrt(aimTotal) * 0.27f;
+        float speedStars = std::sqrt(speedTotal) * 0.25f;
+        float baseStars = aimStars + speedStars + std::fabs(aimStars - speedStars) * 0.35f;
+
+        // Ajuste fino según AR, OD y CS del mapa
+        float statFactor = 0.84f + (diff.od * 0.015f) + (diff.ar * 0.012f) + (diff.cs * 0.010f);
+        float finalStars = baseStars * statFactor;
+        return std::max(0.50f, std::min(12.0f, finalStars));
     }
 
     static Vec2 evalBezier(const std::vector<Vec2>& pts, float t) {
@@ -485,6 +608,8 @@ struct Beatmap {
         filePath = path;
         folderPath = extractFolder(path);
         audioFilename = "audio.mp3";
+        backgroundFilename = "";
+        fullBackgroundPath = "";
         audioLeadIn = 0;
         previewTime = -1;
         stackLeniency = 0.7f;
@@ -494,11 +619,16 @@ struct Beatmap {
         creator = "";
         version = "Normal";
         diff = BeatmapDifficulty();
+        starRating = 1.5f;
+        maxPossibleCombo = 0;
 
         timingPoints.clear();
         customComboColors.clear();
         circles.clear();
         if (!metadataOnly) circles.reserve(1024);
+
+        std::vector<StrainSample> strainSamples;
+        strainSamples.reserve(512);
 
         circleCount = 0;
         sliderCount = 0;
@@ -559,6 +689,19 @@ struct Beatmap {
                     else if (key == "SliderMultiplier")  diff.sliderMultiplier = std::strtof(val.c_str(), nullptr);
                     else if (key == "SliderTickRate")    diff.sliderTickRate = std::strtof(val.c_str(), nullptr);
                 }
+            } else if (section == "Events") {
+                if (backgroundFilename.empty() && (line.rfind("0,", 0) == 0 || line.rfind("Image,", 0) == 0)) {
+                    std::vector<std::string> ev = split(line, ',');
+                    if (ev.size() >= 3) {
+                        std::string bg = trim(ev[2]);
+                        if (bg.size() >= 2 && bg.front() == '"' && bg.back() == '"') {
+                            bg = bg.substr(1, bg.size() - 2);
+                        }
+                        size_t sl = bg.find_last_of("/\\");
+                        if (sl != std::string::npos) bg = bg.substr(sl + 1);
+                        if (!bg.empty()) backgroundFilename = bg;
+                    }
+                }
             } else if (section == "Colours") {
                 if (metadataOnly) continue;
                 size_t sep = line.find(':');
@@ -602,9 +745,21 @@ struct Beatmap {
                 bool isSlider  = (type & 2) != 0;
                 bool isSpinner = (type & 8) != 0;
 
-                if (isCircle)  circleCount++;
-                if (isSlider)  sliderCount++;
-                if (isSpinner) spinnerCount++;
+                if (isCircle)  { circleCount++;  maxPossibleCombo += 1; }
+                if (isSpinner) { spinnerCount++; maxPossibleCombo += 1; }
+                if (isSlider)  {
+                    sliderCount++;
+                    int reps = (tokens.size() >= 7) ? std::max(1, std::atoi(tokens[6].c_str())) : 1;
+                    maxPossibleCombo += 1 + reps;
+                }
+
+                if (isCircle || isSlider) {
+                    strainSamples.push_back({
+                        std::strtof(tokens[0].c_str(), nullptr),
+                        std::strtof(tokens[1].c_str(), nullptr),
+                        std::atoi(tokens[2].c_str())
+                    });
+                }
 
                 if (metadataOnly) continue;
 
@@ -635,7 +790,6 @@ struct Beatmap {
                         c.y = 192.0f;
                         c.endTime = std::max(c.time + 100, std::atoi(tokens[5].c_str()));
                         float durSec = static_cast<float>(c.endTime - c.time) / 1000.0f;
-                        // Aproximadamente 2.5 vueltas completas por segundo
                         c.spinnerRequiredRads = std::max(6.28f, durSec * 2.2f * 6.283185f);
                     } else if (isSlider && tokens.size() >= 8) {
                         std::vector<std::string> pts = split(tokens[5], '|');
@@ -673,7 +827,6 @@ struct Beatmap {
                                 }
                             }
                         } else {
-                            // Curva Bézier (o fallback para P con != 3 puntos)
                             std::vector<Vec2> sub;
                             for (size_t i = 0; i < ctrlPts.size(); ++i) {
                                 if (!sub.empty() && sub.back().x == ctrlPts[i].x && sub.back().y == ctrlPts[i].y) {
@@ -703,7 +856,6 @@ struct Beatmap {
                         c.pixelLength = std::strtof(tokens[7].c_str(), nullptr);
                         c.sliderPath = resampleToLength(rawPoly, c.pixelLength);
 
-                        // Edge Hitsounds opcionales (tokens[8])
                         if (tokens.size() >= 9 && !tokens[8].empty()) {
                             std::vector<std::string> edges = split(tokens[8], '|');
                             for (const auto& e : edges) {
@@ -718,7 +870,6 @@ struct Beatmap {
                         float slideDuration = (c.pixelLength / (100.0f * diff.sliderMultiplier * svMult)) * beatLen;
                         c.endTime = c.time + static_cast<int>(slideDuration * c.repeats);
 
-                        // Generar Slider Ticks intermedios según SliderTickRate
                         float tickIntervalMs = (diff.sliderTickRate > 0.1f) ? (beatLen / diff.sliderTickRate) : beatLen;
                         if (tickIntervalMs >= 40.0f && slideDuration > tickIntervalMs * 1.15f) {
                             for (int rep = 0; rep < c.repeats; ++rep) {
@@ -730,6 +881,7 @@ struct Beatmap {
                                         : (spanEnd - static_cast<int>(tOffset));
                                     Vec2 pos = c.getSliderBallPos(tickTime);
                                     c.sliderTicks.push_back(SliderTick(pos.x, pos.y, tickTime));
+                                    maxPossibleCombo++;
                                 }
                             }
                         }
@@ -741,6 +893,8 @@ struct Beatmap {
 
         diff.calculateDerivedValues();
         fullAudioPath = resolveAudioPath(folderPath, audioFilename);
+        fullBackgroundPath = resolveBackgroundPath(folderPath, backgroundFilename);
+        starRating = computeStarRatingFromSamples(strainSamples);
 
         if (!metadataOnly) {
             applyStacking();

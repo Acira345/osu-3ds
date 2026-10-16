@@ -12,10 +12,13 @@ struct BeatmapEntry {
     std::string version;
     std::string creator;
     std::string audioPath;
+    std::string backgroundPath;
     float cs = 4.0f;
     float ar = 5.0f;
     float od = 5.0f;
     float hp = 5.0f;
+    float starRating = 1.5f;
+    int maxPossibleCombo = 0;
     int circleCount = 0;
     int sliderCount = 0;
     int spinnerCount = 0;
@@ -25,7 +28,7 @@ struct BeatmapEntry {
     }
 
     float difficultyRating() const {
-        return (ar * 1.4f + od * 1.2f + cs * 0.8f) + (totalObjects() * 0.005f);
+        return starRating;
     }
 };
 
@@ -33,6 +36,7 @@ struct BeatmapSet {
     std::string title;
     std::string artist;
     std::string folderPath;
+    std::string backgroundPath;
     bool fromRomfs = false;
     std::vector<BeatmapEntry> difficulties;
 };
@@ -65,11 +69,11 @@ public:
         scanRootFolder("sdmc:/osu-3ds/songs/", false);
         scanRootFolder("romfs:/", true);
 
-        // 4. Ordenar dificultades dentro de cada canción y ordenar canciones alfabéticamente
+        // 4. Ordenar dificultades por Estrellas (★) y canciones alfabéticamente
         for (auto& set : sets) {
             std::sort(set.difficulties.begin(), set.difficulties.end(),
                 [](const BeatmapEntry& a, const BeatmapEntry& b) {
-                    return a.difficultyRating() < b.difficultyRating();
+                    return a.starRating < b.starRating;
                 }
             );
         }
@@ -96,32 +100,39 @@ private:
         if (meta.mode != 0) return;
 
         BeatmapEntry entry;
-        entry.osuPath      = osuPath;
-        entry.version      = meta.version;
-        entry.creator      = meta.creator;
-        entry.audioPath    = meta.fullAudioPath;
-        entry.cs           = meta.diff.cs;
-        entry.ar           = meta.diff.ar;
-        entry.od           = meta.diff.od;
-        entry.hp           = meta.diff.hp;
-        entry.circleCount  = meta.circleCount;
-        entry.sliderCount  = meta.sliderCount;
-        entry.spinnerCount = meta.spinnerCount;
+        entry.osuPath          = osuPath;
+        entry.version          = meta.version;
+        entry.creator          = meta.creator;
+        entry.audioPath        = meta.fullAudioPath;
+        entry.backgroundPath   = meta.fullBackgroundPath;
+        entry.cs               = meta.diff.cs;
+        entry.ar               = meta.diff.ar;
+        entry.od               = meta.diff.od;
+        entry.hp               = meta.diff.hp;
+        entry.starRating       = meta.starRating;
+        entry.maxPossibleCombo = std::max(1, meta.maxPossibleCombo);
+        entry.circleCount      = meta.circleCount;
+        entry.sliderCount      = meta.sliderCount;
+        entry.spinnerCount     = meta.spinnerCount;
 
         // Agrupar por título y carpeta
         std::string keyTitle = Beatmap::toLower(meta.title);
         for (auto& set : sets) {
             if (set.folderPath == meta.folderPath && Beatmap::toLower(set.title) == keyTitle) {
+                if (set.backgroundPath.empty() && !entry.backgroundPath.empty()) {
+                    set.backgroundPath = entry.backgroundPath;
+                }
                 set.difficulties.push_back(entry);
                 return;
             }
         }
 
         BeatmapSet newSet;
-        newSet.title      = meta.title;
-        newSet.artist     = meta.artist;
-        newSet.folderPath = meta.folderPath;
-        newSet.fromRomfs  = isRomfs;
+        newSet.title          = meta.title;
+        newSet.artist         = meta.artist;
+        newSet.folderPath     = meta.folderPath;
+        newSet.backgroundPath = entry.backgroundPath;
+        newSet.fromRomfs      = isRomfs;
         newSet.difficulties.push_back(entry);
         sets.push_back(newSet);
     }

@@ -8,6 +8,9 @@
 #define MINIMP3_IMPLEMENTATION
 #include "minimp3_ex.h"
 
+#define STB_VORBIS_HEADER_ONLY
+#include "stb_vorbis.h"
+
 constexpr size_t AUDIO_BUFFER_FRAMES = 4096;
 
 struct WavSample {
@@ -30,6 +33,9 @@ struct WavSample {
 class AudioPlayer {
 private:
     mp3dec_ex_t mp3;
+    stb_vorbis* vorbisStream = nullptr;
+    bool usingVorbis = false;
+
     bool dspReady = false;
     bool isLoaded = false;
     bool isPlaying = false;
@@ -67,7 +73,56 @@ private:
         ndspChnSetMix(chn, mix);
     }
 
+    static bool hasOggHeaderOrExt(const std::string& path) {
+        if (path.size() >= 4) {
+            std::string ext = path.substr(path.size() - 4);
+            for (char& c : ext) if (c >= 'A' && c <= 'Z') c = c - 'A' + 'a';
+            if (ext == ".ogg") return true;
+        }
+        FILE* f = std::fopen(path.c_str(), "rb");
+        if (!f) return false;
+        char magic[4] = {0};
+        size_t n = std::fread(magic, 1, 4, f);
+        std::fclose(f);
+        return (n == 4 && std::memcmp(magic, "OggS", 4) == 0);
+    }
+
+    bool loadOggSample(const std::string& path, WavSample& out) {
+        int ch = 0, rate = 0;
+        short* decoded = nullptr;
+        int frames = stb_vorbis_decode_filename(path.c_str(), &ch, &rate, &decoded);
+        if (frames <= 0 || !decoded || ch <= 0) {
+            if (decoded) free(decoded);
+            return false;
+        }
+
+        u32 totalBytes = static_cast<u32>(frames) * static_cast<u32>(ch) * sizeof(s16);
+        if (totalBytes > 2 * 1024 * 1024) {
+            free(decoded);
+            return false;
+        }
+
+        out.freeData();
+        out.data = static_cast<u8*>(linearAlloc(totalBytes));
+        if (out.data) {
+            std::memcpy(out.data, decoded, totalBytes);
+            DSP_FlushDataCache(out.data, totalBytes);
+            out.byteSize = totalBytes;
+            out.nsamples = static_cast<u32>(frames);
+            out.sampleRate = static_cast<u32>(rate);
+            out.channels = static_cast<u16>(ch);
+            out.bitsPerSample = 16;
+        }
+        free(decoded);
+        return out.data != nullptr;
+    }
+
     bool loadWavFile(const std::string& path, WavSample& out) {
+        if (path.empty()) return false;
+        if (hasOggHeaderOrExt(path)) {
+            return loadOggSample(path, out);
+        }
+
         FILE* f = std::fopen(path.c_str(), "rb");
         if (!f) return false;
 
@@ -97,7 +152,6 @@ private:
                 std::fread(&out.bitsPerSample, 2, 1, f);
                 if (chunkSize > 16) std::fseek(f, chunkSize - 16, SEEK_CUR);
             } else if (std::memcmp(chunkId, "data", 4) == 0) {
-                // Solo PCM sin comprimir (formato 1) y 8/16 bits soportados por NDSP
                 if (audioFormat != 1 || (out.bitsPerSample != 8 && out.bitsPerSample != 16) || chunkSize > 2 * 1024 * 1024) {
                     break;
                 }
@@ -208,15 +262,41 @@ public:
 
     bool startMusic(const std::string& filepath, int leadInMs = 0, float rate = 1.0f) {
         stopMusic();
+        if (filepath.empty()) return false;
         if (!dspReady && !initDSPAndHitsounds()) return false;
 
-        if (mp3dec_ex_open(&mp3, filepath.c_str(), MP3D_DO_NOT_SCAN) != 0) {
-            return false;
+        usingVorbis = false;
+        vorbisStream = nullptr;
+
+        bool tryOggFirst = hasOggHeaderOrExt(filepath);
+        if (tryOggFirst) {
+            int err = 0;
+            vorbisStream = stb_vorbis_open_filename(filepath.c_str(), &err, nullptr);
+            if (vorbisStream) {
+                stb_vorbis_info vinfo = stb_vorbis_get_info(vorbisStream);
+                sampleRate = (vinfo.sample_rate > 0) ? vinfo.sample_rate : 44100;
+                musicChannels = (vinfo.channels == 1) ? 1 : 2;
+                usingVorbis = true;
+            }
+        }
+
+        if (!usingVorbis) {
+            if (mp3dec_ex_open(&mp3, filepath.c_str(), MP3D_DO_NOT_SCAN) == 0 && mp3.info.hz > 0) {
+                sampleRate = static_cast<u32>(mp3.info.hz);
+                musicChannels = (mp3.info.channels == 1) ? 1 : 2;
+            } else {
+                // Fallback a Ogg Vorbis por si el archivo tiene extensión .mp3 pero contenido .ogg
+                int err = 0;
+                vorbisStream = stb_vorbis_open_filename(filepath.c_str(), &err, nullptr);
+                if (!vorbisStream) return false;
+                stb_vorbis_info vinfo = stb_vorbis_get_info(vorbisStream);
+                sampleRate = (vinfo.sample_rate > 0) ? vinfo.sample_rate : 44100;
+                musicChannels = (vinfo.channels == 1) ? 1 : 2;
+                usingVorbis = true;
+            }
         }
 
         loadedMusicPath = filepath;
-        sampleRate = (mp3.info.hz > 0) ? static_cast<u32>(mp3.info.hz) : 44100;
-        musicChannels = (mp3.info.channels == 1) ? 1 : 2;
         speedRate = std::max(0.5f, std::min(2.0f, rate));
         isLoaded = true;
         isPaused = false;
@@ -276,7 +356,19 @@ public:
     void fillAndPlayBuffer(int index) {
         if (!isLoaded || eofReached) return;
         size_t samplesToRead = AUDIO_BUFFER_FRAMES * musicChannels;
-        size_t samplesRead = mp3dec_ex_read(&mp3, audioBuffer[index], samplesToRead);
+        size_t samplesRead = 0;
+
+        if (usingVorbis && vorbisStream) {
+            int frames = stb_vorbis_get_samples_short_interleaved(
+                vorbisStream, musicChannels, audioBuffer[index], static_cast<int>(samplesToRead)
+            );
+            if (frames > 0) {
+                samplesRead = static_cast<size_t>(frames) * musicChannels;
+            }
+        } else {
+            samplesRead = mp3dec_ex_read(&mp3, audioBuffer[index], samplesToRead);
+        }
+
         if (samplesRead == 0) {
             eofReached = true;
             return;
@@ -337,7 +429,15 @@ public:
             inLeadIn = false;
             loadedMusicPath = "";
             ndspChnReset(musicChannel);
-            mp3dec_ex_close(&mp3);
+            if (usingVorbis) {
+                if (vorbisStream) {
+                    stb_vorbis_close(vorbisStream);
+                    vorbisStream = nullptr;
+                }
+                usingVorbis = false;
+            } else {
+                mp3dec_ex_close(&mp3);
+            }
             if (audioBuffer[0]) { linearFree(audioBuffer[0]); audioBuffer[0] = nullptr; }
             if (audioBuffer[1]) { linearFree(audioBuffer[1]); audioBuffer[1] = nullptr; }
             isLoaded = false;

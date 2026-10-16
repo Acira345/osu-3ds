@@ -30,6 +30,12 @@ struct SkinProfile {
     std::string hitNormalWav  = "romfs:/drum-hitnormal2.wav";
     std::string hitWhistleWav = "romfs:/drum-hitwhistle2.wav";
     std::string hitClapWav    = "romfs:/drum-hitclap2.wav";
+
+    // Sprites PNG opcionales de skins personalizados (.osk)
+    std::string cursorPng           = "";
+    std::string hitCirclePng        = "";
+    std::string hitCircleOverlayPng = "";
+    std::string approachCirclePng   = "";
 };
 
 class SkinManager {
@@ -253,22 +259,32 @@ private:
             };
         }
 
-        // Resolver hitsounds reales (.wav) del skin en la SD
+        // Resolver hitsounds reales (.wav o .ogg) del skin en la SD
         s.hitNormalWav = findWavInSkinFolder(folderPath, {
             "soft-hitnormal.wav", "normal-hitnormal.wav", "drum-hitnormal.wav",
+            "soft-hitnormal.ogg", "normal-hitnormal.ogg", "drum-hitnormal.ogg",
             "soft-hitnormal2.wav", "normal-hitnormal2.wav", "drum-hitnormal2.wav"
         }, "romfs:/drum-hitnormal2.wav");
 
         s.hitWhistleWav = findWavInSkinFolder(folderPath, {
             "soft-hitwhistle.wav", "normal-hitwhistle.wav", "drum-hitwhistle.wav",
+            "soft-hitwhistle.ogg", "normal-hitwhistle.ogg", "drum-hitwhistle.ogg",
             "soft-hitwhistle2.wav", "normal-hitwhistle2.wav", "drum-hitwhistle2.wav"
         }, "romfs:/drum-hitwhistle2.wav");
 
         s.hitClapWav = findWavInSkinFolder(folderPath, {
             "soft-hitclap.wav", "normal-hitclap.wav", "drum-hitclap.wav",
+            "soft-hitclap.ogg", "normal-hitclap.ogg", "drum-hitclap.ogg",
             "soft-hitfinish.wav", "normal-hitfinish.wav", "drum-hitfinish.wav",
+            "soft-hitfinish.ogg", "normal-hitfinish.ogg", "drum-hitfinish.ogg",
             "soft-hitclap2.wav", "normal-hitclap2.wav", "drum-hitclap2.wav"
         }, "romfs:/drum-hitclap2.wav");
+
+        // Resolver sprites PNG opcionales del skin
+        s.cursorPng           = findWavInSkinFolder(folderPath, {"cursor.png"}, "");
+        s.hitCirclePng        = findWavInSkinFolder(folderPath, {"hitcircle.png"}, "");
+        s.hitCircleOverlayPng = findWavInSkinFolder(folderPath, {"hitcircleoverlay.png"}, "");
+        s.approachCirclePng   = findWavInSkinFolder(folderPath, {"approachcircle.png"}, "");
 
         skins.push_back(s);
     }
