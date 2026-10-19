@@ -128,7 +128,8 @@ Port personalizado del popular juego de ritmo **osu!** para la familia de consol
 Escanea el siguiente código QR desde la aplicación **FBI** en tu consola (`Remote Install` ➔ `Scan QR Code`) para descargar e instalar el archivo `.cia` directamente vía Wi-Fi:
 
 <div align="center">
-  <img width="1113" height="1113" alt="Osu V2 0" src="https://github.com/user-attachments/assets/b9bbb387-ed86-423d-9a82-f9fffcaf4e5a" />
+ <img width="1113" height="1113" alt="Osu V3 0" src="https://github.com/user-attachments/assets/dbb37071-697e-4ec8-aa1e-6b1535820442" />
+
 
   <p><i>Requiere conexión Wi-Fi activa y Custom Firmware (Luma3DS).</i></p>
 </div>
