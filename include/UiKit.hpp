@@ -3,6 +3,7 @@
 #include <citro2d.h>
 #include <cmath>
 #include <algorithm>
+#include <vector>
 
 // Kit visual estilo osu! lazer: degradados, tarjetas inclinadas, triangulos flotantes, brillos y pildoras.
 namespace Ui {
@@ -107,6 +108,113 @@ inline void statBar(float x, float y, float w, float h, float z, float ratio, u3
     ratio = std::max(0.0f, std::min(1.0f, ratio));
     C2D_DrawRectSolid(x, y, z, w, h, rgba(10, 9, 16, 255));
     if (ratio > 0.0f) gradH(x, y, w * ratio, h, z + 0.01f, brighten(fillClr, 0.65f), fillClr);
+}
+
+// Slider interactivo estilo osu!lazer con pista redondeada y pomo circular brillante
+inline void sliderBar(float x, float y, float w, float h, float z, float ratio, u32 fillClr, bool active = false) {
+    ratio = std::max(0.0f, std::min(1.0f, ratio));
+    pill(x, y, w, h, z, rgba(12, 10, 20, 240));
+    float fillW = std::max(h, w * ratio);
+    if (ratio > 0.01f) {
+        pill(x, y, fillW, h, z + 0.01f, fillClr);
+    }
+    float knobX = x + h * 0.5f + (w - h) * ratio;
+    float knobY = y + h * 0.5f;
+    float knobR = h * 0.72f + (active ? 1.2f : 0.0f);
+    if (active) {
+        glow(knobX, knobY, z + 0.015f, knobR * 1.8f, withAlpha(fillClr, 140), 3);
+    }
+    C2D_DrawCircleSolid(knobX, knobY, z + 0.02f, knobR, active ? rgba(255, 255, 255, 255) : fillClr);
+    C2D_DrawCircleSolid(knobX, knobY, z + 0.025f, knobR * 0.48f, active ? fillClr : rgba(255, 255, 255, 235));
+}
+
+// Interruptor ON/OFF estilo osu!lazer (pildora con circulo deslizante)
+inline void toggleSwitch(float x, float y, float w, float h, float z, bool isOn, u32 onClr) {
+    u32 trackClr = isOn ? onClr : rgba(38, 34, 58, 240);
+    pill(x, y, w, h, z, trackClr);
+    float r = (h * 0.5f) - 2.0f;
+    float cx = isOn ? (x + w - (h * 0.5f)) : (x + (h * 0.5f));
+    float cy = y + h * 0.5f;
+    if (isOn) {
+        glow(cx, cy, z + 0.01f, r * 1.9f, withAlpha(onClr, 130), 3);
+    }
+    C2D_DrawCircleSolid(cx, cy, z + 0.02f, r, isOn ? rgba(255, 255, 255, 255) : rgba(155, 150, 180, 255));
+}
+
+// Cortina / fundido suave de transicion entre pantallas estilo osu! lazer
+inline void drawTransition(float w, float h, float fade, u32 accentClr) {
+    if (fade <= 0.01f) return;
+    float t = std::max(0.0f, std::min(1.0f, fade));
+    u8 a = static_cast<u8>(t * 235.0f);
+    C2D_DrawRectSolid(0.0f, 0.0f, 0.995f, w, h, rgba(12, 10, 22, a));
+    float barW = w * t * 0.45f;
+    slantRectGrad(-24.0f, 0.0f, barW + 24.0f, h, 24.0f, 0.997f,
+                  withAlpha(accentClr, static_cast<u8>(t * 180.0f)),
+                  withAlpha(accentClr, 0));
+}
+
+// Gráfico de densidad / dificultad estilo osu!lazer
+inline void strainGraph(float x, float y, float w, float h, float z,
+                        const std::vector<float>& graph, u32 accentClr,
+                        float playhead = -1.0f, float alphaMult = 1.0f) {
+    if (graph.size() < 2 || w <= 4.0f || h <= 4.0f) return;
+
+    // Panel de fondo sutil
+    C2D_DrawRectSolid(x, y, z, w, h, rgba(14, 11, 24, clamp8(185.0f * alphaMult)));
+    C2D_DrawRectSolid(x, y + h - 1.0f, z + 0.005f, w, 1.0f, rgba(48, 40, 72, clamp8(200.0f * alphaMult)));
+
+    // Líneas de referencia sutiles (25%, 50%, 75%)
+    for (int r = 1; r <= 3; ++r) {
+        float ry = y + h - (h * 0.25f * r);
+        C2D_DrawLine(x + 2.0f, ry, rgba(255, 255, 255, clamp8(18.0f * alphaMult)),
+                     x + w - 2.0f, ry, rgba(255, 255, 255, clamp8(18.0f * alphaMult)), 1.0f, z + 0.002f);
+    }
+
+    size_t n = graph.size();
+    float step = (w - 2.0f) / static_cast<float>(n - 1);
+    float baseY = y + h - 1.0f;
+
+    u32 topFillClr = withAlpha(brighten(accentClr, 1.15f), clamp8(180.0f * alphaMult));
+    u32 botFillClr = withAlpha(accentClr, clamp8(35.0f * alphaMult));
+    u32 ridgeClr   = withAlpha(brighten(accentClr, 1.45f), clamp8(245.0f * alphaMult));
+
+    // Dibujar área rellena de la curva como quads/triángulos
+    for (size_t i = 0; i + 1 < n; ++i) {
+        float x0 = x + 1.0f + i * step;
+        float x1 = x + 1.0f + (i + 1) * step;
+        float y0 = baseY - (std::max(0.04f, std::min(1.0f, graph[i])) * (h - 4.0f));
+        float y1 = baseY - (std::max(0.04f, std::min(1.0f, graph[i + 1])) * (h - 4.0f));
+
+        // Gradiente vertical dentro de la silueta montañosa
+        C2D_DrawTriangle(x0, y0, topFillClr, x1, y1, topFillClr, x0, baseY, botFillClr, z + 0.01f);
+        C2D_DrawTriangle(x1, y1, topFillClr, x1, baseY, botFillClr, x0, baseY, botFillClr, z + 0.01f);
+
+        // Línea de cresta superior brillante
+        C2D_DrawLine(x0, y0, ridgeClr, x1, y1, ridgeClr, 1.6f, z + 0.02f);
+    }
+
+    // Indicador de posición / Playhead (si está activo)
+    if (playhead >= 0.0f && playhead <= 1.0f) {
+        float px = x + 1.0f + playhead * (w - 2.0f);
+        float pPos = playhead * static_cast<float>(n - 1);
+        size_t pIdx = static_cast<size_t>(pPos);
+        float pFrac = pPos - static_cast<float>(pIdx);
+        float v0 = graph[std::min(pIdx, n - 1)];
+        float v1 = graph[std::min(pIdx + 1, n - 1)];
+        float py = baseY - ((v0 * (1.0f - pFrac) + v1 * pFrac) * (h - 4.0f));
+
+        C2D_DrawLine(px, y, rgba(255, 255, 255, clamp8(140.0f * alphaMult)),
+                     px, baseY, rgba(255, 255, 255, clamp8(220.0f * alphaMult)), 1.2f, z + 0.03f);
+
+        glow(px, py, z + 0.035f, 5.0f, withAlpha(accentClr, clamp8(180.0f * alphaMult)), 3);
+        C2D_DrawCircleSolid(px, py, z + 0.04f, 2.5f, rgba(255, 255, 255, clamp8(255.0f * alphaMult)));
+    }
+
+    // Borde exterior
+    C2D_DrawLine(x, y, rgba(60, 52, 90, clamp8(160.0f * alphaMult)), x + w, y, rgba(60, 52, 90, clamp8(160.0f * alphaMult)), 1.0f, z + 0.025f);
+    C2D_DrawLine(x, baseY, rgba(60, 52, 90, clamp8(160.0f * alphaMult)), x + w, baseY, rgba(60, 52, 90, clamp8(160.0f * alphaMult)), 1.0f, z + 0.025f);
+    C2D_DrawLine(x, y, rgba(60, 52, 90, clamp8(160.0f * alphaMult)), x, baseY, rgba(60, 52, 90, clamp8(160.0f * alphaMult)), 1.0f, z + 0.025f);
+    C2D_DrawLine(x + w, y, rgba(60, 52, 90, clamp8(160.0f * alphaMult)), x + w, baseY, rgba(60, 52, 90, clamp8(160.0f * alphaMult)), 1.0f, z + 0.025f);
 }
 
 } // namespace Ui

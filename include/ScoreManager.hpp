@@ -8,31 +8,42 @@
 #include "Beatmap.hpp"
 #include "OszExtractor.hpp"
 
-// Máscara de bits para Mods estilo osu!
+// Máscara de bits para Mods estilo osu!lazer
 enum ModFlags : uint32_t {
     MOD_NONE = 0,
-    MOD_NF   = (1u << 0), // No Fail     (0.50x)
-    MOD_EZ   = (1u << 1), // Easy        (0.50x)
-    MOD_HT   = (1u << 2), // Half Time   (0.30x, 0.75x velocidad)
-    MOD_HR   = (1u << 3), // Hard Rock   (1.06x, invierte Y y sube CS/AR/OD/HP)
-    MOD_DT   = (1u << 4), // Double Time (1.12x, 1.50x velocidad)
-    MOD_HD   = (1u << 5), // Hidden      (1.06x, desaparece el círculo y sin anillo de aproximación)
-    MOD_AUTO = (1u << 6)  // Autoplay    (Bot perfecto de demostración)
+    MOD_NF   = (1u << 0),  // No Fail     (0.50x)
+    MOD_EZ   = (1u << 1),  // Easy        (0.50x)
+    MOD_HT   = (1u << 2),  // Half Time   (0.30x, 0.75x velocidad)
+    MOD_HR   = (1u << 3),  // Hard Rock   (1.06x, invierte Y y sube CS/AR/OD/HP)
+    MOD_DT   = (1u << 4),  // Double Time (1.12x, 1.50x velocidad)
+    MOD_HD   = (1u << 5),  // Hidden      (1.06x, desaparece el círculo y sin anillo de aproximación)
+    MOD_AUTO = (1u << 6),  // Autoplay    (0.00x, Bot perfecto de demostración)
+    MOD_SD   = (1u << 7),  // SuddenDeath (1.00x, 1 fallo = fail instantaneo)
+    MOD_PF   = (1u << 8),  // Perfect     (1.00x, solo 300s, 100/50/fallo = fail)
+    MOD_FL   = (1u << 9),  // Flashlight  (1.12x, linterna focal sobre el stylus)
+    MOD_RX   = (1u << 10), // Relax       (0.00x, solo apunta, timing automatico)
+    MOD_AP   = (1u << 11), // AutoPilot   (0.00x, solo ritmo, apuntado automatico)
+    MOD_SO   = (1u << 12), // Spun Out    (0.90x, spinners automaticos)
+    MOD_MR   = (1u << 13), // Mirror      (1.00x, espejo horizontal de notas)
+    MOD_NC   = (1u << 14)  // Nightcore   (1.12x, velocidad 1.50x con ritmo dance)
 };
 
 inline float getModsScoreMultiplier(uint32_t mods) {
+    if (mods & (MOD_AUTO | MOD_RX | MOD_AP)) return 0.0f;
     float mult = 1.0f;
     if (mods & MOD_NF) mult *= 0.50f;
     if (mods & MOD_EZ) mult *= 0.50f;
     if (mods & MOD_HT) mult *= 0.30f;
+    if (mods & MOD_SO) mult *= 0.90f;
     if (mods & MOD_HR) mult *= 1.06f;
-    if (mods & MOD_DT) mult *= 1.12f;
+    if (mods & (MOD_DT | MOD_NC)) mult *= 1.12f;
     if (mods & MOD_HD) mult *= 1.06f;
+    if (mods & MOD_FL) mult *= 1.12f;
     return mult;
 }
 
 inline float getModsSpeedMultiplier(uint32_t mods) {
-    if (mods & MOD_DT) return 1.50f;
+    if (mods & (MOD_DT | MOD_NC)) return 1.50f;
     if (mods & MOD_HT) return 0.75f;
     return 1.0f;
 }
@@ -42,7 +53,8 @@ inline float getModAdjustedStars(float baseStars, uint32_t mods) {
     if (mods & MOD_EZ) s *= 0.80f;
     if (mods & MOD_HR) s *= 1.10f;
     if (mods & MOD_HT) s *= 0.76f;
-    if (mods & MOD_DT) s *= 1.36f;
+    if (mods & (MOD_DT | MOD_NC)) s *= 1.36f;
+    if (mods & MOD_FL) s *= 1.15f;
     return std::max(0.50f, std::min(15.0f, s));
 }
 
@@ -57,7 +69,7 @@ inline float calculatePP(float baseStars, float ar, float od, int achievedCombo,
     float adjAR = ar;
     if (mods & MOD_EZ) { adjOD *= 0.5f; adjAR *= 0.5f; }
     if (mods & MOD_HR) { adjOD = std::min(10.0f, adjOD * 1.4f); adjAR = std::min(10.0f, adjAR * 1.4f); }
-    if (mods & MOD_DT) { adjOD = std::min(11.0f, adjOD * 1.15f); adjAR = std::min(11.0f, adjAR * 1.15f); }
+    if (mods & (MOD_DT | MOD_NC)) { adjOD = std::min(11.0f, adjOD * 1.15f); adjAR = std::min(11.0f, adjAR * 1.15f); }
     if (mods & MOD_HT) { adjOD *= 0.85f; adjAR *= 0.85f; }
 
     float accRatio = (c300 * 300.0f + c100 * 100.0f + c50 * 50.0f) / (static_cast<float>(totalHits) * 300.0f);
@@ -87,7 +99,9 @@ inline float calculatePP(float baseStars, float ar, float od, int achievedCombo,
 
     float modMult = 1.0f;
     if (mods & MOD_HD) modMult *= (1.05f + 0.01f * (10.0f - std::min(10.0f, adjAR)));
+    if (mods & MOD_FL) modMult *= 1.15f;
     if (mods & MOD_NF) modMult *= std::max(0.50f, 1.0f - 0.02f * cMiss);
+    if (mods & (MOD_AUTO | MOD_RX | MOD_AP)) modMult = 0.0f;
 
     float totalPP = (baseVal * comboMult * missPenalty * (0.35f + 0.65f * accMult) * arFactor + accBonusPP) * modMult;
     return std::max(0.0f, totalPP);
@@ -104,8 +118,16 @@ inline std::string formatModsString(uint32_t mods) {
     if (mods & MOD_NF)   add("NF");
     if (mods & MOD_HT)   add("HT");
     if (mods & MOD_HR)   add("HR");
+    if (mods & MOD_SD)   add("SD");
+    if (mods & MOD_PF)   add("PF");
     if (mods & MOD_DT)   add("DT");
+    if (mods & MOD_NC)   add("NC");
     if (mods & MOD_HD)   add("HD");
+    if (mods & MOD_FL)   add("FL");
+    if (mods & MOD_RX)   add("RX");
+    if (mods & MOD_AP)   add("AP");
+    if (mods & MOD_SO)   add("SO");
+    if (mods & MOD_MR)   add("MR");
     if (mods & MOD_AUTO) add("AUTO");
     return s;
 }
@@ -118,6 +140,7 @@ struct ScoreRecord {
     std::string bestGrade = "D";
     uint32_t bestMods = 0;
     float bestPP = 0.0f;
+    int mode = 0; // 0: Standard, 1: Taiko, 2: Catch, 3: Mania
 };
 
 class ScoreManager {
@@ -149,6 +172,7 @@ public:
                 rec.bestGrade = parts[4];
                 rec.bestMods  = static_cast<uint32_t>(std::atoi(parts[5].c_str()));
                 rec.bestPP    = (parts.size() >= 7) ? std::strtof(parts[6].c_str(), nullptr) : 0.0f;
+                rec.mode      = (parts.size() >= 8) ? std::atoi(parts[7].c_str()) : 0;
                 records.push_back(rec);
             }
         }
@@ -166,52 +190,76 @@ public:
               << r.bestAcc << "|"
               << r.bestGrade << "|"
               << r.bestMods << "|"
-              << r.bestPP << "\n";
+              << r.bestPP << "|"
+              << r.mode << "\n";
         }
     }
 
-    const ScoreRecord* getRecord(const std::string& osuPath) const {
+    const ScoreRecord* getRecord(const std::string& osuPath, int mode = -1) const {
         std::string key = makeKey(osuPath);
+        const ScoreRecord* best = nullptr;
         for (const auto& r : records) {
-            if (r.osuKey == key) return &r;
+            if (r.osuKey == key && (mode < 0 || r.mode == mode)) {
+                if (!best || r.bestScore > best->bestScore) {
+                    best = &r;
+                }
+            }
         }
-        return nullptr;
+        return best;
+    }
+
+    std::vector<ScoreRecord> getTopRecords(const std::string& osuPath, int maxCount = 10, int mode = -1) const {
+        std::string key = makeKey(osuPath);
+        std::vector<ScoreRecord> result;
+        for (const auto& r : records) {
+            if (r.osuKey == key && (mode < 0 || r.mode == mode)) {
+                result.push_back(r);
+            }
+        }
+        std::sort(result.begin(), result.end(), [](const ScoreRecord& a, const ScoreRecord& b) {
+            return a.bestScore > b.bestScore;
+        });
+        if (static_cast<int>(result.size()) > maxCount) {
+            result.resize(maxCount);
+        }
+        return result;
     }
 
     // Guarda el récord si supera la puntuación o PP anterior (y no se usó Autoplay)
-    bool submitScore(const std::string& osuPath, int score, int maxCombo, float acc, const std::string& grade, uint32_t mods, float pp) {
+    bool submitScore(const std::string& osuPath, int score, int maxCombo, float acc, const std::string& grade, uint32_t mods, float pp, int mode = 0) {
         if (mods & MOD_AUTO) return false;
         std::string key = makeKey(osuPath);
-        for (auto& r : records) {
-            if (r.osuKey == key) {
-                bool improved = false;
-                if (pp > r.bestPP) {
-                    r.bestPP = pp;
-                    improved = true;
-                }
-                if (score > r.bestScore) {
-                    r.bestScore = score;
-                    r.bestCombo = maxCombo;
-                    r.bestAcc   = acc;
-                    r.bestGrade = grade;
-                    r.bestMods  = mods;
-                    improved = true;
-                }
-                if (improved) save();
-                return improved;
-            }
-        }
 
-        ScoreRecord rec;
-        rec.osuKey    = key;
-        rec.bestScore = score;
-        rec.bestCombo = maxCombo;
-        rec.bestAcc   = acc;
-        rec.bestGrade = grade;
-        rec.bestMods  = mods;
-        rec.bestPP    = pp;
-        records.push_back(rec);
+        ScoreRecord newRec;
+        newRec.osuKey    = key;
+        newRec.bestScore = score;
+        newRec.bestCombo = maxCombo;
+        newRec.bestAcc   = acc;
+        newRec.bestGrade = grade;
+        newRec.bestMods  = mods;
+        newRec.bestPP    = pp;
+        newRec.mode      = mode;
+
+        const ScoreRecord* prevBest = getRecord(osuPath, mode);
+        bool improved = (!prevBest || score > prevBest->bestScore);
+
+        std::vector<ScoreRecord> mapRecords = getTopRecords(osuPath, 10, mode);
+        mapRecords.push_back(newRec);
+        std::sort(mapRecords.begin(), mapRecords.end(), [](const ScoreRecord& a, const ScoreRecord& b) {
+            return a.bestScore > b.bestScore;
+        });
+        if (mapRecords.size() > 10) mapRecords.resize(10);
+
+        std::vector<ScoreRecord> remaining;
+        remaining.reserve(records.size() + 5);
+        for (const auto& r : records) {
+            if (r.osuKey != key || r.mode != mode) remaining.push_back(r);
+        }
+        for (const auto& r : mapRecords) {
+            remaining.push_back(r);
+        }
+        records = remaining;
         save();
-        return true;
+        return improved;
     }
 };

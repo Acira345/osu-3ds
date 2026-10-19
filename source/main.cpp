@@ -13,18 +13,32 @@
 #include "ScoreManager.hpp"
 #include "WifiServer.hpp"
 #include "TextureLoader.hpp"
+#include "VideoPlayer.hpp"
 #include "UiKit.hpp"
+#include "qrcodegen.h"
+#include "DirectDownloader.hpp"
+#include "ModeTaiko.hpp"
+#include "ModeMania.hpp"
+#include "ModeCatch.hpp"
 
 // Aumentar pila del hilo principal en la 3DS a 256 KB (por defecto libctru asigna solo 32 KB)
 extern "C" {
     u32 __stacksize__ = 0x40000;
 }
 
-constexpr float SCALE_FACTOR = 0.625f;
-constexpr float TOP_OFFSET_X = 40.0f;
+// Playfield seguro centrado con márgenes para que ningún círculo ni slider se salga de la pantalla (Safe Area)
+constexpr float SCALE_FACTOR = 0.5208333f; // 200.0f / 384.0f
+constexpr float PLAYFIELD_W  = 266.6667f;  // 512.0f * SCALE_FACTOR
+constexpr float PLAYFIELD_H  = 200.0f;     // 384.0f * SCALE_FACTOR
 
-inline float osuToTopX(float osuX) { return TOP_OFFSET_X + (osuX * SCALE_FACTOR); }
-inline float osuToTopY(float osuY) { return osuY * SCALE_FACTOR; }
+constexpr float PLAYFIELD_BOT_OFFSET_X = 26.6667f; // (320.0f - PLAYFIELD_W) * 0.5f
+constexpr float PLAYFIELD_BOT_OFFSET_Y = 20.0f;    // (240.0f - PLAYFIELD_H) * 0.5f
+
+constexpr float PLAYFIELD_TOP_OFFSET_X = 66.6667f; // (400.0f - PLAYFIELD_W) * 0.5f
+constexpr float PLAYFIELD_TOP_OFFSET_Y = 20.0f;    // (240.0f - PLAYFIELD_H) * 0.5f
+
+inline float osuToTopX(float osuX) { return PLAYFIELD_TOP_OFFSET_X + (osuX * SCALE_FACTOR); }
+inline float osuToTopY(float osuY) { return PLAYFIELD_TOP_OFFSET_Y + (osuY * SCALE_FACTOR); }
 
 inline u32 getStarRatingColor(float stars) {
     if (stars < 2.0f) return C2D_Color32(100, 240, 120, 255); // Easy (Verde)
@@ -32,6 +46,46 @@ inline u32 getStarRatingColor(float stars) {
     if (stars < 4.0f) return C2D_Color32(255, 224, 85, 255);  // Hard (Oro)
     if (stars < 5.3f) return C2D_Color32(255, 100, 170, 255); // Insane (Rosa)
     return C2D_Color32(205, 110, 255, 255);                   // Expert+ (Violeta)
+}
+
+static void renderQrCode(const char* text, float startX, float startY, float maxBoxSize) {
+    if (!text || text[0] == '\0') return;
+    uint8_t qrcode[qrcodegen_BUFFER_LEN_FOR_VERSION(10)];
+    uint8_t tempBuffer[qrcodegen_BUFFER_LEN_FOR_VERSION(10)];
+    if (!qrcodegen_encodeText(text, tempBuffer, qrcode, qrcodegen_Ecc_LOW, 1, 10, qrcodegen_Mask_AUTO, true)) {
+        return;
+    }
+    int qrSize = qrcodegen_getSize(qrcode);
+    int border = 2;
+    int totalModules = qrSize + border * 2;
+    float modSize = std::floor(maxBoxSize / static_cast<float>(totalModules));
+    if (modSize < 1.0f) modSize = 1.0f;
+    float actualSize = modSize * static_cast<float>(totalModules);
+    float ox = startX + std::floor((maxBoxSize - actualSize) * 0.5f);
+    float oy = startY + std::floor((maxBoxSize - actualSize) * 0.5f);
+
+    // Fondo blanco del QR
+    C2D_DrawRectSolid(ox, oy, 0.28f, actualSize, actualSize, C2D_Color32(255, 255, 255, 255));
+
+    u32 clrBlack = C2D_Color32(18, 16, 26, 255);
+    for (int y = 0; y < qrSize; ++y) {
+        for (int x = 0; x < qrSize; ++x) {
+            if (qrcodegen_getModule(qrcode, x, y)) {
+                C2D_DrawRectSolid(ox + (x + border) * modSize,
+                                  oy + (y + border) * modSize,
+                                  0.30f, modSize, modSize, clrBlack);
+            }
+        }
+    }
+}
+
+static void renderWifiBars(float x, float y, u8 strength, u32 clrActive, u32 clrInactive) {
+    for (int i = 0; i < 3; ++i) {
+        float barH = 5.0f + i * 4.0f;
+        float barY = y + (13.0f - barH);
+        u32 c = (strength > i) ? clrActive : clrInactive;
+        C2D_DrawRectSolid(x + i * 6.0f, barY, 0.35f, 4.0f, barH, c);
+    }
 }
 
 enum AppState {
@@ -57,6 +111,29 @@ struct HitPopup {
 struct TrailPoint {
     float x, y;
     int life;
+    int maxLife;
+};
+
+struct SmokeParticle {
+    float x, y;
+    float vx, vy;
+    float size;
+    int life;
+    int maxLife;
+};
+
+struct HitErrorTick {
+    float errMs;
+    HitState state;
+    int life;
+};
+
+struct GameplayParticle {
+    float x, y;
+    float vx, vy;
+    float size;
+    u32 color;
+    int life, maxLife;
 };
 
 void drawRingZ(float x, float y, float z, float radius, float thickness, u32 color, int segments = 24) {
@@ -72,8 +149,8 @@ void drawRingZ(float x, float y, float z, float radius, float thickness, u32 col
     }
 }
 
-void drawRing(float x, float y, float radius, float thickness, u32 color, int segments = 24) {
-    drawRingZ(x, y, 0.5f, radius, thickness, color, segments);
+void drawRing(float x, float y, float radius, float thickness, u32 color, int segments = 24, float z = 0.5f) {
+    drawRingZ(x, y, z, radius, thickness, color, segments);
 }
 
 void drawRectOutline(float x, float y, float w, float h, float thickness, u32 color, float z = 0.5f) {
@@ -99,6 +176,26 @@ void drawCenteredText(C2D_TextBuf buf, float cx, float cy, float scale, u32 colo
     C2D_DrawText(&text, C2D_WithColor, cx - (w * 0.5f), cy - (h * 0.5f), z, scale, scale, color);
 }
 
+void drawTextWithShadow(C2D_TextBuf buf, float x, float y, float scale, u32 color, const char* str, float z = 0.85f, u32 shadowColor = Ui::rgba(0, 0, 0, 220)) {
+    C2D_Text text;
+    C2D_TextParse(&text, buf, str);
+    C2D_TextOptimize(&text);
+    C2D_DrawText(&text, C2D_WithColor, x + 1.0f, y + 1.0f, z - 0.001f, scale, scale, shadowColor);
+    C2D_DrawText(&text, C2D_WithColor, x, y, z, scale, scale, color);
+}
+
+void drawCenteredTextWithShadow(C2D_TextBuf buf, float cx, float cy, float scale, u32 color, const char* str, float z = 0.85f, u32 shadowColor = Ui::rgba(0, 0, 0, 220)) {
+    C2D_Text text;
+    C2D_TextParse(&text, buf, str);
+    C2D_TextOptimize(&text);
+    float w = 0.0f, h = 0.0f;
+    C2D_TextGetDimensions(&text, scale, scale, &w, &h);
+    float rx = cx - (w * 0.5f);
+    float ry = cy - (h * 0.5f);
+    C2D_DrawText(&text, C2D_WithColor, rx + 1.0f, ry + 1.0f, z - 0.001f, scale, scale, shadowColor);
+    C2D_DrawText(&text, C2D_WithColor, rx, ry, z, scale, scale, color);
+}
+
 // Dibuja una flecha de rebote (Reverse Arrow) en (cx, cy) apuntando hacia (targetX, targetY)
 void drawReverseArrow(float cx, float cy, float targetX, float targetY, float size, u32 color, float z = 0.42f) {
     float angle = std::atan2(targetY - cy, targetX - cx);
@@ -119,6 +216,25 @@ std::string truncateString(const std::string& str, size_t maxLen) {
     return str.substr(0, maxLen - 3) + "...";
 }
 
+inline std::string formatScoreThousands(int score) {
+    std::string s = std::to_string(score);
+    int n = static_cast<int>(s.length()) - 3;
+    while (n > 0) {
+        s.insert(n, ",");
+        n -= 3;
+    }
+    return s;
+}
+
+inline u32 getScoreGradeColor(const std::string& grade, u32 cursorClr) {
+    if (grade == "SS" || grade == "SSH") return Ui::rgba(255, 102, 171);
+    if (grade == "S" || grade == "SH") return cursorClr;
+    if (grade == "A") return Ui::rgba(110, 235, 110);
+    if (grade == "B") return Ui::rgba(100, 180, 255);
+    if (grade == "C") return Ui::rgba(195, 120, 255);
+    return Ui::rgba(255, 80, 80);
+}
+
 void drawStatBar(C2D_TextBuf buf, float x, float y, const char* label, float val, u32 fillClr, u32 bgClr, u32 txtClr) {
     char str[32];
     std::snprintf(str, sizeof(str), "%s: %.1f", label, val);
@@ -133,19 +249,53 @@ void drawStatBar(C2D_TextBuf buf, float x, float y, const char* label, float val
     Ui::statBar(barX, barY, barW, barH, 0.2f, fillRatio, fillClr);
 }
 
+struct ModDef {
+    const char* code;
+    const char* shortName;
+    const char* fullName;
+    const char* desc;
+    uint32_t bit;
+    u32 color;
+};
+
+static const ModDef modTable[15] = {
+    // Fila 1: Reducción y Dificultad Clásica
+    { "EZ", "Facil",     "Easy",         "Circulos mas grandes y velocidad reducida.",               MOD_EZ,   Ui::rgba(60, 185, 105) },
+    { "NF", "NoFail",    "No Fail",      "No puedes perder aunque se agote la barra de vida.",       MOD_NF,   Ui::rgba(50, 165, 120) },
+    { "HT", "Lento",     "Half Time",    "Velocidad de musica y notas reducida al 75% (0.75x).",     MOD_HT,   Ui::rgba(45, 150, 140) },
+    { "HR", "Dificil",   "Hard Rock",    "Circulos mas pequenos, AR/OD alto y mapa invertido.",      MOD_HR,   Ui::rgba(240, 70, 70)  },
+    { "SD", "Muerte",    "Sudden Death", "Falla una sola nota y perderas la partida al instante.",   MOD_SD,   Ui::rgba(255, 90, 50)  },
+
+    // Fila 2: Velocidad y Desafío Extremo
+    { "PF", "Perfect",   "Perfect",      "Solo calificaciones 300 permitidas. Un 100 y mueres.",     MOD_PF,   Ui::rgba(255, 180, 40) },
+    { "DT", "DobleVel",  "Double Time",  "Velocidad de musica y notas aumentada al 150% (1.5x).",    MOD_DT,   Ui::rgba(180, 70, 240) },
+    { "NC", "Nightcore", "Nightcore",    "Velocidad 1.5x con ritmo dance en los compases.",          MOD_NC,   Ui::rgba(220, 80, 255) },
+    { "HD", "Oculto",    "Hidden",       "Las notas se desvanecen antes de tocar y no hay anillos.", MOD_HD,   Ui::rgba(255, 102, 171)},
+    { "FL", "Linterna",  "Flashlight",   "Toda la pantalla a oscuras salvo un foco sobre el stylus.",MOD_FL,   Ui::rgba(255, 215, 60) },
+
+    // Fila 3: Automatización, Estilo y Asistencia
+    { "RX", "Relax",     "Relax",        "Solo apunta el stylus; el juego toca las notas por ti.",   MOD_RX,   Ui::rgba(0, 216, 240)  },
+    { "AP", "AutoPilot", "Auto Pilot",   "Solo sigue el ritmo; el cursor apunta automaticamente.",   MOD_AP,   Ui::rgba(80, 180, 255) },
+    { "SO", "SinSpin",   "Spun Out",     "Los spinners se giran automaticamente para no cansar.",    MOD_SO,   Ui::rgba(130, 220, 110)},
+    { "MR", "Espejo",    "Mirror",       "Refleja todas las notas y sliders horizontalmente (X).",   MOD_MR,   Ui::rgba(255, 145, 185)},
+    { "AT", "AutoBot",   "Autoplay",     "Demostracion perfecta por inteligencia artificial.",       MOD_AUTO, Ui::rgba(100, 110, 255)}
+};
+
 int main(int argc, char* argv[]) {
+    osSetSpeedupEnable(true); // Activar 804 MHz + Cache L2 en consolas New Nintendo 3DS / New 2DS XL
     gfxInitDefault();
+    gfxSet3D(false);          // Se activa dinamicamente solo cuando el slider 3D fisico > 0
     romfsInit();
-    C3D_Init(C3D_DEFAULT_CMDBUF_SIZE);
-    C2D_Init(C2D_DEFAULT_MAX_OBJECTS);
+    C3D_Init(C3D_DEFAULT_CMDBUF_SIZE * 2);
+    C2D_Init(C2D_DEFAULT_MAX_OBJECTS * 4);
     C2D_Prepare();
 
-    C3D_RenderTarget* topScreen    = C2D_CreateScreenTarget(GFX_TOP, GFX_LEFT);
-    C3D_RenderTarget* bottomScreen = C2D_CreateScreenTarget(GFX_BOTTOM, GFX_LEFT);
+    C3D_RenderTarget* topScreen      = C2D_CreateScreenTarget(GFX_TOP, GFX_LEFT);
+    C3D_RenderTarget* topScreenRight = C2D_CreateScreenTarget(GFX_TOP, GFX_RIGHT);
+    C3D_RenderTarget* bottomScreen   = C2D_CreateScreenTarget(GFX_BOTTOM, GFX_LEFT);
     C2D_TextBuf textBuf = C2D_TextBufNew(4096);
 
     u32 clrBgDark     = C2D_Color32(18, 16, 26, 255);
-    u32 clrPanelBg    = C2D_Color32(30, 27, 44, 255);
     u32 clrPlayfield  = C2D_Color32(26, 24, 38, 255);
     u32 clrTabletBg   = C2D_Color32(22, 20, 30, 255);
     u32 clrWhite      = C2D_Color32(255, 255, 255, 255);
@@ -166,13 +316,16 @@ int main(int argc, char* argv[]) {
         settings.skinIndex = 0;
     }
 
-    SongManager songMgr;
-    songMgr.initAndScan();
-
     ScoreManager scoreMgr;
     scoreMgr.load();
 
+    SongManager songMgr;
+    songMgr.initAndScan(&scoreMgr);
+
     Beatmap beatmap;
+    ModeTaiko taikoEngine;
+    ModeMania maniaEngine;
+    ModeCatch catchEngine;
     AudioPlayer audio;
     audio.initDSPAndHitsounds();
     audio.setVolumes(settings.musicVolume, settings.sfxVolume);
@@ -182,17 +335,46 @@ int main(int argc, char* argv[]) {
     // Texturas GPU dinámicas (Fondo de canción y Sprites PNG de Skin personalizado)
     LoadedTexture bgTex;
     LoadedTexture texSkinCursor;
+    LoadedTexture texSkinCursorTrail;
     LoadedTexture texSkinCircle;
     LoadedTexture texSkinOverlay;
     LoadedTexture texSkinApproach;
+    LoadedTexture texSkinComboBurst;
+
+    // Detectar si la consola es New Nintendo 3DS / New 2DS XL (804 MHz Quad-Core + 256 MB RAM)
+    bool isNew3DS = false;
+    APT_CheckNew3DS(&isNew3DS);
+    const int bgMaxW = isNew3DS ? 400 : 256;
+    const int bgMaxH = isNew3DS ? 240 : 192;
+
+    // Decodificador de fondos en hilo secundario (usa nucleo dedicado en New 3DS)
+    AsyncTextureLoader bgLoader;
+    bgLoader.start(isNew3DS);
+    VideoPlayer videoPlayer;
+    videoPlayer.init();
+    int previewDelay = 0;      // frames de espera antes de cargar audio/fondo (debounce)
+    float bgFade = 255.0f;     // opacidad del fondo para fundido suave
 
     auto applyActiveSkinAudio = [&]() {
         if (skinMgr.skins.empty()) return;
         const auto& sk = skinMgr.skins[settings.skinIndex % skinMgr.skins.size()];
-        audio.loadSkinHitsounds(sk.hitNormalWav, sk.hitWhistleWav, sk.hitClapWav);
+        audio.loadSkinHitsounds(
+            sk.hitNormalWav,
+            sk.hitWhistleWav,
+            sk.hitFinishWav,
+            sk.hitClapWav,
+            sk.comboBreakWav,
+            sk.synthPreset,
+            sk.nightcoreKickWav,
+            sk.nightcoreClapWav,
+            sk.nightcoreHatWav
+        );
 
         if (!sk.cursorPng.empty())           texSkinCursor.loadFromFile(sk.cursorPng, 64, 64);
         else                                 texSkinCursor.unload();
+
+        if (!sk.cursorTrailPng.empty())      texSkinCursorTrail.loadFromFile(sk.cursorTrailPng, 64, 64);
+        else                                 texSkinCursorTrail.unload();
 
         if (!sk.hitCirclePng.empty())        texSkinCircle.loadFromFile(sk.hitCirclePng, 128, 128);
         else                                 texSkinCircle.unload();
@@ -202,6 +384,9 @@ int main(int argc, char* argv[]) {
 
         if (!sk.approachCirclePng.empty())   texSkinApproach.loadFromFile(sk.approachCirclePng, 128, 128);
         else                                 texSkinApproach.unload();
+
+        if (!sk.comboBurstPng.empty())       texSkinComboBurst.loadFromFile(sk.comboBurstPng, 160, 240);
+        else                                 texSkinComboBurst.unload();
     };
     applyActiveSkinAudio();
 
@@ -210,13 +395,29 @@ int main(int argc, char* argv[]) {
     AppState wifiReturnState = STATE_MAIN_MENU;
 
     int mainMenuOption = 0; // 0: Jugar, 1: Descargar Wi-Fi, 2: Configuraciones, 3: Salir
-    int settingsOption = 0; // 0..9
+    int settingsOption = 0; // 0..18 (5 pestañas)
+    int capturingKeyIndex = -1; // -1: inactivo, 4..7: capturando tecla física
+    int settingsControlsMode = MODE_STD; // Modo activo en la pestaña de controles (0: STD, 1: TAIKO, 2: CATCH, 3: MANIA)
+    float taikoGuideTimer = 0.0f; // Temporizador para mostrar guía de controles en pantalla (4 segundos)
     int selectedSet = 0;
     int selectedDiff = 0;
 
     // Selector de Mods en el menú de canciones
     bool modMenuOpen = false;
     int modCursor = 0; // 0..6 (EZ, NF, HT, HR, DT, HD, AUTO)
+    bool deleteConfirmOpen = false;
+    // Teclado interactivo táctil QWERTY para búsqueda en vivo
+    bool searchKeyboardOpen = false;
+    int searchLastKeyIndex = -1;
+    int searchKeyFlashTimer = 0;
+    int searchBackspaceHoldTimer = 0;
+    float footerCardLift[5] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+    int footerCardHover = -1;
+
+    // Pestañas y Ranking Local en el menú de canciones
+    int songSelectTab = 0; // 0: Resumen (Personal Best + Strain Graph), 1: Ranking Local (Top Récords)
+    bool rankingExpanded = false; // true: lista expandida que ocupa toda la parte inferior
+    int rankingScroll = 0; // Desplazamiento en la lista si hay muchos récords
 
     // Asistente de calibración en Configuraciones
     bool calibrationMode = false;
@@ -234,14 +435,104 @@ int main(int argc, char* argv[]) {
 
     float cursorOsuX = 256.0f;
     float cursorOsuY = 192.0f;
+    float prevCursorOsuX = 256.0f;
+    float prevCursorOsuY = 192.0f;
     std::vector<TrailPoint> cursorTrail;
+    std::vector<SmokeParticle> smokeParticles;
     int combo = 0;
+    int prevCombo = 0;
+    int lastBrokenCombo = 0;
     int maxCombo = 0;
     int score = 0;
     int count300 = 0, count100 = 0, count50 = 0, countMiss = 0;
+    int k1PressCount = 0, k2PressCount = 0;
+    float comboScale = 1.0f;
+    float comboBreakAnim = 0.0f;
     std::vector<HitPopup> popups;
+    std::vector<GameplayParticle> particles;
+    std::vector<HitErrorTick> hitErrorTicks;
+    std::vector<float> allHitErrors;
+    struct HitJudgementEvent {
+        int time;
+        HitState state;
+        float errMs;
+    };
+    std::vector<HitJudgementEvent> judgementHistory;
+    float hitErrorNeedle = 0.0f;
+    float lastUnstableRate = 0.0f;
+    float lastMeanHitError = 0.0f;
+    float spinnerRPM = 0.0f;
+    float spinnerClearAnim = 0.0f;
+    float spinnerBonusAnim = 0.0f;
+    int lastSpinnerBonus = 0;
+    float shakeTimer = 0.0f;
+    float shakeIntensity = 0.0f;
+    float shakeX = 0.0f;
+    float shakeY = 0.0f;
     int animTick = 0;
     float carouselPos = 0.0f;
+    AppState lastAppState = STATE_MAIN_MENU;
+    float screenFade = 1.0f;
+
+    // Variables de Skip, Marcador en Vivo, Descansos (Breaks) y Efecto Kiai Time
+    std::vector<ScoreRecord> localRecords;
+    float overtakeFlashAnim = 0.0f;
+    bool hasOvertakenBest = false;
+    bool skipAvailable = false;
+    int skipTargetMs = 0;
+    bool inBreakPeriod = false;
+    int breakRemainingMs = 0;
+    int breakTotalMs = 0;
+    Vec2 breakNextObjPos = {256.0f, 192.0f};
+    bool inKiai = false;
+    bool prevInKiai = false;
+    float kiaiGlow = 0.0f;
+    float kiaiBurstFlash = 0.0f;
+    int comboBurstTimer = 0;
+    int comboBurstSide = 0;
+    int comboBurstValue = 0;
+    int lastComboBurstMilestone = 0;
+    int lastNcStep = -999999;
+
+    auto spawnParticles = [&](float osuX, float osuY, u32 color, int count, float minSpd, float maxSpd, float baseSize, int maxLifeFrames) {
+        for (int p = 0; p < count; ++p) {
+            if (particles.size() >= 64) particles.erase(particles.begin());
+            float ang = static_cast<float>(std::rand() % 628) * 0.01f;
+            float spd = minSpd + (static_cast<float>(std::rand() % 100) / 100.0f) * (maxSpd - minSpd);
+            int lf = std::max(6, maxLifeFrames - (std::rand() % 5));
+            particles.push_back({
+                osuX * SCALE_FACTOR, osuY * SCALE_FACTOR,
+                std::cos(ang) * spd, std::sin(ang) * spd,
+                baseSize, color, lf, lf
+            });
+        }
+    };
+
+    auto checkComboBurst = [&](int curCombo) {
+        if (!settings.comboBursts) return;
+        bool isMilestone = false;
+        if (curCombo == 30 || curCombo == 60) isMilestone = true;
+        else if (curCombo >= 100 && (curCombo % 100 == 0 || curCombo % 50 == 0)) isMilestone = true;
+
+        if (isMilestone && curCombo > lastComboBurstMilestone) {
+            lastComboBurstMilestone = curCombo;
+            comboBurstTimer = 48;
+            comboBurstSide = (comboBurstSide == 0) ? 1 : 0;
+            comboBurstValue = curCombo;
+            float burstEdgeX = (comboBurstSide == 0) ? 460.0f : 50.0f;
+            spawnParticles(burstEdgeX, 220.0f, Ui::rgba(255, 102, 171), 10, 1.2f, 3.2f, 2.5f, 24);
+            spawnParticles(burstEdgeX, 220.0f, Ui::rgba(255, 215, 60), 8, 1.0f, 2.8f, 2.2f, 22);
+        }
+    };
+
+    auto triggerShake = [&](float intensity, float frames) {
+        if (intensity > shakeIntensity || shakeTimer <= 0.0f) {
+            shakeIntensity = intensity;
+        }
+        if (frames > shakeTimer) {
+            shakeTimer = frames;
+        }
+    };
 
     auto updateSongPreview = [&]() {
         if (songMgr.sets.empty()) {
@@ -249,14 +540,19 @@ int main(int argc, char* argv[]) {
             bgTex.unload();
             return;
         }
+        selectedSet = std::max(0, std::min(selectedSet, static_cast<int>(songMgr.sets.size()) - 1));
         const auto& curSet = songMgr.sets[selectedSet];
         if (curSet.difficulties.empty()) return;
+        selectedDiff = std::max(0, std::min(selectedDiff, static_cast<int>(curSet.difficulties.size()) - 1));
         const auto& curDiff = curSet.difficulties[selectedDiff];
 
         std::string bgPath = !curDiff.backgroundPath.empty() ? curDiff.backgroundPath : curSet.backgroundPath;
         if (!bgPath.empty()) {
-            bgTex.loadFromFile(bgPath, 256, 192);
+            if (!(bgTex.loaded && bgTex.sourcePath == bgPath)) {
+                bgLoader.request(bgPath, bgMaxW, bgMaxH);
+            }
         } else {
+            bgLoader.cancel();
             bgTex.unload();
         }
 
@@ -267,8 +563,97 @@ int main(int argc, char* argv[]) {
         const std::string& audioPath = curDiff.audioPath;
         float speedRate = getModsSpeedMultiplier(settings.activeMods);
         if (!audio.getIsPlaying() || audio.getLoadedMusicPath() != audioPath) {
-            audio.startMusic(audioPath, 0, speedRate);
+            int startOff = (curDiff.previewTimeMs > 0) ? curDiff.previewTimeMs : 0;
+            audio.startMusic(audioPath, 0, speedRate, startOff);
         }
+    };
+
+    auto getBpmPulse = [&]() -> float {
+        float beatLen = 500.0f;
+        float offset = 0.0f;
+        if (!songMgr.sets.empty() && selectedSet >= 0 && selectedSet < static_cast<int>(songMgr.sets.size())) {
+            const auto& cs = songMgr.sets[selectedSet];
+            if (!cs.difficulties.empty()) {
+                int dIdx = std::max(0, std::min(selectedDiff, static_cast<int>(cs.difficulties.size()) - 1));
+                beatLen = std::max(120.0f, cs.difficulties[dIdx].beatLengthMs / getModsSpeedMultiplier(settings.activeMods));
+                offset = cs.difficulties[dIdx].timingOffsetMs;
+            }
+        }
+        float tMs = audio.getIsPlaying()
+            ? static_cast<float>(audio.getTimeMs())
+            : static_cast<float>(animTick) * (1000.0f / 60.0f);
+        float rel = std::fmod(std::max(0.0f, tMs - offset), beatLen) / beatLen;
+        return std::pow(1.0f - rel, 3.0f);
+    };
+
+    auto toggleSearchTag = [&](const std::string& tag) {
+        size_t pos = songMgr.searchQuery.find(tag);
+        if (pos != std::string::npos) {
+            songMgr.searchQuery.erase(pos, tag.length());
+            size_t sp = songMgr.searchQuery.find("  ");
+            while (sp != std::string::npos) {
+                songMgr.searchQuery.erase(sp, 1);
+                sp = songMgr.searchQuery.find("  ");
+            }
+            songMgr.searchQuery = Beatmap::trim(songMgr.searchQuery);
+        } else {
+            if (tag.rfind("mode:", 0) == 0) {
+                const char* modes[] = {"mode:std", "mode:taiko", "mode:catch", "mode:mania"};
+                for (const char* m : modes) {
+                    size_t mp = songMgr.searchQuery.find(m);
+                    if (mp != std::string::npos) {
+                        songMgr.searchQuery.erase(mp, std::strlen(m));
+                    }
+                }
+            }
+            if (tag == "★4" || tag == "★5") {
+                size_t p4 = songMgr.searchQuery.find("★4");
+                if (p4 != std::string::npos) songMgr.searchQuery.erase(p4, 2);
+                size_t p5 = songMgr.searchQuery.find("★5");
+                if (p5 != std::string::npos) songMgr.searchQuery.erase(p5, 2);
+            }
+            songMgr.searchQuery = Beatmap::trim(songMgr.searchQuery);
+            if (!songMgr.searchQuery.empty()) songMgr.searchQuery += " ";
+            songMgr.searchQuery += tag;
+        }
+        songMgr.applySortAndFilter(&scoreMgr);
+        selectedSet = 0;
+        selectedDiff = 0;
+        rankingScroll = 0;
+        carouselPos = 0.0f;
+        audio.playHitSound(2);
+        updateSongPreview();
+    };
+
+    auto openSystemKeyboard = [&]() {
+        SwkbdState swkbd;
+        char inputBuf[64] = {0};
+        std::snprintf(inputBuf, sizeof(inputBuf), "%s", songMgr.searchQuery.c_str());
+        swkbdInit(&swkbd, SWKBD_TYPE_NORMAL, 2, 32);
+        swkbdSetInitialText(&swkbd, inputBuf);
+        swkbdSetHintText(&swkbd, "Buscar titulo, artista o mapper...");
+        swkbdSetButton(&swkbd, SWKBD_BUTTON_LEFT, "Limpiar", false);
+        swkbdSetButton(&swkbd, SWKBD_BUTTON_RIGHT, "Buscar", true);
+        SwkbdButton btn = swkbdInputText(&swkbd, inputBuf, sizeof(inputBuf));
+        if (btn == SWKBD_BUTTON_RIGHT) {
+            songMgr.searchQuery = Beatmap::trim(inputBuf);
+        } else if (btn == SWKBD_BUTTON_LEFT) {
+            songMgr.searchQuery = "";
+        }
+        songMgr.applySortAndFilter(&scoreMgr);
+        selectedSet = 0;
+        selectedDiff = 0;
+        carouselPos = 0.0f;
+        audio.playHitSound(2);
+        updateSongPreview();
+    };
+
+    auto openSearchKeyboard = [&]() {
+        searchKeyboardOpen = true;
+        searchLastKeyIndex = -1;
+        searchKeyFlashTimer = 0;
+        searchBackspaceHoldTimer = 0;
+        audio.playHitSound(0);
     };
 
     auto startSelectedBeatmap = [&]() -> bool {
@@ -280,15 +665,61 @@ int main(int argc, char* argv[]) {
         if (!beatmap.loadFromFile(diffEntry.osuPath, false)) return false;
         beatmap.applyMods(settings.activeMods);
 
+        bgLoader.cancel();
+        previewDelay = 0;
         if (!beatmap.fullBackgroundPath.empty()) {
-            bgTex.loadFromFile(beatmap.fullBackgroundPath, 256, 192);
+            bgTex.loadFromFile(beatmap.fullBackgroundPath, bgMaxW, bgMaxH);
+        }
+        if (settings.enableVideo && !beatmap.fullVideoPath.empty()) {
+            videoPlayer.openVideo(beatmap.fullVideoPath, beatmap.videoOffsetMs);
+        } else {
+            videoPlayer.closeVideo();
         }
 
         audio.setVolumes(settings.musicVolume, settings.sfxVolume);
+        applyActiveSkinAudio();
+        if (settings.beatmapHitsounds && !beatmap.folderPath.empty()) {
+            audio.loadBeatmapHitsounds(beatmap.folderPath, beatmap.sampleSetName);
+        }
         audio.playHitSound(2);
 
+        bool isTaikoPlay = (settings.gameMode == MODE_TAIKO || diffEntry.mode == 1);
+        bool isCatchPlay = (settings.gameMode == MODE_CATCH || diffEntry.mode == 2);
+        bool isManiaPlay = (settings.gameMode == MODE_MANIA || diffEntry.mode == 3);
+        if (isTaikoPlay) {
+            taikoEngine.initFromBeatmap(beatmap);
+        } else if (isCatchPlay) {
+            catchEngine.initFromBeatmap(beatmap);
+        } else if (isManiaPlay) {
+            maniaEngine.initFromBeatmap(beatmap);
+        }
+
         int leadIn = std::max(0, beatmap.audioLeadIn);
-        if (!beatmap.circles.empty()) {
+        if (isTaikoPlay) {
+            if (!taikoEngine.notes.empty()) {
+                int firstObjTime = taikoEngine.notes.front().time;
+                int minStartWait = 1400;
+                if (firstObjTime < minStartWait) {
+                    leadIn = std::max(leadIn, minStartWait - firstObjTime);
+                }
+            }
+        } else if (isCatchPlay) {
+            if (!catchEngine.fruits.empty()) {
+                int firstObjTime = catchEngine.fruits.front().time;
+                int minStartWait = 1300;
+                if (firstObjTime < minStartWait) {
+                    leadIn = std::max(leadIn, minStartWait - firstObjTime);
+                }
+            }
+        } else if (isManiaPlay) {
+            if (!maniaEngine.notes.empty()) {
+                int firstObjTime = maniaEngine.notes.front().time;
+                int minStartWait = 1200;
+                if (firstObjTime < minStartWait) {
+                    leadIn = std::max(leadIn, minStartWait - firstObjTime);
+                }
+            }
+        } else if (!beatmap.circles.empty()) {
             int firstObjTime = beatmap.circles.front().time;
             int minStartWait = static_cast<int>(beatmap.diff.preempt) + 500;
             if (firstObjTime < minStartWait) {
@@ -297,12 +728,31 @@ int main(int argc, char* argv[]) {
         }
 
         float speedRate = getModsSpeedMultiplier(settings.activeMods);
-        audio.startMusic(beatmap.fullAudioPath, leadIn, speedRate);
+        audio.startMusic(beatmap.fullAudioPath, leadIn, speedRate, 0);
 
         combo = 0;
+        prevCombo = 0;
+        lastBrokenCombo = 0;
         maxCombo = 0;
         score = 0;
         count300 = count100 = count50 = countMiss = 0;
+        k1PressCount = k2PressCount = 0;
+        comboScale = 1.0f;
+        comboBreakAnim = 0.0f;
+        hitErrorTicks.clear();
+        allHitErrors.clear();
+        judgementHistory.clear();
+        hitErrorNeedle = 0.0f;
+        lastUnstableRate = 0.0f;
+        lastMeanHitError = 0.0f;
+        spinnerRPM = 0.0f;
+        spinnerClearAnim = 0.0f;
+        spinnerBonusAnim = 0.0f;
+        lastSpinnerBonus = 0;
+        shakeTimer = 0.0f;
+        shakeIntensity = 0.0f;
+        shakeX = 0.0f;
+        shakeY = 0.0f;
         hp = 1.0f;
         stageFailed = false;
         newRecordAchieved = false;
@@ -311,45 +761,104 @@ int main(int argc, char* argv[]) {
         pauseOption = 0;
         cursorOsuX = 256.0f;
         cursorOsuY = 192.0f;
+        prevCursorOsuX = 256.0f;
+        prevCursorOsuY = 192.0f;
         cursorTrail.clear();
+        smokeParticles.clear();
         popups.clear();
+        particles.clear();
+        int curStartMode = isTaikoPlay ? 1 : isCatchPlay ? 2 : isManiaPlay ? 3 : 0;
+        localRecords = scoreMgr.getTopRecords(diffEntry.osuPath, 4, curStartMode);
+        overtakeFlashAnim = 0.0f;
+        hasOvertakenBest = false;
+        skipAvailable = false;
+        skipTargetMs = 0;
+        inBreakPeriod = false;
+        breakRemainingMs = 0;
+        breakTotalMs = 0;
+        breakNextObjPos = !beatmap.circles.empty() ? Vec2(beatmap.circles.front().x, beatmap.circles.front().y) : Vec2(256.0f, 192.0f);
+        inKiai = false;
+        prevInKiai = false;
+        kiaiGlow = 0.0f;
+        kiaiBurstFlash = 0.0f;
+        comboBurstTimer = 0;
+        comboBurstSide = 0;
+        comboBurstValue = 0;
+        lastComboBurstMilestone = 0;
+        lastNcStep = -999999;
+        taikoGuideTimer = 240.0f;
         appState = STATE_PLAYING;
         return true;
     };
 
     auto toggleModByIndex = [&](int idx) {
-        static const uint32_t modBits[7] = {
-            MOD_EZ, MOD_NF, MOD_HT, MOD_HR, MOD_DT, MOD_HD, MOD_AUTO
-        };
-        uint32_t bit = modBits[idx];
+        if (idx < 0 || idx >= 15) return;
+        uint32_t bit = modTable[idx].bit;
         if (settings.activeMods & bit) {
             settings.activeMods &= ~bit;
         } else {
             settings.activeMods |= bit;
-            // Incompatibilidades clásicas de osu!
+            // Incompatibilidades clásicas y de osu!lazer
             if (bit == MOD_EZ) settings.activeMods &= ~MOD_HR;
             if (bit == MOD_HR) settings.activeMods &= ~MOD_EZ;
-            if (bit == MOD_HT) settings.activeMods &= ~MOD_DT;
-            if (bit == MOD_DT) settings.activeMods &= ~MOD_HT;
+            if (bit == MOD_HT) settings.activeMods &= ~(MOD_DT | MOD_NC);
+            if (bit == MOD_DT) settings.activeMods &= ~(MOD_HT | MOD_NC);
+            if (bit == MOD_NC) settings.activeMods &= ~(MOD_HT | MOD_DT);
+            if (bit == MOD_SD) settings.activeMods &= ~(MOD_PF | MOD_NF);
+            if (bit == MOD_PF) settings.activeMods &= ~(MOD_SD | MOD_NF);
+            if (bit == MOD_NF) settings.activeMods &= ~(MOD_SD | MOD_PF);
+            if (bit == MOD_AUTO) settings.activeMods &= ~(MOD_RX | MOD_AP);
+            if (bit == MOD_RX) settings.activeMods &= ~(MOD_AUTO | MOD_AP);
+            if (bit == MOD_AP) settings.activeMods &= ~(MOD_AUTO | MOD_RX);
         }
         settings.save();
     };
+
+    // Al arrancar el juego, elegir una canción aleatoria para reproducir su música y mostrar su escenario en el Menú Principal
+    std::srand(static_cast<unsigned int>(osGetTime()));
+    if (!songMgr.sets.empty()) {
+        selectedSet = std::rand() % static_cast<int>(songMgr.sets.size());
+        selectedDiff = 0;
+        carouselPos = static_cast<float>(selectedSet);
+        updateSongPreview();
+    }
+
+    bool stereoEnabledState = false;
+    int analogNavCooldown = 0;
 
     while (aptMainLoop()) {
         hidScanInput();
         u32 kDown = hidKeysDown();
         u32 kHeld = hidKeysHeld();
+        u32 kUp   = hidKeysUp();
         circlePosition cpad;
         hidCircleRead(&cpad);
+        circlePosition cstick = {0, 0};
+        hidCstickRead(&cstick);
+
+        float slider3D = osGet3DSliderState();
+        bool stereoActive = (slider3D > 0.02f);
+        if (stereoActive != stereoEnabledState) {
+            stereoEnabledState = stereoActive;
+            gfxSet3D(stereoActive);
+        }
+        if (analogNavCooldown > 0) analogNavCooldown--;
 
         touchPosition touch;
         bool isTouching = (kHeld & KEY_TOUCH) != 0;
         bool touchJustDown = (kDown & KEY_TOUCH) != 0;
+        bool touchJustUp   = (kUp & KEY_TOUCH) != 0;
         if (isTouching) {
             hidTouchRead(&touch);
         }
 
         animTick++;
+        if (appState != lastAppState) {
+            lastAppState = appState;
+            screenFade = 1.0f;
+        } else {
+            screenFade = Ui::approach(screenFade, 0.0f, 0.18f);
+        }
         C2D_TextBufClear(textBuf);
 
         const SkinProfile& activeSkin = skinMgr.skins[settings.skinIndex % skinMgr.skins.size()];
@@ -365,6 +874,21 @@ int main(int argc, char* argv[]) {
         // 1. MENÚ PRINCIPAL (Jugar / Descargar Wi-Fi / Config / Salir)
         // =========================================================
         if (appState == STATE_MAIN_MENU) {
+            audio.update();
+            if (bgLoader.poll(bgTex)) bgFade = 0.0f;
+            bgFade = Ui::approach(bgFade, 255.0f, 0.10f);
+            // Al terminar la canción del menú, pasar a otra aleatoria (como en osu! de PC)
+            if (settings.songPreview && !songMgr.sets.empty() &&
+                (audio.isSongFinished() || !audio.getIsPlaying())) {
+                if (songMgr.sets.size() > 1) {
+                    int next = selectedSet;
+                    while (next == selectedSet) next = std::rand() % static_cast<int>(songMgr.sets.size());
+                    selectedSet = next;
+                }
+                selectedDiff = 0;
+                carouselPos = static_cast<float>(selectedSet);
+                updateSongPreview();
+            }
             if (kDown & KEY_START) break;
 
             if (kDown & KEY_DUP) {
@@ -374,6 +898,16 @@ int main(int argc, char* argv[]) {
             if (kDown & KEY_DDOWN) {
                 mainMenuOption = (mainMenuOption + 1) % 4;
                 audio.playHitSound(0);
+            }
+            // Cambiar canción del menú manualmente con L y R o cruceta Izq/Der
+            if (!songMgr.sets.empty() && (kDown & (KEY_L | KEY_R | KEY_DLEFT | KEY_DRIGHT))) {
+                int dir = (kDown & (KEY_R | KEY_DRIGHT)) ? 1 : -1;
+                int nSets = static_cast<int>(songMgr.sets.size());
+                selectedSet = (selectedSet + dir + nSets) % nSets;
+                selectedDiff = 0;
+                carouselPos = static_cast<float>(selectedSet);
+                audio.playHitSound(0);
+                updateSongPreview();
             }
 
             bool activateOption = (kDown & KEY_A) != 0;
@@ -412,58 +946,87 @@ int main(int argc, char* argv[]) {
 
             C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
 
-            C2D_TargetClear(topScreen, clrBgDark);
-            C2D_SceneBegin(topScreen);
-
-            Ui::backdrop(400.0f, 240.0f, static_cast<float>(animTick), Ui::rgba(34, 14, 56), Ui::rgba(10, 7, 22), clrPrimary, 0.02f);
-
-            // Logo que late al ritmo, con ondas y resplandor
-            float beat = std::pow(std::max(0.0f, std::sin(animTick * 0.105f)), 8.0f);
-            float logoX = 118.0f;
-            float logoY = 118.0f;
-            float logoR = 56.0f + beat * 7.0f;
-
-            for (int k = 0; k < 3; ++k) {
-                float phase = std::fmod(animTick * 0.012f + k / 3.0f, 1.0f);
-                Ui::ring(logoX, logoY, 0.15f, logoR + phase * 60.0f, 2.0f, Ui::withAlpha(clrPrimary, static_cast<u8>((1.0f - phase) * 95.0f)), 40);
-            }
-            Ui::glow(logoX, logoY, 0.16f, logoR * 1.9f, Ui::rgba(255, 102, 170, 130), 6);
-            C2D_DrawCircleSolid(logoX + 3.0f, logoY + 5.0f, 0.18f, logoR, Ui::rgba(0, 0, 0, 120));
-            C2D_DrawCircleSolid(logoX, logoY, 0.2f, logoR, Ui::rgba(255, 98, 168, 255));
-            C2D_DrawCircleSolid(logoX - logoR * 0.22f, logoY - logoR * 0.28f, 0.21f, logoR * 0.6f, Ui::rgba(255, 255, 255, 30));
-            Ui::ring(logoX, logoY, 0.25f, logoR, 3.5f, clrWhite, 40);
-            drawCenteredText(textBuf, logoX, logoY - 6.0f, 1.10f, clrWhite, "osu!");
-            drawCenteredText(textBuf, logoX, logoY + 24.0f, 0.46f, Ui::rgba(255, 235, 245), "3DS Edition");
-
+            float beat = getBpmPulse();
             const char* menuLabels[4] = { "JUGAR", "DESCARGAR WI-FI", "CONFIGURACION", "SALIR" };
-            for (int i = 0; i < 4; ++i) {
-                bool sel = (mainMenuOption == i);
-                float bx = sel ? 206.0f : 224.0f;
-                float by = 32.0f + i * 46.0f;
-                float bw = 210.0f;
-                float bh = 36.0f;
+            for (int eye = 0; eye < (stereoActive ? 2 : 1); ++eye) {
+                C3D_RenderTarget* curTop = (eye == 0) ? topScreen : topScreenRight;
+                float eyeSign = stereoActive ? ((eye == 0) ? 1.0f : -1.0f) : 0.0f;
+                C2D_TargetClear(curTop, clrBgDark);
+                C2D_SceneBegin(curTop);
+                auto depthShift = [&](float px) { return eyeSign * slider3D * px; };
 
-                const RGBColor& c = activeSkin.comboColors[i % activeSkin.comboColors.size()];
-                u32 base = C2D_Color32(c.r, c.g, c.b, 255);
-                Ui::slantRect(bx + 2.0f, by + 3.0f, bw, bh, 12.0f, 0.18f, Ui::rgba(0, 0, 0, 90));
-                if (sel) {
-                    Ui::slantRectGrad(bx, by, bw, bh, 12.0f, 0.2f, Ui::brighten(base, 1.0f), Ui::lerpColor(base, Ui::rgba(40, 30, 70), 0.6f));
-                    C2D_DrawLine(bx + 12.0f, by, clrWhite, bx + bw, by, clrWhite, 1.5f, 0.22f);
+                float dBg = depthShift(-3.5f);
+                if (bgTex.loaded) {
+                    Ui::backdrop(400.0f, 240.0f, static_cast<float>(animTick), Ui::rgba(34, 14, 56), Ui::rgba(10, 7, 22), clrPrimary, 0.01f);
+                    bgTex.drawRect(dBg - beat * 2.0f, -beat * 1.5f, 400.0f + beat * 4.0f, 240.0f + beat * 3.0f, 0.02f, static_cast<u8>(bgFade));
+                    u8 dimAlpha = static_cast<u8>((settings.bgDim * 180) / 100);
+                    C2D_DrawRectSolid(0.0f, 0.0f, 0.04f, 400.0f, 240.0f, Ui::rgba(14, 10, 24, dimAlpha));
                 } else {
-                    Ui::slantRectGrad(bx, by, bw, bh, 12.0f, 0.2f, Ui::rgba(40, 35, 62, 225), Ui::rgba(22, 19, 36, 225));
-                    C2D_DrawLine(bx + 12.0f, by, base, bx, by + bh, base, 3.0f, 0.22f);
+                    Ui::backdrop(400.0f, 240.0f, static_cast<float>(animTick), Ui::rgba(34, 14, 56), Ui::rgba(10, 7, 22), clrPrimary, 0.02f);
                 }
-                drawCenteredText(textBuf, bx + bw * 0.5f + 6.0f, by + bh * 0.5f, 0.50f, clrWhite, menuLabels[i]);
-            }
 
-            Ui::gradV(0.0f, 214.0f, 400.0f, 26.0f, 0.3f, Ui::rgba(14, 11, 26, 120), Ui::rgba(14, 11, 26, 250));
-            drawText(textBuf, 10.0f, 221.0f, 0.38f, clrMuted, "Arr/Abj + A o toca la pantalla inferior");
-            drawText(textBuf, 330.0f, 221.0f, 0.38f, Ui::rgba(150, 215, 255), "v2.0");
+                // Barra superior de canción en reproducción (Estilo osu! PC)
+                if (!songMgr.sets.empty() && selectedSet >= 0 && selectedSet < static_cast<int>(songMgr.sets.size())) {
+                    const auto& curSet = songMgr.sets[selectedSet];
+                    Ui::gradV(0.0f, 0.0f, 400.0f, 24.0f, 0.28f, Ui::rgba(14, 10, 24, 230), Ui::rgba(14, 10, 24, 60));
+                    std::string nowPlaying = std::string("♫  ") + curSet.artist + " - " + curSet.title;
+                    drawText(textBuf, 12.0f, 4.0f, 0.38f, clr300, truncateString(nowPlaying, 38).c_str(), 0.35f);
+                    drawText(textBuf, 310.0f, 4.0f, 0.34f, isNew3DS ? clr100 : clrMuted, isNew3DS ? "New3DS 804M" : "3DS 268M", 0.35f);
+                }
+
+                // Logo que late sincronizado al BPM real y flota hacia adelante en 3D
+                float dLogo = depthShift(3.5f + beat * 1.2f);
+                float logoX = 118.0f + dLogo;
+                float logoY = 126.0f;
+                float logoR = 55.0f + beat * 8.0f;
+
+                for (int k = 0; k < 3; ++k) {
+                    float phase = std::fmod(animTick * 0.012f + k / 3.0f, 1.0f);
+                    Ui::ring(logoX, logoY, 0.15f, logoR + phase * 60.0f, 2.0f, Ui::withAlpha(clrPrimary, static_cast<u8>((1.0f - phase) * 95.0f)), 40);
+                }
+                Ui::glow(logoX, logoY, 0.16f, logoR * 1.9f, Ui::rgba(255, 102, 170, static_cast<u8>(115 + beat * 45)), 6);
+                C2D_DrawCircleSolid(logoX + 3.0f, logoY + 5.0f, 0.18f, logoR, Ui::rgba(0, 0, 0, 120));
+                C2D_DrawCircleSolid(logoX, logoY, 0.2f, logoR, Ui::rgba(255, 98, 168, 255));
+                C2D_DrawCircleSolid(logoX - logoR * 0.22f, logoY - logoR * 0.28f, 0.21f, logoR * 0.6f, Ui::rgba(255, 255, 255, 30));
+                Ui::ring(logoX, logoY, 0.25f, logoR, 3.5f, clrWhite, 40);
+                drawCenteredText(textBuf, logoX, logoY - 6.0f, 1.10f + beat * 0.06f, clrWhite, "osu!");
+                drawCenteredText(textBuf, logoX, logoY + 24.0f, 0.46f, Ui::rgba(255, 235, 245), "3DS Edition");
+
+                for (int i = 0; i < 4; ++i) {
+                    bool sel = (mainMenuOption == i);
+                    float dBtn = depthShift(sel ? 4.2f : 1.5f);
+                    float bx = (sel ? (206.0f - beat * 4.0f) : 224.0f) + dBtn;
+                    float by = 36.0f + i * 44.0f;
+                    float bw = 210.0f;
+                    float bh = 36.0f;
+
+                    const RGBColor& c = activeSkin.comboColors[i % activeSkin.comboColors.size()];
+                    u32 base = C2D_Color32(c.r, c.g, c.b, 255);
+                    Ui::slantRect(bx + 2.0f, by + 3.0f, bw, bh, 12.0f, 0.18f, Ui::rgba(0, 0, 0, 90));
+                    if (sel) {
+                        Ui::slantRectGrad(bx, by, bw, bh, 12.0f, 0.2f, Ui::brighten(base, 1.0f), Ui::lerpColor(base, Ui::rgba(40, 30, 70), 0.6f));
+                        C2D_DrawLine(bx + 12.0f, by, clrWhite, bx + bw, by, clrWhite, 1.5f, 0.22f);
+                    } else {
+                        Ui::slantRectGrad(bx, by, bw, bh, 12.0f, 0.2f, Ui::rgba(40, 35, 62, 225), Ui::rgba(22, 19, 36, 225));
+                        C2D_DrawLine(bx + 12.0f, by, base, bx, by + bh, base, 3.0f, 0.22f);
+                    }
+                    drawCenteredText(textBuf, bx + bw * 0.5f + 6.0f, by + bh * 0.5f, 0.50f, clrWhite, menuLabels[i]);
+                }
+
+                Ui::gradV(0.0f, 214.0f, 400.0f, 26.0f, 0.3f, Ui::rgba(14, 11, 26, 120), Ui::rgba(14, 11, 26, 250));
+                drawText(textBuf, 10.0f, 221.0f, 0.38f, clrMuted, "Arr/Abj + A o toca la pantalla inferior");
+                drawText(textBuf, 330.0f, 221.0f, 0.38f, Ui::rgba(150, 215, 255), "v2.0 3D");
+                Ui::drawTransition(400.0f, 240.0f, screenFade, clrPrimary);
+            }
 
             C2D_TargetClear(bottomScreen, clrTabletBg);
             C2D_SceneBegin(bottomScreen);
 
             Ui::backdrop(320.0f, 240.0f, static_cast<float>(animTick), Ui::rgba(26, 20, 44), Ui::rgba(12, 10, 22), clrPrimary, 0.02f);
+            if (bgTex.loaded) {
+                bgTex.drawRect(0.0f, 0.0f, 320.0f, 240.0f, 0.03f, 75);
+                C2D_DrawRectSolid(0.0f, 0.0f, 0.04f, 320.0f, 240.0f, Ui::rgba(14, 11, 24, 160));
+            }
 
             for (int i = 0; i < 4; ++i) {
                 bool sel = (mainMenuOption == i);
@@ -487,14 +1050,15 @@ int main(int argc, char* argv[]) {
 
             Ui::panel(10.0f, 188.0f, 300.0f, 44.0f, 0.2f, Ui::rgba(30, 27, 44, 235), clr300);
             char summary1[96];
-            std::snprintf(summary1, sizeof(summary1), "Area Tablet: %d%% | Modo: %s | Offset: %+dms",
+            std::snprintf(summary1, sizeof(summary1), "Modo: %s | Area: %d%% | Offset: %+dms",
+                settings.getShortInputModeLabel(),
                 static_cast<int>(std::round(settings.tabletScale * 100.0f)),
-                settings.tapWithStylus ? "Touch+Btn" : "Hibrido PC",
                 settings.audioOffsetMs);
             drawCenteredText(textBuf, 160.0f, 201.0f, 0.37f, clr300, summary1);
 
             std::string skinLine = "Skin: " + truncateString(activeSkin.name, 24) + " | Mods: " + formatModsString(settings.activeMods);
             drawCenteredText(textBuf, 160.0f, 219.0f, 0.37f, clrCursor, skinLine.c_str());
+            Ui::drawTransition(320.0f, 240.0f, screenFade, clrPrimary);
 
             C3D_FrameEnd(0);
             continue;
@@ -508,7 +1072,7 @@ int main(int argc, char* argv[]) {
 
             if (wifiServer.needsRescan) {
                 wifiServer.needsRescan = false;
-                songMgr.initAndScan();
+                songMgr.initAndScan(&scoreMgr);
                 skinMgr.initAndScan();
                 selectedSet = 0;
                 selectedDiff = 0;
@@ -516,13 +1080,32 @@ int main(int argc, char* argv[]) {
             }
 
             bool exitWifi = (kDown & KEY_B) != 0;
-            if (touchJustDown && touch.px >= 40 && touch.px <= 280 && touch.py >= 165 && touch.py <= 215) {
+            if (touchJustDown && touch.px >= 166 && touch.px <= 306 && touch.py >= 180 && touch.py <= 228) {
                 exitWifi = true;
+            }
+
+            bool triggerRescan = (kDown & KEY_X) != 0;
+            if (touchJustDown && touch.px >= 14 && touch.px <= 154 && touch.py >= 180 && touch.py <= 228) {
+                triggerRescan = true;
+            }
+
+            if (triggerRescan) {
+                audio.playHitSound(2);
+                wifiServer.statusText = "Actualizando biblioteca...";
+                OszExtractor::extractAllPendingOsz("/osu/songs", "/osu/songs");
+                OszExtractor::extractAllPendingOsk("/osu/skins", "/osu/skins");
+                songMgr.initAndScan(&scoreMgr);
+                skinMgr.initAndScan();
+                selectedSet = 0;
+                selectedDiff = 0;
+                char rescanMsg[96];
+                std::snprintf(rescanMsg, sizeof(rescanMsg), "✓ Biblioteca actualizada: %d canciones", static_cast<int>(songMgr.sets.size()));
+                wifiServer.statusText = rescanMsg;
             }
 
             if (exitWifi) {
                 wifiServer.stop();
-                songMgr.initAndScan();
+                songMgr.initAndScan(&scoreMgr);
                 skinMgr.initAndScan();
                 audio.playHitSound(0);
                 appState = wifiReturnState;
@@ -533,56 +1116,99 @@ int main(int argc, char* argv[]) {
             C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
 
             // --- PANTALLA SUPERIOR: URL DEL SERVIDOR Y PROGRESO EN VIVO ---
-            C2D_TargetClear(topScreen, clrBgDark);
-            C2D_SceneBegin(topScreen);
+            for (int eye = 0; eye < (stereoActive ? 2 : 1); ++eye) {
+                C3D_RenderTarget* curTop = (eye == 0) ? topScreen : topScreenRight;
+                float eyeSign = stereoActive ? ((eye == 0) ? 1.0f : -1.0f) : 0.0f;
+                float dCard = eyeSign * slider3D * 2.5f;
 
-            C2D_DrawRectSolid(0.0f, 0.0f, 0.1f, 400.0f, 34.0f, clrPanelBg);
-            drawText(textBuf, 12.0f, 8.0f, 0.52f, clr300, "Modo Descargar / Enviar Canciones por Wi-Fi");
+                C2D_TargetClear(curTop, clrBgDark);
+                C2D_SceneBegin(curTop);
 
-            C2D_DrawRectSolid(16.0f, 44.0f, 0.15f, 368.0f, 64.0f, clrPanelBg);
-            drawRectOutline(16.0f, 44.0f, 368.0f, 64.0f, 1.5f, clrPrimary);
-            drawCenteredText(textBuf, 200.0f, 58.0f, 0.43f, clrWhite,
-                "Abre esta direccion en el navegador de tu Celular o PC:");
-            drawCenteredText(textBuf, 200.0f, 84.0f, 0.72f, clrCursor,
-                wifiServer.serverUrl.empty() ? "Sin conexion Wi-Fi" : wifiServer.serverUrl.c_str());
+                Ui::backdrop(400.0f, 240.0f, static_cast<float>(animTick), Ui::rgba(28, 18, 52), Ui::rgba(10, 8, 22), clr300, 0.02f);
 
-            drawText(textBuf, 22.0f, 118.0f, 0.41f, clrWhite,
-                "1. Sube tus propios archivos .osz (Mapas) o .osk (Skins)");
-            drawText(textBuf, 22.0f, 138.0f, 0.41f, clr100,
-                "2. O usa el Buscador Online integrado en esa misma web!");
+                Ui::gradV(0.0f, 0.0f, 400.0f, 32.0f, 0.3f, Ui::rgba(18, 15, 32, 245), Ui::rgba(18, 15, 32, 160));
+                C2D_DrawRectSolid(0.0f, 31.0f, 0.31f, 400.0f, 1.5f, clr300);
+                drawText(textBuf, 12.0f, 7.0f, 0.50f, clrWhite, "Descargar / Enviar Beatmaps y Skins por Wi-Fi");
 
-            // Barra de progreso de recepción en tiempo real
-            C2D_DrawRectSolid(22.0f, 162.0f, 0.15f, 356.0f, 40.0f, clrPanelBg);
-            drawCenteredText(textBuf, 200.0f, 173.0f, 0.42f, clr300,
-                truncateString(wifiServer.statusText, 50).c_str());
+                Ui::panel(16.0f + dCard, 42.0f, 368.0f, 66.0f, 0.2f, Ui::rgba(26, 22, 42, 235), clrPrimary);
+                drawCenteredText(textBuf, 200.0f + dCard, 56.0f, 0.42f, clrWhite,
+                    "Abre esta direccion en el navegador de tu Celular o PC:");
+                drawCenteredText(textBuf, 200.0f + dCard, 84.0f, 0.72f, clrCursor,
+                    wifiServer.serverUrl.empty() ? "Sin conexion Wi-Fi" : wifiServer.serverUrl.c_str());
 
-            float prog = wifiServer.getProgressRatio();
-            C2D_DrawRectSolid(34.0f, 186.0f, 0.2f, 332.0f, 10.0f, clrBgDark);
-            if (prog > 0.0f) {
-                C2D_DrawRectSolid(34.0f, 186.0f, 0.3f, 332.0f * prog, 10.0f, clr100);
+                Ui::panel(16.0f + dCard * 0.6f, 114.0f, 368.0f, 42.0f, 0.2f, Ui::rgba(22, 19, 36, 220));
+                drawText(textBuf, 24.0f + dCard * 0.6f, 118.0f, 0.40f, clrWhite,
+                    "1. Sube tus propios archivos .osz (Mapas) o .osk (Skins)");
+                drawText(textBuf, 24.0f + dCard * 0.6f, 136.0f, 0.40f, clr100,
+                    "2. O usa el Buscador Online integrado en esa misma web!");
+
+                // Barra de progreso de recepción en tiempo real
+                Ui::panel(16.0f + dCard, 162.0f, 368.0f, 42.0f, 0.2f, Ui::rgba(26, 22, 42, 235), clr300);
+                drawCenteredText(textBuf, 200.0f + dCard, 174.0f, 0.41f, clr300,
+                    truncateString(wifiServer.statusText, 50).c_str());
+
+                float prog = wifiServer.getProgressRatio();
+                Ui::statBar(30.0f + dCard, 189.0f, 340.0f, 8.0f, 0.35f, prog, clr100);
+
+                Ui::gradV(0.0f, 212.0f, 400.0f, 28.0f, 0.3f, Ui::rgba(18, 15, 32, 170), Ui::rgba(18, 15, 32, 250));
+                char footerWifi[96];
+                std::snprintf(footerWifi, sizeof(footerWifi),
+                    "Paquetes instalados en esta sesion: %d | Total canciones: %d",
+                    wifiServer.uploadedCount, static_cast<int>(songMgr.sets.size()));
+                drawCenteredText(textBuf, 200.0f, 226.0f, 0.40f, clrWhite, footerWifi);
+                Ui::drawTransition(400.0f, 240.0f, screenFade, clr300);
             }
 
-            C2D_DrawRectSolid(0.0f, 212.0f, 0.1f, 400.0f, 28.0f, clrPanelBg);
-            char footerWifi[96];
-            std::snprintf(footerWifi, sizeof(footerWifi),
-                "Paquetes instalados en esta sesion: %d | Total canciones: %d",
-                wifiServer.uploadedCount, static_cast<int>(songMgr.sets.size()));
-            drawCenteredText(textBuf, 200.0f, 226.0f, 0.40f, clrWhite, footerWifi);
-
-            // --- PANTALLA INFERIOR: INSTRUCCIONES Y BOTÓN SALIR ---
+            // --- PANTALLA INFERIOR: CÓDIGO QR, SEÑAL Y BOTONES INTERACTIVOS ---
             C2D_TargetClear(bottomScreen, clrTabletBg);
             C2D_SceneBegin(bottomScreen);
 
-            C2D_DrawRectSolid(16.0f, 16.0f, 0.1f, 288.0f, 135.0f, clrPanelBg);
-            drawCenteredText(textBuf, 160.0f, 34.0f, 0.48f, clrCursor, "Como funciona?");
-            drawCenteredText(textBuf, 160.0f, 60.0f, 0.39f, clrWhite, "Tu 3DS ahora aloja una pagina web local.");
-            drawCenteredText(textBuf, 160.0f, 80.0f, 0.39f, clrWhite, "Desde tu telefono o PC puedes buscar mapas");
-            drawCenteredText(textBuf, 160.0f, 100.0f, 0.39f, clrWhite, "online o arrastrar archivos .osz / .osk.");
-            drawCenteredText(textBuf, 160.0f, 124.0f, 0.39f, clr100, "Se extraen solos sin reiniciar la 3DS!");
+            Ui::backdrop(320.0f, 240.0f, static_cast<float>(animTick), Ui::rgba(26, 20, 44), Ui::rgba(12, 10, 22), clr300, 0.02f);
 
-            C2D_DrawRectSolid(40.0f, 165.0f, 0.2f, 240.0f, 48.0f, clrPrimary);
-            drawRectOutline(40.0f, 165.0f, 240.0f, 48.0f, 2.0f, clrWhite);
-            drawCenteredText(textBuf, 160.0f, 189.0f, 0.50f, clrWhite, "VOLVER (B)");
+            // Cabecera superior
+            Ui::gradV(0.0f, 0.0f, 320.0f, 26.0f, 0.3f, Ui::rgba(18, 15, 32, 245), Ui::rgba(18, 15, 32, 160));
+            C2D_DrawRectSolid(0.0f, 25.0f, 0.31f, 320.0f, 1.5f, clr300);
+            drawCenteredText(textBuf, 160.0f, 5.0f, 0.44f, clrWhite, "TRANSFERENCIA Y DESCARGAS");
+
+            // Panel Izquierdo: Código QR nítido
+            if (!wifiServer.serverUrl.empty()) {
+                renderQrCode(wifiServer.serverUrl.c_str(), 14.0f, 32.0f, 138.0f);
+            } else {
+                Ui::panel(14.0f, 32.0f, 138.0f, 138.0f, 0.22f, Ui::rgba(26, 22, 42, 235), clrPrimary);
+                drawCenteredText(textBuf, 83.0f, 85.0f, 0.40f, clrCursor, "Buscando");
+                drawCenteredText(textBuf, 83.0f, 105.0f, 0.40f, clrWhite, "Red Wi-Fi...");
+            }
+
+            // Panel Derecho: Monitor de señal Wi-Fi e instrucciones rápidas
+            Ui::panel(158.0f, 32.0f, 148.0f, 138.0f, 0.22f, Ui::rgba(24, 20, 40, 240), clr300);
+            u8 wifiSig = osGetWifiStrength();
+            renderWifiBars(166.0f, 40.0f, wifiSig, clr100, Ui::rgba(70, 65, 90));
+            const char* sigText = (wifiSig == 3) ? "Excelente" : ((wifiSig == 2) ? "Buena" : ((wifiSig == 1) ? "Debil" : "Sin senal"));
+            drawText(textBuf, 188.0f, 39.0f, 0.36f, (wifiSig > 0) ? clr100 : clrMiss, sigText);
+
+            drawText(textBuf, 166.0f, 58.0f, 0.44f, clrCursor, "ESCANEA CON MOVIL");
+            drawText(textBuf, 166.0f, 78.0f, 0.34f, clrWhite, "Apunta la camara al QR");
+            drawText(textBuf, 166.0f, 94.0f, 0.34f, clrWhite, "para abrir la web.");
+            drawText(textBuf, 166.0f, 110.0f, 0.34f, clrWhite, "Descarga con audio y");
+            drawText(textBuf, 166.0f, 126.0f, 0.34f, clr100, "filtros por estrellas.");
+
+            char countBuf[48];
+            std::snprintf(countBuf, sizeof(countBuf), "Canciones: %d", static_cast<int>(songMgr.sets.size()));
+            drawText(textBuf, 166.0f, 148.0f, 0.36f, clrWhite, countBuf);
+
+            // Botón Izquierdo: Re-escanear canciones
+            Ui::slantRectGrad(14.0f, 178.0f, 140.0f, 48.0f, 8.0f, 0.25f, Ui::rgba(50, 140, 225), Ui::rgba(25, 75, 150));
+            C2D_DrawLine(22.0f, 178.0f, clrWhite, 146.0f, 178.0f, clrWhite, 1.2f, 0.3f);
+            drawCenteredText(textBuf, 84.0f, 194.0f, 0.40f, clrWhite, "RE-ESCANEAR (X)");
+            drawCenteredText(textBuf, 84.0f, 210.0f, 0.32f, clr100, "Refrescar canciones");
+
+            // Botón Derecho: Volver al menú
+            Ui::slantRectGrad(166.0f, 178.0f, 140.0f, 48.0f, 8.0f, 0.25f, clrPrimary, Ui::rgba(110, 45, 135));
+            C2D_DrawLine(174.0f, 178.0f, clrWhite, 298.0f, 178.0f, clrWhite, 1.2f, 0.3f);
+            drawCenteredText(textBuf, 236.0f, 194.0f, 0.44f, clrWhite, "VOLVER (B)");
+            drawCenteredText(textBuf, 236.0f, 210.0f, 0.32f, clrWhite, "Guardar cambios");
+
+            Ui::drawTransition(320.0f, 240.0f, screenFade, clr300);
 
             C3D_FrameEnd(0);
             continue;
@@ -592,28 +1218,177 @@ int main(int argc, char* argv[]) {
         // 2. MENÚ DE CONFIGURACIONES (Tablet, Audio, Calibración, Skins)
         // =========================================================
         if (appState == STATE_SETTINGS) {
-            if (kDown & KEY_B) {
+            const int numSettings = 20;
+            int activeTab = settingsOption / 4; // 0: TABLET, 1: CONTROLES, 2: AUDIO, 3: JUEGO, 4: VISUAL
+
+            if (capturingKeyIndex != -1) {
+                u32 anyKey = kDown & (KEY_A | KEY_B | KEY_X | KEY_Y | KEY_L | KEY_R | KEY_ZL | KEY_ZR | KEY_DUP | KEY_DDOWN | KEY_DLEFT | KEY_DRIGHT | KEY_SELECT | KEY_START);
+                if (touchJustDown) {
+                    u32 touchedKey = 0;
+                    if (activeTab == 1) {
+                        if (touch.px >= 28 && touch.px <= 70 && touch.py >= 68 && touch.py <= 84) touchedKey = KEY_L;
+                        else if (touch.px >= 250 && touch.px <= 292 && touch.py >= 68 && touch.py <= 84) touchedKey = KEY_R;
+                        else if (touch.px >= 72 && touch.px <= 100 && touch.py >= 68 && touch.py <= 82) touchedKey = KEY_ZL;
+                        else if (touch.px >= 220 && touch.px <= 248 && touch.py >= 68 && touch.py <= 82) touchedKey = KEY_ZR;
+                        else if (touch.px >= 53 && touch.px <= 67 && touch.py >= 135 && touch.py <= 150) touchedKey = KEY_DUP;
+                        else if (touch.px >= 53 && touch.px <= 67 && touch.py >= 155 && touch.py <= 170) touchedKey = KEY_DDOWN;
+                        else if (touch.px >= 42 && touch.px <= 55 && touch.py >= 145 && touch.py <= 162) touchedKey = KEY_DLEFT;
+                        else if (touch.px >= 63 && touch.px <= 78 && touch.py >= 145 && touch.py <= 162) touchedKey = KEY_DRIGHT;
+                        else if (std::hypot(touch.px - 258.0f, touch.py - 124.0f) <= 12.0f) touchedKey = KEY_X;
+                        else if (std::hypot(touch.px - 258.0f, touch.py - 156.0f) <= 12.0f) touchedKey = KEY_B;
+                        else if (std::hypot(touch.px - 242.0f, touch.py - 140.0f) <= 12.0f) touchedKey = KEY_Y;
+                        else if (std::hypot(touch.px - 274.0f, touch.py - 140.0f) <= 12.0f) touchedKey = KEY_A;
+                        else if (touch.px >= 118 && touch.px <= 140 && touch.py >= 174 && touch.py <= 188) touchedKey = KEY_SELECT;
+                        else if (touch.px >= 180 && touch.px <= 202 && touch.py >= 174 && touch.py <= 188) touchedKey = KEY_START;
+                    }
+
+                    if (touchedKey != 0) {
+                        anyKey = touchedKey;
+                    } else {
+                        capturingKeyIndex = -1;
+                        audio.playHitSound(0);
+                        continue;
+                    }
+                }
+
+                if (anyKey) {
+                    if (anyKey & KEY_B) {
+                        capturingKeyIndex = -1;
+                        audio.playHitSound(0);
+                    } else {
+                        audio.playHitSound(2);
+                        int row = capturingKeyIndex - 4; // 0..3
+                        if (settingsControlsMode == MODE_STD) {
+                            if (row == 0) settings.keyOsuK1 = anyKey;
+                            else if (row == 1) settings.keyOsuK2 = anyKey;
+                            else if (row == 2) settings.keyOsuSmoke = anyKey;
+                            else if (row == 3) settings.keyQuickRetry = anyKey;
+                        } else if (settingsControlsMode == MODE_TAIKO) {
+                            if (row == 0) settings.keyTaikoDonLeft = anyKey;
+                            else if (row == 1) settings.keyTaikoDonRight = anyKey;
+                            else if (row == 2) settings.keyTaikoKatsuLeft = anyKey;
+                            else if (row == 3) settings.keyTaikoKatsuRight = anyKey;
+                            settings.keyTaikoDon = settings.keyTaikoDonLeft | settings.keyTaikoDonRight;
+                            settings.keyTaikoKatsu = settings.keyTaikoKatsuLeft | settings.keyTaikoKatsuRight;
+                        } else if (settingsControlsMode == MODE_CATCH) {
+                            if (row == 0) settings.keyCatchLeft = anyKey;
+                            else if (row == 1) settings.keyCatchRight = anyKey;
+                            else if (row == 2) settings.keyCatchDash = anyKey;
+                            else if (row == 3) settings.keyQuickRetry = anyKey;
+                        } else if (settingsControlsMode == MODE_MANIA) {
+                            if (row == 0) settings.keyManiaCol1 = anyKey;
+                            else if (row == 1) settings.keyManiaCol2 = anyKey;
+                            else if (row == 2) settings.keyManiaCol3 = anyKey;
+                            else if (row == 3) settings.keyManiaCol4 = anyKey;
+                        }
+                        capturingKeyIndex = -1;
+                        settings.save();
+                    }
+                }
+                continue;
+            } else if (kDown & KEY_B) {
                 calibrationMode = false;
                 settings.save();
                 audio.setVolumes(settings.musicVolume, settings.sfxVolume);
                 audio.playHitSound(0);
                 appState = settingsReturnState;
-                if (appState == STATE_SONG_SELECT) updateSongPreview();
+                if (appState == STATE_SONG_SELECT || appState == STATE_MAIN_MENU) updateSongPreview();
                 continue;
             }
 
-            if (kDown & KEY_X) {
-                calibrationMode = !calibrationMode;
-                calibSamples.clear();
-                calibStartTick = osGetTime();
-                calibLastBeatIndex = -1;
-                if (calibrationMode) audio.stopMusic();
-                audio.playHitSound(2);
+            if (capturingKeyIndex == -1 && (kDown & KEY_X)) {
+                if (activeTab == 1) {
+                    settings.resetControlsToDefault(settingsControlsMode);
+                    audio.playHitSound(2);
+                } else {
+                    calibrationMode = !calibrationMode;
+                    calibSamples.clear();
+                    calibStartTick = osGetTime();
+                    calibLastBeatIndex = -1;
+                    if (calibrationMode) audio.stopMusic();
+                    audio.playHitSound(2);
+                }
             }
 
-            if (kDown & KEY_Y) {
-                settings.resetTabletArea();
-                audio.playHitSound(0);
+            if (capturingKeyIndex == -1 && (kDown & KEY_Y)) {
+                if (activeTab == 1) {
+                    settings.resetControlsToDefault(settingsControlsMode);
+                    audio.playHitSound(2);
+                } else {
+                    settings.resetTabletArea();
+                    audio.playHitSound(0);
+                }
+            }
+
+            // Cambiar de categoría con gatillos L / R o ZL / ZR (5 categorías)
+            if (activeTab != 1) {
+                if (kDown & (KEY_L | KEY_ZL)) {
+                    activeTab = (activeTab + 4) % 5;
+                    settingsOption = activeTab * 4;
+                    audio.playHitSound(0);
+                }
+                if (kDown & (KEY_R | KEY_ZR)) {
+                    activeTab = (activeTab + 1) % 5;
+                    settingsOption = activeTab * 4;
+                    audio.playHitSound(0);
+                }
+            } else {
+                if (kDown & KEY_ZL) {
+                    activeTab = (activeTab + 4) % 5;
+                    settingsOption = activeTab * 4;
+                    audio.playHitSound(0);
+                }
+                if (kDown & KEY_ZR) {
+                    activeTab = (activeTab + 1) % 5;
+                    settingsOption = activeTab * 4;
+                    audio.playHitSound(0);
+                }
+            }
+
+            // Tocar pestañas superiores o botones inferiores en pantalla táctil
+            if (touchJustDown && !calibrationMode && capturingKeyIndex == -1) {
+                if (touch.py >= 6 && touch.py <= 30) {
+                    for (int t = 0; t < 5; ++t) {
+                        float tx = 7.0f + t * 62.0f;
+                        if (touch.px >= tx && touch.px <= tx + 58.0f) {
+                            activeTab = t;
+                            settingsOption = t * 4;
+                            audio.playHitSound(0);
+                            break;
+                        }
+                    }
+                } else if (touch.py >= 204 && touch.py <= 234) {
+                    if (touch.px >= 10 && touch.px <= 104) { // CALIBRAR (X) / RESTABLECER (Tab Teclas)
+                        if (activeTab == 1) {
+                            settings.resetControlsToDefault(settingsControlsMode);
+                            audio.playHitSound(2);
+                        } else {
+                            calibrationMode = !calibrationMode;
+                            calibSamples.clear();
+                            calibStartTick = osGetTime();
+                            calibLastBeatIndex = -1;
+                            if (calibrationMode) audio.stopMusic();
+                            audio.playHitSound(2);
+                        }
+                    } else if (touch.px >= 110 && touch.px <= 204) { // RESET (Y)
+                        if (activeTab == 1) {
+                            settings.resetControlsToDefault(settingsControlsMode);
+                            audio.playHitSound(2);
+                        } else {
+                            settings.resetTabletArea();
+                            audio.playHitSound(0);
+                        }
+                    } else if (touch.px >= 210 && touch.px <= 304) { // GUARDAR (B)
+                        calibrationMode = false;
+                        capturingKeyIndex = -1;
+                        settings.save();
+                        audio.setVolumes(settings.musicVolume, settings.sfxVolume);
+                        audio.playHitSound(0);
+                        appState = settingsReturnState;
+                        if (appState == STATE_SONG_SELECT || appState == STATE_MAIN_MENU) updateSongPreview();
+                        continue;
+                    }
+                }
             }
 
             if (calibrationMode) {
@@ -637,71 +1412,135 @@ int main(int argc, char* argv[]) {
                         settings.clampValues();
                     }
                 }
-            } else {
-                const int numSettings = 10;
-                if (kDown & KEY_DUP) {
-                    settingsOption = (settingsOption - 1 + numSettings) % numSettings;
-                    audio.playHitSound(0);
-                }
-                if (kDown & KEY_DDOWN) {
-                    settingsOption = (settingsOption + 1) % numSettings;
-                    audio.playHitSound(0);
-                }
+            } else if (capturingKeyIndex == -1) {
+                if (activeTab == 1) {
+                    // En pestaña TECLAS: D-Pad Arriba / Abajo cicla únicamente entre las 4 acciones sin salirse de la pestaña
+                    if (kDown & KEY_DUP) {
+                        settingsOption = (settingsOption <= 4) ? 7 : (settingsOption - 1);
+                        audio.playHitSound(0);
+                    }
+                    if (kDown & KEY_DDOWN) {
+                        settingsOption = (settingsOption >= 7) ? 4 : (settingsOption + 1);
+                        audio.playHitSound(0);
+                    }
+                    // D-Pad Izquierda / Derecha cambia de modo (STD / TAIKO / CATCH / MANIA)
+                    if (kDown & KEY_DLEFT) {
+                        settingsControlsMode = (settingsControlsMode + 3) % 4;
+                        audio.playHitSound(2);
+                    }
+                    if (kDown & KEY_DRIGHT) {
+                        settingsControlsMode = (settingsControlsMode + 1) % 4;
+                        audio.playHitSound(2);
+                    }
+                } else {
+                    if (kDown & KEY_DUP) {
+                        settingsOption = (settingsOption - 1 + numSettings) % numSettings;
+                        audio.playHitSound(0);
+                    }
+                    if (kDown & KEY_DDOWN) {
+                        settingsOption = (settingsOption + 1) % numSettings;
+                        audio.playHitSound(0);
+                    }
 
-                int stepDir = 0;
-                if (kDown & (KEY_DLEFT | KEY_L))  stepDir = -1;
-                if (kDown & (KEY_DRIGHT | KEY_R)) stepDir = +1;
+                    int stepDir = 0;
+                    if (kDown & KEY_DLEFT)  stepDir = -1;
+                    if (kDown & KEY_DRIGHT) stepDir = +1;
 
-                if (stepDir != 0) {
-                    int numSkins = std::max(1, static_cast<int>(skinMgr.skins.size()));
-                    switch (settingsOption) {
-                        case 0: // Tamaño Área Tablet
-                            settings.tabletScale += stepDir * 0.05f;
-                            break;
-                        case 1: // Posición Horizontal X
-                            settings.tabletCenterX += stepDir * 8.0f;
-                            break;
-                        case 2: // Posición Vertical Y
-                            settings.tabletCenterY += stepDir * 8.0f;
-                            break;
-                        case 3: // Modo de Entrada
-                            settings.tapWithStylus = !settings.tapWithStylus;
-                            break;
-                        case 4: // Volumen Música
+                    if (stepDir != 0) {
+                        int numSkins = std::max(1, static_cast<int>(skinMgr.skins.size()));
+                        switch (settingsOption) {
+                            case 0: // Modo de Entrada
+                                settings.cycleInputMode(stepDir);
+                                break;
+                            case 1: // Tamaño Área Tablet
+                                settings.tabletScale += stepDir * 0.05f;
+                                break;
+                            case 2: // Posición Horizontal X
+                                settings.tabletCenterX += stepDir * 8.0f;
+                                break;
+                            case 3: // Posición Vertical Y
+                                settings.tabletCenterY += stepDir * 8.0f;
+                                break;
+                        case 8: // Volumen Música
                             settings.musicVolume += stepDir * 5;
                             settings.clampValues();
                             audio.setVolumes(settings.musicVolume, settings.sfxVolume);
                             break;
-                        case 5: // Volumen Hitsounds
+                        case 9: // Volumen Hitsounds
                             settings.sfxVolume += stepDir * 5;
                             settings.clampValues();
                             audio.setVolumes(settings.musicVolume, settings.sfxVolume);
                             audio.playHitSound(2);
                             break;
-                        case 6: // Offset de Audio
+                        case 10: // Offset de Audio
                             settings.audioOffsetMs += stepDir * ((kHeld & (KEY_L | KEY_R)) ? 5 : 1);
                             break;
-                        case 7: // Skin Activo (.osk / Presets)
+                        case 11: // Hitsounds Propios del Beatmap
+                            settings.beatmapHitsounds = !settings.beatmapHitsounds;
+                            break;
+                        case 12: // Modo de Juego (STD / TAIKO / CATCH / MANIA)
+                            settings.gameMode = static_cast<GameMode>((settings.gameMode + stepDir + 4) % 4);
+                            break;
+                        case 13: // Skin Activo (.osk / Presets)
                             settings.skinIndex = (settings.skinIndex + stepDir + numSkins) % numSkins;
                             applyActiveSkinAudio();
                             audio.playHitSound(2);
                             break;
-                        case 8: // Tamaño del Cursor / Preview Musical
+                        case 14: // Sliders Serpiente (Snaking Sliders)
+                            settings.snakingSliders = !settings.snakingSliders;
+                            break;
+                        case 15: // Combo Bursts (Mascota)
+                            settings.comboBursts = !settings.comboBursts;
+                            break;
+                        case 16: // Fondo en Modo Taiko (Festivo / Imagen / Video)
+                            settings.taikoBgMode = (settings.taikoBgMode + stepDir + 3) % 3;
+                            break;
+                        case 17: // Tamaño del Cursor
                             settings.cursorScale += stepDir * 0.1f;
                             break;
-                        case 9: // Atenuación del Fondo (Background Dim %)
+                        case 18: // Atenuación del Fondo (Dim %)
                             settings.bgDim += stepDir * 5;
+                            break;
+                        case 19: // Videos de Fondo (.3dsv)
+                            settings.enableVideo = !settings.enableVideo;
                             break;
                     }
                     settings.clampValues();
                 }
 
                 if (kDown & KEY_A) {
-                    if (settingsOption == 3) settings.tapWithStylus = !settings.tapWithStylus;
-                    else if (settingsOption == 8) settings.songPreview = !settings.songPreview;
+                    if (settingsOption == 0) settings.cycleInputMode(1);
+                    else if (settingsOption >= 4 && settingsOption <= 7) {
+                        capturingKeyIndex = settingsOption;
+                        audio.playHitSound(2);
+                    }
+                    else if (settingsOption == 10) { // Abrir calibrador rápido
+                        calibrationMode = true;
+                        calibSamples.clear();
+                        calibStartTick = osGetTime();
+                        calibLastBeatIndex = -1;
+                        audio.stopMusic();
+                    }
+                    else if (settingsOption == 11) settings.beatmapHitsounds = !settings.beatmapHitsounds;
+                    else if (settingsOption == 12) {
+                        settings.gameMode = static_cast<GameMode>((settings.gameMode + 1) % 4);
+                        settings.save();
+                    }
+                    else if (settingsOption == 13) {
+                        settings.skinIndex = (settings.skinIndex + 1) % std::max(1, static_cast<int>(skinMgr.skins.size()));
+                        applyActiveSkinAudio();
+                    }
+                    else if (settingsOption == 14) settings.snakingSliders = !settings.snakingSliders;
+                    else if (settingsOption == 15) settings.comboBursts = !settings.comboBursts;
+                    else if (settingsOption == 16) {
+                        settings.taikoBgMode = (settings.taikoBgMode + 1) % 3;
+                        settings.save();
+                    }
+                    else if (settingsOption == 19) settings.enableVideo = !settings.enableVideo;
                     audio.playHitSound(0);
                 }
             }
+        }
 
             if (std::abs(cpad.dx) > 20 || std::abs(cpad.dy) > 20) {
                 settings.tabletCenterX += (cpad.dx / 156.0f) * 3.0f;
@@ -710,7 +1549,7 @@ int main(int argc, char* argv[]) {
             }
 
             if (isTouching) {
-                if (settingsOption == 1 || settingsOption == 2 || (kHeld & KEY_L)) {
+                if (!settings.playOnBottomScreen && (settingsOption == 2 || settingsOption == 3 || (kHeld & KEY_L))) {
                     settings.tabletCenterX = touch.px;
                     settings.tabletCenterY = touch.py;
                     settings.clampValues();
@@ -720,110 +1559,889 @@ int main(int argc, char* argv[]) {
 
             C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
 
-            C2D_TargetClear(topScreen, clrBgDark);
-            C2D_SceneBegin(topScreen);
-
-            drawRectOutline(TOP_OFFSET_X, 0.0f, 320.0f, 240.0f, 1.0f, C2D_Color32(55, 50, 75, 160));
-
-            C2D_DrawRectSolid(0.0f, 0.0f, 0.1f, 400.0f, 26.0f, clrPanelBg);
-            drawText(textBuf, 12.0f, 4.0f, 0.48f, clrPrimary, "Configuraciones (Tablet, Audio, Calibracion, Skins y Fondo)");
-
             float rx, ry, rw, rh;
             settings.getTabletRect(rx, ry, rw, rh);
+            activeTab = settingsOption / 4;
 
-            char valStrings[10][64];
-            std::snprintf(valStrings[0], 64, "%d%% (%dx%d px)",
-                static_cast<int>(std::round(settings.tabletScale * 100.0f)),
-                static_cast<int>(std::round(rw)),
-                static_cast<int>(std::round(rh)));
-            std::snprintf(valStrings[1], 64, "X = %.0f px (Stylus / C-Pad)", settings.tabletCenterX);
-            std::snprintf(valStrings[2], 64, "Y = %.0f px (Stylus / C-Pad)", settings.tabletCenterY);
-            std::snprintf(valStrings[3], 64, "%s",
-                settings.tapWithStylus ? "Touch + Botones" : "Hibrido PC (Stylus solo apunta)");
-            std::snprintf(valStrings[4], 64, "%d%%", settings.musicVolume);
-            std::snprintf(valStrings[5], 64, "%d%%", settings.sfxVolume);
-            std::snprintf(valStrings[6], 64, "%+d ms (Pulsa X para Asistente)", settings.audioOffsetMs);
-            std::snprintf(valStrings[7], 64, "%s (%d/%d)",
-                truncateString(activeSkin.name, 22).c_str(),
-                settings.skinIndex + 1,
-                static_cast<int>(skinMgr.skins.size()));
-            std::snprintf(valStrings[8], 64, "Cursor %.1fx | Preview(A): %s",
-                settings.cursorScale, settings.songPreview ? "SI" : "NO");
-            std::snprintf(valStrings[9], 64, "%d%% Oscuridad (Background Dim)", settings.bgDim);
+            // --- PANTALLA SUPERIOR: TARJETAS REDISEÑADAS POR CATEGORÍA ESTILO OSU!LAZER ---
+            for (int eye = 0; eye < (stereoActive ? 2 : 1); ++eye) {
+                C3D_RenderTarget* curTop = (eye == 0) ? topScreen : topScreenRight;
+                float eyeSign = stereoActive ? ((eye == 0) ? 1.0f : -1.0f) : 0.0f;
+                C2D_TargetClear(curTop, clrBgDark);
+                C2D_SceneBegin(curTop);
+                auto depthShift = [&](float px) { return eyeSign * slider3D * px; };
 
-            const char* labels[10] = {
-                "1. Tamano Area Tablet",
-                "2. Posicion Tablet X",
-                "3. Posicion Tablet Y",
-                "4. Modo de Entrada",
-                "5. Volumen Musica",
-                "6. Volumen Hitsounds",
-                "7. Offset Calibracion",
-                "8. Skin (.osk / Preset)",
-                "9. Cursor y Preview",
-                "10. Fondo Cancion (Dim)"
-            };
-
-            for (int i = 0; i < 10; ++i) {
-                float yPos = 29.0f + i * 18.0f;
-                bool sel = (!calibrationMode && settingsOption == i);
-                if (sel) {
-                    C2D_DrawRectSolid(8.0f, yPos - 1.0f, 0.15f, 384.0f, 17.0f, C2D_Color32(55, 45, 78, 220));
+                float dBg = depthShift(-3.5f);
+                if (bgTex.loaded) {
+                    Ui::backdrop(400.0f, 240.0f, static_cast<float>(animTick), Ui::rgba(28, 18, 52), Ui::rgba(10, 8, 22), clrPrimary, 0.01f);
+                    bgTex.drawRect(dBg, 0.0f, 400.0f, 240.0f, 0.02f, 255);
+                    u8 dimAlpha = static_cast<u8>((settings.bgDim * 220) / 100);
+                    C2D_DrawRectSolid(0.0f, 0.0f, 0.03f, 400.0f, 240.0f, Ui::rgba(14, 10, 24, dimAlpha));
+                } else {
+                    Ui::backdrop(400.0f, 240.0f, static_cast<float>(animTick), Ui::rgba(28, 18, 52), Ui::rgba(10, 8, 22), clrPrimary, 0.02f);
                 }
-                u32 lblClr = sel ? clrCursor : clrWhite;
-                u32 valClr = sel ? clr300 : clrMuted;
-                drawText(textBuf, 14.0f, yPos, 0.39f, lblClr, labels[i]);
-                drawText(textBuf, 170.0f, yPos, 0.39f, valClr, valStrings[i]);
+
+                // Barra superior con pestañas de categoría
+                Ui::gradV(0.0f, 0.0f, 400.0f, 28.0f, 0.3f, Ui::rgba(18, 15, 32, 245), Ui::rgba(18, 15, 32, 160));
+                C2D_DrawRectSolid(0.0f, 27.0f, 0.31f, 400.0f, 1.5f, clrPrimary);
+
+                const char* tabNames[5] = { "1. TABLET", "2. TECLAS", "3. AUDIO", "4. JUEGO", "5. VISUAL" };
+                for (int t = 0; t < 5; ++t) {
+                    float tx = 6.0f + t * 62.0f;
+                    bool isTabActive = (activeTab == t);
+                    if (isTabActive) {
+                        Ui::pill(tx, 4.0f, 58.0f, 19.0f, 0.32f, clrPrimary);
+                        drawCenteredTextWithShadow(textBuf, tx + 29.0f, 13.5f, 0.33f, clrWhite, tabNames[t], 0.85f);
+                    } else {
+                        Ui::pill(tx, 4.0f, 58.0f, 19.0f, 0.32f, Ui::rgba(42, 36, 64, 240));
+                        drawCenteredTextWithShadow(textBuf, tx + 29.0f, 13.5f, 0.31f, Ui::rgba(225, 220, 245), tabNames[t], 0.85f);
+                    }
+                }
+                Ui::pill(320.0f, 4.0f, 44.0f, 19.0f, 0.32f, isNew3DS ? Ui::rgba(40, 75, 45, 220) : Ui::rgba(35, 30, 50, 220));
+                drawCenteredTextWithShadow(textBuf, 342.0f, 13.5f, 0.31f, isNew3DS ? clr100 : Ui::rgba(210, 205, 230), isNew3DS ? "N3DS" : "3DS", 0.85f);
+
+                // Si la categoría activa es CONTROLES (activeTab == 1), mostramos la PREVISUALIZACIÓN VIVA DEL MODO
+                if (activeTab == 1) {
+                    float panX = 12.0f + depthShift(1.8f);
+                    float panY = 32.0f;
+                    float panW = 376.0f;
+                    float panH = 178.0f;
+                    Ui::panel(panX, panY, panW, panH, 0.14f, Ui::rgba(18, 14, 28, 240), Ui::rgba(65, 52, 95));
+
+                    const char* mTitles[4] = {
+                        "PREVISUALIZACION: osu! (Standard)",
+                        "PREVISUALIZACION: osu!taiko",
+                        "PREVISUALIZACION: osu!catch (Catch the Beat)",
+                        "PREVISUALIZACION: osu!mania (4K)"
+                    };
+                    u32 mTitleColors[4] = {
+                        Ui::rgba(255, 102, 171),
+                        Ui::rgba(255, 75, 80),
+                        Ui::rgba(45, 215, 115),
+                        Ui::rgba(60, 205, 255)
+                    };
+
+                    drawTextWithShadow(textBuf, panX + 10.0f, panY + 5.0f, 0.42f, mTitleColors[settingsControlsMode], mTitles[settingsControlsMode], 0.16f);
+                    drawTextWithShadow(textBuf, panX + 10.0f, panY + 19.0f, 0.31f, Ui::rgba(200, 195, 225), "Prueba tus botones en vivo o mira la demostracion", 0.16f);
+
+                    if (capturingKeyIndex != -1) {
+                        Ui::pill(panX + 180.0f, panY + 4.0f, 186.0f, 20.0f, 0.90f, Ui::rgba(255, 180, 40, 240));
+                        drawCenteredTextWithShadow(textBuf, panX + 273.0f, panY + 14.0f, 0.32f, clrBgDark, "ASIGNANDO: Pulsa un boton", 0.95f);
+                    }
+
+                    if (settingsControlsMode == MODE_STD) {
+                        float hudX = panX + 10.0f;
+                        float hudY = panY + 34.0f;
+                        float hudW = 110.0f;
+
+                        bool k1Active = (kHeld & settings.keyOsuK1) || (animTick % 120 >= 56 && animTick % 120 <= 64);
+                        bool k2Active = (kHeld & settings.keyOsuK2) || (animTick % 120 >= 114 && animTick % 120 <= 122);
+                        bool smokeActive = (kHeld & settings.keyOsuSmoke);
+                        bool retryActive = (kHeld & settings.keyQuickRetry);
+
+                        auto drawKeyBadge = [&](float x, float y, const char* name, const char* keyStr, bool active, u32 actClr) {
+                            u32 bg = active ? actClr : Ui::rgba(28, 22, 44, 230);
+                            Ui::pill(x, y, hudW, 29.0f, 0.18f, bg);
+                            drawTextWithShadow(textBuf, x + 8.0f, y + 4.0f, 0.33f, active ? clrWhite : clrCursor, name, 0.20f);
+                            drawTextWithShadow(textBuf, x + 8.0f, y + 16.0f, 0.30f, active ? clrWhite : Ui::rgba(225, 220, 245), keyStr, 0.20f);
+                            if (active) Ui::glow(x + hudW * 0.5f, y + 14.0f, 0.17f, 16.0f, Ui::withAlpha(actClr, 130), 2);
+                        };
+
+                        std::string sK1 = truncateString(GameSettings::formatKeyMask(settings.keyOsuK1), 14);
+                        std::string sK2 = truncateString(GameSettings::formatKeyMask(settings.keyOsuK2), 14);
+                        std::string sSm = truncateString(GameSettings::formatKeyMask(settings.keyOsuSmoke), 14);
+                        std::string sRt = truncateString(GameSettings::formatKeyMask(settings.keyQuickRetry), 14);
+
+                        drawKeyBadge(hudX, hudY,        "Tecla 1 (K1)", sK1.c_str(), k1Active, Ui::rgba(180, 70, 240));
+                        drawKeyBadge(hudX, hudY + 33.0f, "Tecla 2 (K2)", sK2.c_str(), k2Active, Ui::rgba(255, 95, 180));
+                        drawKeyBadge(hudX, hudY + 66.0f, "Humo (Smoke)",  sSm.c_str(), smokeActive, Ui::rgba(240, 200, 50));
+                        drawKeyBadge(hudX, hudY + 99.0f, "Reintento",     sRt.c_str(), retryActive, Ui::rgba(255, 75, 75));
+
+                        float pfX = panX + 128.0f;
+                        float pfY = panY + 34.0f;
+                        float pfW = 238.0f;
+                        float pfH = 132.0f;
+                        Ui::panel(pfX, pfY, pfW, pfH, 0.15f, Ui::rgba(12, 10, 20, 240), Ui::rgba(55, 45, 80));
+
+                        int t = animTick % 120;
+                        float c1X = pfX + 65.0f, c1Y = pfY + 66.0f;
+                        float c2X = pfX + 172.0f, c2Y = pfY + 56.0f;
+
+                        if (t < 60) {
+                            float appR = 16.0f + (1.0f - (t / 60.0f)) * 32.0f;
+                            drawRing(c1X, c1Y, appR, 1.5f, Ui::rgba(255, 102, 171), 22, 0.22f);
+                            C2D_DrawCircleSolid(c1X, c1Y, 0.20f, 16.0f, Ui::rgba(255, 102, 171));
+                            drawRing(c1X, c1Y, 16.0f, 2.0f, clrWhite, 22, 0.21f);
+                            drawCenteredText(textBuf, c1X, c1Y - 6.0f, 0.40f, clrWhite, "1", 0.23f);
+                        } else if (t < 78) {
+                            float burstR = 16.0f + (t - 60) * 1.5f;
+                            u8 bAlpha = static_cast<u8>(255 * (1.0f - (t - 60) / 18.0f));
+                            drawRing(c1X, c1Y, burstR, 2.0f, Ui::rgba(255, 215, 60, bAlpha), 20, 0.24f);
+                            drawCenteredText(textBuf, c1X, c1Y - 10.0f - (t - 60) * 0.8f, 0.42f, Ui::rgba(100, 240, 255, bAlpha), "300", 0.25f);
+                        }
+
+                        if (t >= 30) {
+                            float p2 = std::min(1.0f, (t - 30) / 90.0f);
+                            float appR = 16.0f + (1.0f - p2) * 32.0f;
+                            drawRing(c2X, c2Y, appR, 1.5f, Ui::rgba(100, 180, 255), 22, 0.22f);
+                            C2D_DrawCircleSolid(c2X, c2Y, 0.20f, 16.0f, Ui::rgba(100, 180, 255));
+                            drawRing(c2X, c2Y, 16.0f, 2.0f, clrWhite, 22, 0.21f);
+                            drawCenteredText(textBuf, c2X, c2Y - 6.0f, 0.40f, clrWhite, "2", 0.23f);
+                        }
+
+                        float curX, curY;
+                        if (t < 60) {
+                            float prog = t / 60.0f;
+                            float smooth = prog * prog * (3.0f - 2.0f * prog);
+                            curX = pfX + 20.0f + smooth * (c1X - (pfX + 20.0f));
+                            curY = pfY + 100.0f + smooth * (c1Y - (pfY + 100.0f));
+                        } else {
+                            float prog = (t - 60) / 60.0f;
+                            float smooth = prog * prog * (3.0f - 2.0f * prog);
+                            curX = c1X + smooth * (c2X - c1X);
+                            curY = c1Y + smooth * (c2Y - c1Y);
+                        }
+
+                        Ui::glow(curX, curY, 0.26f, 12.0f, Ui::withAlpha(clrCursor, 140), 2);
+                        C2D_DrawCircleSolid(curX, curY, 0.27f, 6.0f, clrCursor);
+                        C2D_DrawCircleSolid(curX, curY, 0.28f, 2.0f, clrWhite);
+                    }
+                    else if (settingsControlsMode == MODE_TAIKO) {
+                        float trkX = panX + 10.0f;
+                        float trkY = panY + 34.0f;
+                        float trkW = 356.0f;
+                        float trkH = 70.0f;
+                        Ui::panel(trkX, trkY, trkW, trkH, 0.15f, Ui::rgba(22, 18, 32, 250), Ui::rgba(70, 55, 95));
+
+                        float drumX = trkX + 46.0f;
+                        float drumY = trkY + trkH * 0.5f;
+
+                        bool kLeftDown  = (kHeld & settings.keyTaikoKatsuLeft);
+                        bool kRightDown = (kHeld & settings.keyTaikoKatsuRight);
+                        bool dLeftDown  = (kHeld & settings.keyTaikoDonLeft);
+                        bool dRightDown = (kHeld & settings.keyTaikoDonRight);
+
+                        C2D_DrawCircleSolid(drumX, drumY, 0.17f, 28.0f, (kLeftDown || kRightDown) ? clrWhite : Ui::rgba(35, 120, 220));
+                        C2D_DrawCircleSolid(drumX, drumY, 0.19f, 18.0f, (dLeftDown || dRightDown) ? clrWhite : Ui::rgba(240, 55, 65));
+
+                        C2D_DrawCircleSolid(drumX - 6.0f, drumY - 2.0f, 0.21f, 2.2f, clrBgDark);
+                        C2D_DrawCircleSolid(drumX + 6.0f, drumY - 2.0f, 0.21f, 2.2f, clrBgDark);
+                        drawRing(drumX, drumY + 4.0f, 4.0f, 1.2f, clrBgDark, 12, 0.21f);
+
+                        float targetX = trkX + 115.0f;
+                        drawRing(targetX, drumY, 15.0f, 2.0f, clrWhite, 24, 0.20f);
+                        drawRing(targetX, drumY, 8.0f, 1.5f, Ui::rgba(180, 175, 210), 16, 0.19f);
+
+                        int loopT = animTick % 160;
+                        float speed = 2.4f;
+
+                        for (int n = 0; n < 4; ++n) {
+                            int nOffset = n * 40;
+                            float notePos = ((loopT + nOffset) % 160) * speed;
+                            float nx = (trkX + trkW) - notePos;
+                            if (nx >= trkX + 85.0f && nx <= trkX + trkW - 5.0f) {
+                                bool isDon = (n % 2 == 0);
+                                u32 noteClr = isDon ? Ui::rgba(245, 60, 65) : Ui::rgba(45, 135, 255);
+                                C2D_DrawCircleSolid(nx, drumY, 0.22f, 12.0f, noteClr);
+                                drawRing(nx, drumY, 12.0f, 1.8f, clrWhite, 20, 0.23f);
+
+                                if (std::abs(nx - targetX) < 6.0f) {
+                                    Ui::glow(targetX, drumY, 0.25f, 22.0f, Ui::withAlpha(noteClr, 160), 2);
+                                    drawCenteredText(textBuf, targetX, drumY - 24.0f, 0.38f, Ui::rgba(255, 220, 80), "GREAT 300", 0.26f);
+                                }
+                            }
+                        }
+
+                        float rowY = panY + 110.0f;
+                        float cW = 86.0f;
+                        float cH = 56.0f;
+
+                        auto drawTaikoCard = [&](float cx, const char* name, const char* sub, uint32_t mask, u32 actClr, bool active) {
+                            Ui::panel(cx, rowY, cW, cH, 0.16f, active ? Ui::rgba(45, 38, 70, 255) : Ui::rgba(24, 20, 36, 230), active ? clrWhite : actClr);
+                            drawCenteredText(textBuf, cx + cW * 0.5f, rowY + 5.0f, 0.28f, actClr, name, 0.18f);
+                            drawCenteredText(textBuf, cx + cW * 0.5f, rowY + 18.0f, 0.24f, clrMuted, sub, 0.18f);
+                            std::string kStr = truncateString(GameSettings::formatKeyMask(mask), 12);
+                            Ui::pill(cx + 6.0f, rowY + 32.0f, cW - 12.0f, 18.0f, 0.19f, active ? actClr : Ui::rgba(40, 32, 60));
+                            drawCenteredText(textBuf, cx + cW * 0.5f, rowY + 41.0f, 0.26f, clrWhite, kStr.c_str(), 0.20f);
+                        };
+
+                        drawTaikoCard(trkX,               "DON IZQ",   "Centro Rojo", settings.keyTaikoDonLeft,    Ui::rgba(245, 60, 65),  dLeftDown);
+                        drawTaikoCard(trkX + cW + 4.0f,   "DON DER",   "Centro Rojo", settings.keyTaikoDonRight,   Ui::rgba(245, 60, 65),  dRightDown);
+                        drawTaikoCard(trkX + (cW+4.0f)*2, "KATSU IZQ", "Aro Azul",    settings.keyTaikoKatsuLeft,  Ui::rgba(45, 135, 255), kLeftDown);
+                        drawTaikoCard(trkX + (cW+4.0f)*3, "KATSU DER", "Aro Azul",    settings.keyTaikoKatsuRight, Ui::rgba(45, 135, 255), kRightDown);
+                    }
+                    else if (settingsControlsMode == MODE_CATCH) {
+                        float hudX = panX + 10.0f;
+                        float hudY = panY + 34.0f;
+                        float hudW = 110.0f;
+
+                        bool cLeftActive  = (kHeld & settings.keyCatchLeft);
+                        bool cRightActive = (kHeld & settings.keyCatchRight);
+                        bool cDashActive  = (kHeld & settings.keyCatchDash);
+                        bool cRetryActive = (kHeld & settings.keyQuickRetry);
+
+                        auto drawCatchBadge = [&](float x, float y, const char* name, const char* keyStr, bool active, u32 actClr) {
+                            u32 bg = active ? actClr : Ui::rgba(28, 22, 44, 230);
+                            Ui::pill(x, y, hudW, 29.0f, 0.18f, bg);
+                            drawText(textBuf, x + 8.0f, y + 4.0f, 0.30f, active ? clrWhite : clrCursor, name, 0.20f);
+                            drawText(textBuf, x + 8.0f, y + 16.0f, 0.26f, active ? clrWhite : clrMuted, keyStr, 0.20f);
+                            if (active) Ui::glow(x + hudW * 0.5f, y + 14.0f, 0.17f, 16.0f, Ui::withAlpha(actClr, 130), 2);
+                        };
+
+                        std::string sL = truncateString(GameSettings::formatKeyMask(settings.keyCatchLeft), 13);
+                        std::string sR = truncateString(GameSettings::formatKeyMask(settings.keyCatchRight), 13);
+                        std::string sD = truncateString(GameSettings::formatKeyMask(settings.keyCatchDash), 13);
+                        std::string sRt = truncateString(GameSettings::formatKeyMask(settings.keyQuickRetry), 13);
+
+                        drawCatchBadge(hudX, hudY,        "Mover Izquierda", sL.c_str(), cLeftActive, Ui::rgba(50, 210, 120));
+                        drawCatchBadge(hudX, hudY + 33.0f, "Mover Derecha",   sR.c_str(), cRightActive, Ui::rgba(50, 210, 120));
+                        drawCatchBadge(hudX, hudY + 66.0f, "Acelerar (Dash)", sD.c_str(), cDashActive, Ui::rgba(255, 175, 30));
+                        drawCatchBadge(hudX, hudY + 99.0f, "Reintento",       sRt.c_str(), cRetryActive, Ui::rgba(255, 75, 75));
+
+                        float stX = panX + 128.0f;
+                        float stY = panY + 34.0f;
+                        float stW = 238.0f;
+                        float stH = 132.0f;
+                        Ui::panel(stX, stY, stW, stH, 0.15f, Ui::rgba(12, 10, 20, 240), Ui::rgba(50, 150, 95));
+
+                        int cTick = animTick % 100;
+                        float f1Y = stY + (cTick * 1.3f);
+                        float f1X = stX + 70.0f;
+
+                        if (f1Y < stY + stH - 18.0f) {
+                            C2D_DrawCircleSolid(f1X, f1Y, 0.20f, 9.0f, Ui::rgba(235, 50, 60));
+                            C2D_DrawRectSolid(f1X - 1.0f, f1Y - 12.0f, 0.21f, 2.0f, 4.0f, Ui::rgba(80, 180, 50));
+                        }
+
+                        int cTick2 = (animTick + 50) % 100;
+                        float f2Y = stY + (cTick2 * 1.3f);
+                        float f2X = stX + 165.0f;
+                        if (f2Y < stY + stH - 18.0f) {
+                            C2D_DrawCircleSolid(f2X, f2Y, 0.20f, 8.5f, Ui::rgba(255, 160, 30));
+                            drawRing(f2X, f2Y, 5.0f, 1.2f, Ui::rgba(255, 210, 80), 12, 0.21f);
+                        }
+
+                        float catcherBaseX = stX + 70.0f + std::sin(animTick * 0.05f) * 60.0f;
+                        if (cLeftActive)  catcherBaseX = std::max(stX + 25.0f, catcherBaseX - 3.0f);
+                        if (cRightActive) catcherBaseX = std::min(stX + stW - 25.0f, catcherBaseX + 3.0f);
+
+                        float plateY = stY + stH - 16.0f;
+                        float plateW = 44.0f;
+
+                        if (cDashActive || (cTick > 40 && cTick < 70)) {
+                            Ui::pill(catcherBaseX - plateW * 0.5f - 6.0f, plateY, plateW, 6.0f, 0.18f, Ui::rgba(255, 120, 40, 120));
+                        }
+                        Ui::pill(catcherBaseX - plateW * 0.5f, plateY, plateW, 6.0f, 0.22f, Ui::rgba(210, 215, 235));
+                        C2D_DrawCircleSolid(catcherBaseX, plateY + 8.0f, 0.21f, 6.0f, Ui::rgba(60, 180, 100));
+                    }
+                    else if (settingsControlsMode == MODE_MANIA) {
+                        float hudX = panX + 10.0f;
+                        float hudY = panY + 34.0f;
+                        float hudW = 110.0f;
+
+                        bool col1Active = (kHeld & settings.keyManiaCol1) || (animTick % 80 >= 18 && animTick % 80 <= 26);
+                        bool col2Active = (kHeld & settings.keyManiaCol2) || (animTick % 80 >= 38 && animTick % 80 <= 46);
+                        bool col3Active = (kHeld & settings.keyManiaCol3) || (animTick % 80 >= 58 && animTick % 80 <= 66);
+                        bool col4Active = (kHeld & settings.keyManiaCol4) || (animTick % 80 >= 72 && animTick % 80 <= 79);
+
+                        auto drawManiaBadge = [&](float x, float y, const char* name, const char* keyStr, bool active, u32 actClr) {
+                            u32 bg = active ? actClr : Ui::rgba(28, 22, 44, 230);
+                            Ui::pill(x, y, hudW, 29.0f, 0.18f, bg);
+                            drawText(textBuf, x + 8.0f, y + 4.0f, 0.30f, active ? clrWhite : clrCursor, name, 0.20f);
+                            drawText(textBuf, x + 8.0f, y + 16.0f, 0.26f, active ? clrWhite : clrMuted, keyStr, 0.20f);
+                            if (active) Ui::glow(x + hudW * 0.5f, y + 14.0f, 0.17f, 16.0f, Ui::withAlpha(actClr, 130), 2);
+                        };
+
+                        std::string sC1 = truncateString(GameSettings::formatKeyMask(settings.keyManiaCol1), 13);
+                        std::string sC2 = truncateString(GameSettings::formatKeyMask(settings.keyManiaCol2), 13);
+                        std::string sC3 = truncateString(GameSettings::formatKeyMask(settings.keyManiaCol3), 13);
+                        std::string sC4 = truncateString(GameSettings::formatKeyMask(settings.keyManiaCol4), 13);
+
+                        drawManiaBadge(hudX, hudY,        "Columna 1", sC1.c_str(), col1Active, Ui::rgba(50, 160, 255));
+                        drawManiaBadge(hudX, hudY + 33.0f, "Columna 2", sC2.c_str(), col2Active, Ui::rgba(235, 235, 245));
+                        drawManiaBadge(hudX, hudY + 66.0f, "Columna 3", sC3.c_str(), col3Active, Ui::rgba(235, 235, 245));
+                        drawManiaBadge(hudX, hudY + 99.0f, "Columna 4", sC4.c_str(), col4Active, Ui::rgba(50, 160, 255));
+
+                        float mStageX = panX + 158.0f;
+                        float mStageY = panY + 34.0f;
+                        float colW = 44.0f;
+                        float mStageW = colW * 4.0f;
+                        float mStageH = 132.0f;
+
+                        Ui::panel(mStageX, mStageY, mStageW, mStageH, 0.15f, Ui::rgba(14, 12, 22, 250), Ui::rgba(60, 120, 180));
+
+                        for (int c = 1; c < 4; ++c) {
+                            float lx = mStageX + c * colW;
+                            C2D_DrawLine(lx, mStageY, Ui::rgba(45, 40, 65), lx, mStageY + mStageH, Ui::rgba(45, 40, 65), 1.0f, 0.16f);
+                        }
+
+                        float judgeY = mStageY + mStageH - 24.0f;
+                        C2D_DrawRectSolid(mStageX, judgeY, 0.18f, mStageW, 2.5f, clrWhite);
+
+                        bool colActs[4] = { col1Active, col2Active, col3Active, col4Active };
+                        u32 colClrs[4] = { Ui::rgba(50, 160, 255), Ui::rgba(240, 240, 255), Ui::rgba(240, 240, 255), Ui::rgba(50, 160, 255) };
+
+                        for (int c = 0; c < 4; ++c) {
+                            float cx = mStageX + c * colW;
+                            if (colActs[c]) {
+                                C2D_DrawRectSolid(cx + 2.0f, judgeY + 2.5f, 0.19f, colW - 4.0f, 20.0f, colClrs[c]);
+                                Ui::glow(cx + colW * 0.5f, judgeY, 0.20f, 16.0f, Ui::withAlpha(colClrs[c], 140), 2);
+                            } else {
+                                C2D_DrawRectSolid(cx + 2.0f, judgeY + 2.5f, 0.19f, colW - 4.0f, 20.0f, Ui::rgba(30, 26, 45));
+                            }
+                        }
+
+                        int mTick = animTick % 80;
+                        float noteSpd = 1.6f;
+
+                        auto drawManiaNote = [&](int col, int offset) {
+                            float ny = mStageY + (((mTick + offset) % 80) * noteSpd);
+                            if (ny < judgeY) {
+                                float nx = mStageX + col * colW + 3.0f;
+                                C2D_DrawRectSolid(nx, ny, 0.22f, colW - 6.0f, 8.0f, colClrs[col]);
+                                drawRectOutline(nx, ny, colW - 6.0f, 8.0f, 1.0f, clrWhite, 0.23f);
+                            }
+                        };
+
+                        drawManiaNote(0, 60);
+                        drawManiaNote(1, 40);
+                        drawManiaNote(2, 20);
+                        drawManiaNote(3, 5);
+                    }
+                } else {
+                    // Renderizado de las 4 tarjetas de la categoría activa (Tabs 0, 2, 3, 4)
+                    int startOpt = activeTab * 4;
+                    for (int i = 0; i < 4; ++i) {
+                        int optIdx = startOpt + i;
+                        if (optIdx >= numSettings) break;
+                        bool sel = (!calibrationMode && settingsOption == optIdx);
+                        float dCard = depthShift(sel ? 3.5f : 1.2f);
+                        float cy = 34.0f + i * 44.0f;
+                        float cw = 376.0f;
+                        float ch = 38.0f;
+                        float cx = 12.0f + dCard;
+
+                        u32 cardBg = sel ? Ui::rgba(38, 30, 64, 245) : Ui::rgba(22, 19, 36, 225);
+                        Ui::panel(cx, cy, cw, ch, 0.15f, cardBg, sel ? clrPrimary : 0);
+                        if (sel) {
+                            C2D_DrawRectSolid(cx, cy, 0.22f, 3.5f, ch, clrCursor);
+                            C2D_DrawLine(cx + 4.0f, cy, clrWhite, cx + cw, cy, clrWhite, 1.0f, 0.22f);
+                        }
+
+                        // Título y valor según opción
+                        if (optIdx == 0) { // Modo de Entrada
+                            drawText(textBuf, cx + 12.0f, cy + 4.0f, 0.44f, sel ? clrWhite : clrCursor, "Modo de Entrada / Pantalla de Juego");
+                            drawText(textBuf, cx + 12.0f, cy + 20.0f, 0.35f, clrMuted, "Tocar directo en pantalla inf. o modo tablet");
+                            Ui::pill(cx + 205.0f, cy + 8.0f, 160.0f, 22.0f, 0.25f, settings.playOnBottomScreen ? Ui::rgba(35, 110, 75) : Ui::rgba(55, 45, 95));
+                            drawCenteredText(textBuf, cx + 285.0f, cy + 19.0f, 0.36f, clrWhite, settings.getInputModeLabel(), 0.85f);
+                        } else if (optIdx == 1) { // Tamaño Área Tablet
+                            drawText(textBuf, cx + 12.0f, cy + 4.0f, 0.44f, sel ? clrWhite : clrCursor, "Tamano Area Activa Tablet");
+                            char desc[64];
+                            std::snprintf(desc, sizeof(desc), "%d%% (%dx%d px)", static_cast<int>(std::round(settings.tabletScale * 100.0f)), (int)rw, (int)rh);
+                            drawText(textBuf, cx + 12.0f, cy + 20.0f, 0.35f, clr300, desc);
+                            float ratio = (settings.tabletScale - 0.30f) / 0.70f;
+                            Ui::sliderBar(cx + 230.0f, cy + 14.0f, 134.0f, 10.0f, 0.25f, ratio, sel ? clrCursor : clrPrimary, sel);
+                        } else if (optIdx == 2) { // Posición X
+                            drawText(textBuf, cx + 12.0f, cy + 4.0f, 0.44f, sel ? clrWhite : clrCursor, "Posicion Horizontal (X)");
+                            char desc[64]; std::snprintf(desc, sizeof(desc), "X = %.0f px  (C-Pad / Stylus)", settings.tabletCenterX);
+                            drawText(textBuf, cx + 12.0f, cy + 20.0f, 0.35f, clr300, desc);
+                            float ratio = settings.tabletCenterX / 320.0f;
+                            Ui::sliderBar(cx + 230.0f, cy + 14.0f, 134.0f, 10.0f, 0.25f, ratio, sel ? clrCursor : clrPrimary, sel);
+                        } else if (optIdx == 3) { // Posición Y
+                            drawText(textBuf, cx + 12.0f, cy + 4.0f, 0.44f, sel ? clrWhite : clrCursor, "Posicion Vertical (Y)");
+                            char desc[64]; std::snprintf(desc, sizeof(desc), "Y = %.0f px  (C-Pad / Stylus)", settings.tabletCenterY);
+                            drawText(textBuf, cx + 12.0f, cy + 20.0f, 0.35f, clr300, desc);
+                            float ratio = settings.tabletCenterY / 240.0f;
+                            Ui::sliderBar(cx + 230.0f, cy + 14.0f, 134.0f, 10.0f, 0.25f, ratio, sel ? clrCursor : clrPrimary, sel);
+                        } else if (optIdx == 8) { // Volumen Música
+                            drawText(textBuf, cx + 12.0f, cy + 4.0f, 0.44f, sel ? clrWhite : clrCursor, "Volumen de Musica");
+                            char desc[32]; std::snprintf(desc, sizeof(desc), "%d%%", settings.musicVolume);
+                            drawText(textBuf, cx + 12.0f, cy + 20.0f, 0.35f, clr300, desc);
+                            float ratio = settings.musicVolume / 100.0f;
+                            Ui::sliderBar(cx + 230.0f, cy + 14.0f, 134.0f, 10.0f, 0.25f, ratio, sel ? clrCursor : clrPrimary, sel);
+                        } else if (optIdx == 9) { // Volumen Hitsounds
+                            drawText(textBuf, cx + 12.0f, cy + 4.0f, 0.44f, sel ? clrWhite : clrCursor, "Volumen de Hitsounds (Efectos)");
+                            char desc[32]; std::snprintf(desc, sizeof(desc), "%d%%", settings.sfxVolume);
+                            drawText(textBuf, cx + 12.0f, cy + 20.0f, 0.35f, clr300, desc);
+                            float ratio = settings.sfxVolume / 100.0f;
+                            Ui::sliderBar(cx + 230.0f, cy + 14.0f, 134.0f, 10.0f, 0.25f, ratio, sel ? clrCursor : clrPrimary, sel);
+                        } else if (optIdx == 10) { // Offset de Audio
+                            drawText(textBuf, cx + 12.0f, cy + 4.0f, 0.44f, sel ? clrWhite : clrCursor, "Offset / Sincronizacion de Audio");
+                            char desc[64]; std::snprintf(desc, sizeof(desc), "%+d ms  (Pulsa X o A para Calibrar)", settings.audioOffsetMs);
+                            drawText(textBuf, cx + 12.0f, cy + 20.0f, 0.35f, clr100, desc);
+                            float ratio = (settings.audioOffsetMs + 150) / 300.0f;
+                            Ui::sliderBar(cx + 230.0f, cy + 14.0f, 134.0f, 10.0f, 0.25f, ratio, sel ? clrCursor : clr300, sel);
+                        } else if (optIdx == 11) { // Hitsounds del Beatmap
+                            drawText(textBuf, cx + 12.0f, cy + 4.0f, 0.44f, sel ? clrWhite : clrCursor, "Hitsounds del Beatmap");
+                            drawText(textBuf, cx + 12.0f, cy + 20.0f, 0.35f, clrMuted, "Usar sonidos propios de la carpeta del mapa");
+                            Ui::toggleSwitch(cx + 312.0f, cy + 11.0f, 48.0f, 18.0f, 0.25f, settings.beatmapHitsounds, clr100);
+                        } else if (optIdx == 12) { // Modo de Juego
+                            drawText(textBuf, cx + 12.0f, cy + 4.0f, 0.44f, sel ? clrWhite : clrCursor, "Modo de Juego Principal");
+                            drawText(textBuf, cx + 12.0f, cy + 20.0f, 0.35f, clrMuted, "Convierte mapas o juega modos nativos");
+                            u32 mBg = (settings.gameMode == MODE_TAIKO) ? Ui::rgba(180, 45, 45) : ((settings.gameMode == MODE_CATCH) ? Ui::rgba(35, 160, 85) : ((settings.gameMode == MODE_MANIA) ? Ui::rgba(140, 35, 175) : Ui::rgba(65, 45, 115)));
+                            Ui::pill(cx + 205.0f, cy + 8.0f, 160.0f, 22.0f, 0.25f, mBg);
+                            drawCenteredText(textBuf, cx + 285.0f, cy + 19.0f, 0.36f, clrWhite, settings.getGameModeName(), 0.85f);
+                        } else if (optIdx == 13) { // Skin Activo
+                            drawText(textBuf, cx + 12.0f, cy + 4.0f, 0.44f, sel ? clrWhite : clrCursor, "Skin Activo (.osk / Presets)");
+                            char desc[64]; std::snprintf(desc, sizeof(desc), "%s (%d/%d)", truncateString(activeSkin.name, 22).c_str(), settings.skinIndex + 1, (int)skinMgr.skins.size());
+                            drawText(textBuf, cx + 12.0f, cy + 20.0f, 0.35f, clr300, desc);
+                            for (size_t c = 0; c < std::min((size_t)4, activeSkin.comboColors.size()); ++c) {
+                                u32 cc = C2D_Color32(activeSkin.comboColors[c].r, activeSkin.comboColors[c].g, activeSkin.comboColors[c].b, 255);
+                                C2D_DrawCircleSolid(cx + 276.0f + c * 20.0f, cy + 19.0f, 0.25f, 6.5f, cc);
+                            }
+                        } else if (optIdx == 14) { // Sliders Serpiente (Snaking)
+                            drawText(textBuf, cx + 12.0f, cy + 4.0f, 0.44f, sel ? clrWhite : clrCursor, "Sliders Serpiente (Snaking)");
+                            drawText(textBuf, cx + 12.0f, cy + 20.0f, 0.35f, clrMuted, "Los sliders se dibujan fluidos como en PC/lazer");
+                            Ui::toggleSwitch(cx + 312.0f, cy + 11.0f, 48.0f, 18.0f, 0.25f, settings.snakingSliders, clr100);
+                        } else if (optIdx == 15) { // Combo Bursts (Mascota)
+                            drawText(textBuf, cx + 12.0f, cy + 4.0f, 0.44f, sel ? clrWhite : clrCursor, "Combo Bursts (Mascota / Skin)");
+                            drawText(textBuf, cx + 12.0f, cy + 20.0f, 0.35f, clrMuted, "Aparicion lateral en hitos de combo");
+                            Ui::toggleSwitch(cx + 312.0f, cy + 11.0f, 48.0f, 18.0f, 0.25f, settings.comboBursts, clr100);
+                        } else if (optIdx == 16) { // Fondo Taiko
+                            drawText(textBuf, cx + 12.0f, cy + 4.0f, 0.44f, sel ? clrWhite : clrCursor, "Fondo en Modo Taiko");
+                            drawText(textBuf, cx + 12.0f, cy + 20.0f, 0.35f, clrMuted, "Festivo (Bailarines) / Imagen / Video");
+                            u32 bClr = (settings.taikoBgMode == 0) ? Ui::rgba(225, 145, 25) : ((settings.taikoBgMode == 1) ? Ui::rgba(45, 130, 215) : Ui::rgba(165, 55, 185));
+                            Ui::pill(cx + 205.0f, cy + 8.0f, 160.0f, 22.0f, 0.25f, bClr);
+                            drawCenteredText(textBuf, cx + 285.0f, cy + 19.0f, 0.34f, clrWhite, settings.getTaikoBgModeName(), 0.85f);
+                        } else if (optIdx == 17) { // Tamaño del Cursor
+                            drawText(textBuf, cx + 12.0f, cy + 4.0f, 0.44f, sel ? clrWhite : clrCursor, "Tamano del Cursor");
+                            char desc[32]; std::snprintf(desc, sizeof(desc), "%.1fx", settings.cursorScale);
+                            drawText(textBuf, cx + 12.0f, cy + 20.0f, 0.35f, clr300, desc);
+                            float ratio = (settings.cursorScale - 0.5f) / 1.5f;
+                            Ui::sliderBar(cx + 230.0f, cy + 14.0f, 134.0f, 10.0f, 0.25f, ratio, sel ? clrCursor : clrPrimary, sel);
+                        } else if (optIdx == 18) { // Oscurecimiento Fondo
+                            drawText(textBuf, cx + 12.0f, cy + 4.0f, 0.44f, sel ? clrWhite : clrCursor, "Oscurecimiento de Fondo (Bg Dim)");
+                            char desc[32]; std::snprintf(desc, sizeof(desc), "%d%%", settings.bgDim);
+                            drawText(textBuf, cx + 12.0f, cy + 20.0f, 0.35f, clr300, desc);
+                            float ratio = (settings.bgDim - 20) / 80.0f;
+                            Ui::sliderBar(cx + 230.0f, cy + 14.0f, 134.0f, 10.0f, 0.25f, ratio, sel ? clrCursor : clrPrimary, sel);
+                        } else if (optIdx == 19) { // Videos de Fondo
+                            drawText(textBuf, cx + 12.0f, cy + 4.0f, 0.44f, sel ? clrWhite : clrCursor, "Reproducir Videos de Fondo");
+                            drawText(textBuf, cx + 12.0f, cy + 20.0f, 0.35f, clrMuted, "Formato optimizado .3dsv / .mjpg");
+                            Ui::toggleSwitch(cx + 312.0f, cy + 11.0f, 48.0f, 18.0f, 0.25f, settings.enableVideo, clr100);
+                        }
+                    }
+                }
+
+                if (capturingKeyIndex != -1 && activeTab != 1) {
+                    float dCap = eyeSign * slider3D * 5.0f;
+                    C2D_DrawRectSolid(0.0f, 0.0f, 0.92f, 400.0f, 240.0f, Ui::rgba(8, 6, 16, 215));
+                    Ui::panel(40.0f + dCap, 50.0f, 320.0f, 130.0f, 0.94f, Ui::rgba(26, 20, 44, 250), clrCursor);
+                    int cIdx = std::max(0, std::min(3, capturingKeyIndex - 4));
+                    const char* capModeName = (settingsControlsMode == MODE_TAIKO) ? "TAIKO" : ((settingsControlsMode == MODE_CATCH) ? "CATCH" : ((settingsControlsMode == MODE_MANIA) ? "MANIA" : "STANDARD"));
+                    const char* capRowName = "CONTROL";
+                    if (settingsControlsMode == MODE_STD) {
+                        const char* n[4] = { "TECLA 1 (K1)", "TECLA 2 (K2)", "HUMO (SMOKE)", "REINICIO RAPIDO" };
+                        capRowName = n[cIdx];
+                    } else if (settingsControlsMode == MODE_TAIKO) {
+                        const char* n[4] = { "DON IZQUIERDO (ROJO)", "DON DERECHO (ROJO)", "KATSU IZQUIERDO (AZUL)", "KATSU DERECHO (AZUL)" };
+                        capRowName = n[cIdx];
+                    } else if (settingsControlsMode == MODE_CATCH) {
+                        const char* n[4] = { "MOVER IZQUIERDA", "MOVER DERECHA", "ACELERAR (DASH)", "REINICIO RAPIDO" };
+                        capRowName = n[cIdx];
+                    } else if (settingsControlsMode == MODE_MANIA) {
+                        const char* n[4] = { "COLUMNA 1 (IZQ)", "COLUMNA 2 (C-IZQ)", "COLUMNA 3 (C-DER)", "COLUMNA 4 (DER)" };
+                        capRowName = n[cIdx];
+                    }
+                    char capHead[64];
+                    std::snprintf(capHead, sizeof(capHead), "ASIGNANDO [%s]", capModeName);
+                    drawCenteredText(textBuf, 200.0f + dCap, 72.0f, 0.48f, clrCursor, capHead, 0.99f);
+                    drawCenteredText(textBuf, 200.0f + dCap, 96.0f, 0.44f, clrWhite, capRowName, 0.99f);
+                    drawCenteredText(textBuf, 200.0f + dCap, 126.0f, 0.38f, clr100, "Pulsa cualquier boton de la 3DS...", 0.99f);
+                    drawCenteredText(textBuf, 200.0f + dCap, 152.0f, 0.32f, clrMuted, "B o Tocar pantalla: Cancelar", 0.99f);
+                }
+
+                if (calibrationMode) {
+                    float dCal = eyeSign * slider3D * 4.5f;
+                    C2D_DrawRectSolid(0.0f, 0.0f, 0.88f, 400.0f, 240.0f, Ui::rgba(8, 6, 16, 185));
+                    Ui::panel(30.0f + dCal, 52.0f, 340.0f, 128.0f, 0.90f, Ui::rgba(22, 18, 38, 250), clr300);
+                    drawCenteredText(textBuf, 200.0f + dCal, 70.0f, 0.50f, clrCursor, "ASISTENTE DE CALIBRACION (120 BPM)", 0.98f);
+                    drawCenteredText(textBuf, 200.0f + dCal, 94.0f, 0.40f, clrWhite, "Pulsa A o L al ritmo del sonido de metronomo", 0.98f);
+
+                    u64 elapsed = osGetTime() - calibStartTick;
+                    float beatPhase = (elapsed % 500) / 500.0f;
+                    float pulseR = 14.0f * (1.0f - beatPhase * 0.55f);
+                    Ui::ring(200.0f + dCal, 122.0f, 0.96f, pulseR, 2.0f, clr300, 20);
+
+                    char calStr[96];
+                    std::snprintf(calStr, sizeof(calStr), "Muestras: %d/12 | Offset Calculado: %+d ms",
+                        static_cast<int>(calibSamples.size()), settings.audioOffsetMs);
+                    drawCenteredText(textBuf, 200.0f + dCal, 146.0f, 0.44f, clr100, calStr, 0.98f);
+                    drawCenteredText(textBuf, 200.0f + dCal, 166.0f, 0.38f, clr300, "Pulsa X para terminar y aplicar", 0.98f);
+                }
+
+                Ui::gradV(0.0f, 212.0f, 400.0f, 28.0f, 0.3f, Ui::rgba(18, 15, 32, 170), Ui::rgba(18, 15, 32, 250));
+                drawText(textBuf, 8.0f, 219.0f, 0.37f, clr300, "Arr/Abj: Item | Izq/Der: Ajustar/Modo | L/R: Pestana | B: Guardar");
+
+                float testR = 6.0f * settings.cursorScale;
+                float dCur = eyeSign * slider3D * 4.5f;
+                Ui::glow(osuToTopX(cursorOsuX) + dCur, osuToTopY(cursorOsuY), 0.94f, testR * 1.9f, Ui::withAlpha(clrCursor, 110), 3);
+                C2D_DrawCircleSolid(osuToTopX(cursorOsuX) + dCur, osuToTopY(cursorOsuY), 0.95f, testR, clrCursor);
+                C2D_DrawCircleSolid(osuToTopX(cursorOsuX) + dCur, osuToTopY(cursorOsuY), 0.97f, 2.0f, clrWhite);
+                Ui::drawTransition(400.0f, 240.0f, screenFade, clrPrimary);
             }
 
-            if (calibrationMode) {
-                // Z-depth 0.90 para el cuadro y 0.98 para el texto encima
-                C2D_DrawRectSolid(30.0f, 58.0f, 0.90f, 340.0f, 115.0f, C2D_Color32(18, 16, 30, 248));
-                drawRectOutline(30.0f, 58.0f, 340.0f, 115.0f, 2.0f, clr300, 0.94f);
-                drawCenteredText(textBuf, 200.0f, 76.0f, 0.50f, clrCursor, "ASISTENTE DE CALIBRACION (120 BPM)", 0.98f);
-                drawCenteredText(textBuf, 200.0f, 100.0f, 0.41f, clrWhite, "Pulsa A o L al ritmo del sonido de metronomo", 0.98f);
-
-                char calStr[96];
-                std::snprintf(calStr, sizeof(calStr), "Muestras: %d/12 | Offset Calculado: %+d ms",
-                    static_cast<int>(calibSamples.size()), settings.audioOffsetMs);
-                drawCenteredText(textBuf, 200.0f, 128.0f, 0.45f, clr100, calStr, 0.98f);
-                drawCenteredText(textBuf, 200.0f, 154.0f, 0.40f, clr300, "Pulsa X para terminar y aplicar", 0.98f);
-            }
-
-            C2D_DrawRectSolid(0.0f, 212.0f, 0.1f, 400.0f, 28.0f, clrPanelBg);
-            drawText(textBuf, 8.0f, 218.0f, 0.38f, clr300,
-                "Izq/Der: Ajustar | C-Pad: Mover Area | Y: Reset Area | B: Guardar y Salir");
-
-            float testR = 6.0f * settings.cursorScale;
-            C2D_DrawCircleSolid(osuToTopX(cursorOsuX), osuToTopY(cursorOsuY), 0.95f, testR, clrCursor);
-            C2D_DrawCircleSolid(osuToTopX(cursorOsuX), osuToTopY(cursorOsuY), 0.97f, 2.0f, clrWhite);
-
-            // --- PANTALLA INFERIOR: EDITOR INTERACTIVO DE ÁREA DE TABLET ---
+            // --- PANTALLA INFERIOR: CONTROL TÁCTIL INTERACTIVO + EDITOR DE ÁREA ---
             C2D_TargetClear(bottomScreen, clrTabletBg);
             C2D_SceneBegin(bottomScreen);
 
-            C2D_DrawRectSolid(rx, ry, 0.15f, rw, rh, C2D_Color32(42, 36, 66, 230));
+            Ui::backdrop(320.0f, 240.0f, static_cast<float>(animTick), Ui::rgba(26, 20, 44), Ui::rgba(12, 10, 22), clrPrimary, 0.02f);
+            if (bgTex.loaded) {
+                bgTex.drawRect(0.0f, 0.0f, 320.0f, 240.0f, 0.03f, 60);
+                C2D_DrawRectSolid(0.0f, 0.0f, 0.04f, 320.0f, 240.0f, Ui::rgba(14, 11, 24, 180));
+            }
 
-            u32 gridClr = C2D_Color32(80, 72, 115, 160);
-            C2D_DrawLine(rx + rw * 0.5f, ry, gridClr, rx + rw * 0.5f, ry + rh, gridClr, 1.0f, 0.2f);
-            C2D_DrawLine(rx, ry + rh * 0.5f, gridClr, rx + rw, ry + rh * 0.5f, gridClr, 1.0f, 0.2f);
+            // Botones de pestañas táctiles arriba (5 pestañas)
+            const char* bTabLabels[5] = { "TABLET", "TECLAS", "AUDIO", "JUEGO", "VISUAL" };
+            for (int t = 0; t < 5; ++t) {
+                float tx = 7.0f + t * 62.0f;
+                bool isTab = (activeTab == t);
+                Ui::slantRectGrad(tx, 6.0f, 58.0f, 24.0f, 4.0f, 0.2f, isTab ? clrPrimary : Ui::rgba(35, 30, 52), isTab ? Ui::rgba(85, 30, 95) : Ui::rgba(20, 16, 30));
+                drawCenteredText(textBuf, tx + 29.0f, 18.0f, 0.30f, isTab ? clrWhite : clrMuted, bTabLabels[t], 0.85f);
+            }
 
-            drawRectOutline(rx, ry, rw, rh, 2.0f, clrPrimary);
-            drawRing(settings.tabletCenterX, settings.tabletCenterY, 6.0f, 1.5f, clrCursor, 16);
+            // Contenido central interactivo
+            if (activeTab == 0) { // Controles / Tablet
+                if (settings.playOnBottomScreen) {
+                    Ui::panel(10.0f, 36.0f, 300.0f, 162.0f, 0.15f, Ui::rgba(28, 22, 48, 225), clr100);
+                    drawCenteredText(textBuf, 160.0f, 52.0f, 0.44f, clr100, "MODO TACTIL DIRECTO 1:1");
+                    drawCenteredText(textBuf, 160.0f, 72.0f, 0.36f, clrWhite, "Los circulos aparecen aqui para tocarlos directamente!");
+                    drawRing(160.0f, 122.0f, 22.0f, 2.5f, clrPrimary, 24, 0.3f);
+                    C2D_DrawCircleSolid(160.0f, 122.0f, 0.25f, 22.0f, Ui::withAlpha(clrPrimary, 140));
+                    drawCenteredText(textBuf, 160.0f, 122.0f, 0.55f, clrWhite, "1", 0.35f);
+                } else {
+                    Ui::panel(rx, ry, rw, rh, 0.15f, Ui::rgba(42, 34, 70, 225), clrPrimary);
+                    u32 gridClr = C2D_Color32(110, 95, 160, 140);
+                    C2D_DrawLine(rx + rw * 0.5f, ry, gridClr, rx + rw * 0.5f, ry + rh, gridClr, 1.0f, 0.2f);
+                    C2D_DrawLine(rx, ry + rh * 0.5f, gridClr, rx + rw, ry + rh * 0.5f, gridClr, 1.0f, 0.2f);
+                    drawRectOutline(rx, ry, rw, rh, 2.0f, clrPrimary, 0.25f);
+                    drawRing(settings.tabletCenterX, settings.tabletCenterY, 7.0f, 1.5f, clrCursor, 18, 0.3f);
 
-            char areaCaption[64];
-            std::snprintf(areaCaption, sizeof(areaCaption), "AREA ACTIVA %d%% (%dx%d)",
-                static_cast<int>(std::round(settings.tabletScale * 100.0f)),
-                static_cast<int>(std::round(rw)),
-                static_cast<int>(std::round(rh)));
-            drawCenteredText(textBuf, settings.tabletCenterX, std::max(12.0f, ry + 12.0f), 0.40f, clrWhite, areaCaption);
+                    char areaCaption[64];
+                    std::snprintf(areaCaption, sizeof(areaCaption), "AREA ACTIVA %d%% (%dx%d)",
+                        static_cast<int>(std::round(settings.tabletScale * 100.0f)), (int)rw, (int)rh);
+                    drawCenteredText(textBuf, settings.tabletCenterX, std::max(40.0f, ry + 14.0f), 0.38f, clrWhite, areaCaption);
+                }
+            } else if (activeTab == 1) { // Pestaña CONTROLES: Modo 3DS Interactivo
+                // 1. Selector táctil de modo (STD / TAIKO / CATCH / MANIA)
+                const char* subModeNames[4] = { "STANDARD", "TAIKO", "CATCH", "MANIA" };
+                u32 subModeColors[4] = { Ui::rgba(255, 102, 171), Ui::rgba(255, 75, 80), Ui::rgba(45, 215, 115), Ui::rgba(60, 205, 255) };
 
-            drawCenteredText(textBuf, 160.0f, 228.0f, 0.36f, clrMuted,
-                "Skins personalizados (.osk / carpetas): sdmc:/3ds/osu-3ds/skins/");
+                for (int m = 0; m < 4; ++m) {
+                    float sx = 6.0f + m * 77.0f;
+                    bool isCurM = (settingsControlsMode == m);
+                    u32 pillBg = isCurM ? Ui::withAlpha(subModeColors[m], 235) : Ui::rgba(32, 26, 48, 235);
+                    Ui::pill(sx, 31.0f, 74.0f, 17.0f, 0.22f, pillBg);
+                    if (isCurM) drawRectOutline(sx, 31.0f, 74.0f, 17.0f, 1.2f, clrWhite, 0.24f);
+                    drawCenteredTextWithShadow(textBuf, sx + 37.0f, 39.5f, 0.32f, isCurM ? clrWhite : Ui::rgba(220, 215, 240), subModeNames[m], 0.30f);
+
+                    if (touchJustDown && touch.px >= sx && touch.px <= sx + 74.0f && touch.py >= 29.0f && touch.py <= 49.0f) {
+                        settingsControlsMode = m;
+                        audio.playHitSound(2);
+                    }
+                }
+
+                // 2. 4 Pastillas de acción para el modo activo
+                const char* kShortNames[4];
+                uint32_t kMasks[4];
+                u32 actColors[4];
+
+                if (settingsControlsMode == MODE_STD) {
+                    kShortNames[0] = "K1 Golpe";   kMasks[0] = settings.keyOsuK1;      actColors[0] = Ui::rgba(180, 70, 240);
+                    kShortNames[1] = "K2 Golpe";   kMasks[1] = settings.keyOsuK2;      actColors[1] = Ui::rgba(255, 95, 180);
+                    kShortNames[2] = "Humo";       kMasks[2] = settings.keyOsuSmoke;   actColors[2] = Ui::rgba(240, 200, 50);
+                    kShortNames[3] = "Retry";      kMasks[3] = settings.keyQuickRetry; actColors[3] = Ui::rgba(255, 75, 75);
+                } else if (settingsControlsMode == MODE_TAIKO) {
+                    kShortNames[0] = "Don Izq";    kMasks[0] = settings.keyTaikoDonLeft;    actColors[0] = Ui::rgba(245, 60, 65);
+                    kShortNames[1] = "Don Der";    kMasks[1] = settings.keyTaikoDonRight;   actColors[1] = Ui::rgba(245, 60, 65);
+                    kShortNames[2] = "Katsu Izq";  kMasks[2] = settings.keyTaikoKatsuLeft;  actColors[2] = Ui::rgba(45, 135, 255);
+                    kShortNames[3] = "Katsu Der";  kMasks[3] = settings.keyTaikoKatsuRight; actColors[3] = Ui::rgba(45, 135, 255);
+                } else if (settingsControlsMode == MODE_CATCH) {
+                    kShortNames[0] = "Mover Izq";  kMasks[0] = settings.keyCatchLeft;  actColors[0] = Ui::rgba(50, 210, 120);
+                    kShortNames[1] = "Mover Der";  kMasks[1] = settings.keyCatchRight; actColors[1] = Ui::rgba(50, 210, 120);
+                    kShortNames[2] = "Dash";       kMasks[2] = settings.keyCatchDash;  actColors[2] = Ui::rgba(255, 175, 30);
+                    kShortNames[3] = "Retry";      kMasks[3] = settings.keyQuickRetry; actColors[3] = Ui::rgba(255, 75, 75);
+                } else {
+                    kShortNames[0] = "Col 1";      kMasks[0] = settings.keyManiaCol1;  actColors[0] = Ui::rgba(50, 160, 255);
+                    kShortNames[1] = "Col 2";      kMasks[1] = settings.keyManiaCol2;  actColors[1] = Ui::rgba(235, 235, 245);
+                    kShortNames[2] = "Col 3";      kMasks[2] = settings.keyManiaCol3;  actColors[2] = Ui::rgba(235, 235, 245);
+                    kShortNames[3] = "Col 4";      kMasks[3] = settings.keyManiaCol4;  actColors[3] = Ui::rgba(50, 160, 255);
+                }
+
+                for (int i = 0; i < 4; ++i) {
+                    float bx = 6.0f + i * 77.0f;
+                    float by = 50.0f;
+                    float bw = 74.0f;
+                    float bh = 22.0f;
+                    int optIdx = 4 + i;
+                    bool sel = (settingsOption == optIdx);
+                    bool cap = (capturingKeyIndex == optIdx);
+
+                    u32 pillBg = cap ? Ui::rgba(255, 180, 40) : (sel ? Ui::rgba(52, 40, 85, 250) : Ui::rgba(24, 20, 38, 230));
+                    Ui::panel(bx, by, bw, bh, 0.15f, pillBg, cap ? clrWhite : (sel ? clrCursor : actColors[i]));
+                    drawCenteredTextWithShadow(textBuf, bx + bw * 0.5f, by + 4.5f, 0.31f, cap ? clrBgDark : (sel ? clrWhite : actColors[i]), kShortNames[i], 0.85f);
+                    std::string mStr = cap ? "PULSA..." : truncateString(GameSettings::formatKeyMask(kMasks[i]), 11);
+                    drawCenteredTextWithShadow(textBuf, bx + bw * 0.5f, by + 14.5f, 0.28f, cap ? clrBgDark : (sel ? clrCursor : Ui::rgba(235, 230, 255)), mStr.c_str(), 0.85f);
+
+                    if (touchJustDown && touch.px >= bx && touch.px <= bx + bw && touch.py >= by && touch.py <= by + bh) {
+                        settingsOption = optIdx;
+                        capturingKeyIndex = optIdx;
+                        audio.playHitSound(2);
+                    }
+                }
+
+                // 3. Dibujo estilizado de la consola Nintendo 3DS
+                float chassisX = 22.0f, chassisY = 75.0f, chassisW = 276.0f, chassisH = 124.0f;
+                Ui::panel(chassisX, chassisY, chassisW, chassisH, 0.12f, Ui::rgba(28, 24, 42, 250), Ui::rgba(65, 55, 90));
+                C2D_DrawRectSolid(chassisX + 30.0f, chassisY + 1.0f, 0.13f, chassisW - 60.0f, 2.0f, Ui::rgba(45, 38, 65));
+
+                // Pantalla interior de la 3DS
+                float scX = 96.0f, scY = 85.0f, scW = 128.0f, scH = 86.0f;
+                Ui::panel(scX, scY, scW, scH, 0.14f, Ui::rgba(10, 8, 16, 255), Ui::rgba(65, 55, 95));
+
+                if (capturingKeyIndex != -1) {
+                    int cIdx = std::max(0, std::min(3, capturingKeyIndex - 4));
+                    Ui::glow(scX + scW * 0.5f, scY + scH * 0.5f, 0.15f, 32.0f, Ui::rgba(255, 180, 40, 60), 2);
+                    drawCenteredTextWithShadow(textBuf, scX + scW * 0.5f, scY + 14.0f, 0.35f, clrCursor, "ASIGNANDO BOTON", 0.90f);
+                    drawCenteredTextWithShadow(textBuf, scX + scW * 0.5f, scY + 32.0f, 0.40f, clrWhite, kShortNames[cIdx], 0.90f);
+                    drawCenteredTextWithShadow(textBuf, scX + scW * 0.5f, scY + 50.0f, 0.33f, clr100, "Pulsa un boton", 0.90f);
+                    drawCenteredTextWithShadow(textBuf, scX + scW * 0.5f, scY + 68.0f, 0.30f, clrWhite, "B: Cancelar", 0.90f);
+                } else {
+                    int selIdx = std::max(0, std::min(3, settingsOption - 4));
+                    drawCenteredTextWithShadow(textBuf, scX + scW * 0.5f, scY + 12.0f, 0.35f, subModeColors[settingsControlsMode], subModeNames[settingsControlsMode], 0.90f);
+                    drawCenteredTextWithShadow(textBuf, scX + scW * 0.5f, scY + 28.0f, 0.36f, clrWhite, kShortNames[selIdx], 0.90f);
+                    std::string curKeyFmt = GameSettings::formatKeyMask(kMasks[selIdx]);
+                    drawCenteredTextWithShadow(textBuf, scX + scW * 0.5f, scY + 44.0f, 0.33f, clrCursor, curKeyFmt.c_str(), 0.90f);
+                    drawCenteredTextWithShadow(textBuf, scX + scW * 0.5f, scY + 62.0f, 0.32f, Ui::rgba(140, 240, 255), "PULSA [A] O TOCA", 0.90f);
+                    drawCenteredTextWithShadow(textBuf, scX + scW * 0.5f, scY + 74.0f, 0.30f, clrWhite, "PARA REASIGNAR", 0.90f);
+                }
+
+                auto getBtnClr = [&](uint32_t mask, u32 defClr) -> u32 {
+                    if (kHeld & mask) return Ui::rgba(255, 255, 255);
+                    for (int a = 0; a < 4; ++a) {
+                        if (kMasks[a] & mask) return actColors[a];
+                    }
+                    return defClr;
+                };
+
+                // Gatillos L / R / ZL / ZR
+                u32 clrL = getBtnClr(KEY_L, Ui::rgba(55, 48, 75));
+                u32 clrR = getBtnClr(KEY_R, Ui::rgba(55, 48, 75));
+                u32 clrZL = getBtnClr(KEY_ZL, Ui::rgba(45, 40, 62));
+                u32 clrZR = getBtnClr(KEY_ZR, Ui::rgba(45, 40, 62));
+
+                Ui::pill(28.0f, 67.0f, 42.0f, 12.0f, 0.16f, clrL);
+                drawCenteredTextWithShadow(textBuf, 49.0f, 73.0f, 0.33f, clrWhite, "L", 0.85f);
+
+                Ui::pill(250.0f, 67.0f, 42.0f, 12.0f, 0.16f, clrR);
+                drawCenteredTextWithShadow(textBuf, 271.0f, 73.0f, 0.33f, clrWhite, "R", 0.85f);
+
+                Ui::pill(72.0f, 68.0f, 26.0f, 11.0f, 0.16f, clrZL);
+                drawCenteredTextWithShadow(textBuf, 85.0f, 73.5f, 0.29f, clrWhite, "ZL", 0.85f);
+
+                Ui::pill(222.0f, 68.0f, 26.0f, 11.0f, 0.16f, clrZR);
+                drawCenteredTextWithShadow(textBuf, 235.0f, 73.5f, 0.29f, clrWhite, "ZR", 0.85f);
+
+                // Circle Pad
+                C2D_DrawCircleSolid(60.0f, 108.0f, 0.15f, 14.0f, Ui::rgba(40, 35, 55));
+                C2D_DrawCircleSolid(60.0f, 108.0f, 0.16f, 11.0f, Ui::rgba(80, 75, 100));
+                drawRing(60.0f, 108.0f, 7.0f, 1.2f, Ui::rgba(55, 50, 75), 16, 0.17f);
+                C2D_DrawCircleSolid(60.0f, 108.0f, 0.18f, 2.0f, Ui::rgba(55, 50, 75));
+
+                // D-Pad (Cruz direccional)
+                u32 clrDUP = getBtnClr(KEY_DUP, Ui::rgba(55, 48, 75));
+                u32 clrDDOWN = getBtnClr(KEY_DDOWN, Ui::rgba(55, 48, 75));
+                u32 clrDLEFT = getBtnClr(KEY_DLEFT, Ui::rgba(55, 48, 75));
+                u32 clrDRIGHT = getBtnClr(KEY_DRIGHT, Ui::rgba(55, 48, 75));
+
+                C2D_DrawRectSolid(55.0f, 137.0f, 0.16f, 10.0f, 30.0f, Ui::rgba(35, 30, 50));
+                C2D_DrawRectSolid(45.0f, 147.0f, 0.16f, 30.0f, 10.0f, Ui::rgba(35, 30, 50));
+
+                C2D_DrawRectSolid(55.0f, 137.0f, 0.17f, 10.0f, 10.0f, clrDUP);
+                C2D_DrawRectSolid(55.0f, 157.0f, 0.17f, 10.0f, 10.0f, clrDDOWN);
+                C2D_DrawRectSolid(45.0f, 147.0f, 0.17f, 10.0f, 10.0f, clrDLEFT);
+                C2D_DrawRectSolid(65.0f, 147.0f, 0.17f, 10.0f, 10.0f, clrDRIGHT);
+
+                drawCenteredTextWithShadow(textBuf, 60.0f, 140.0f, 0.26f, clrWhite, "^", 0.85f);
+                drawCenteredTextWithShadow(textBuf, 60.0f, 160.0f, 0.26f, clrWhite, "v", 0.85f);
+                drawCenteredTextWithShadow(textBuf, 50.0f, 150.0f, 0.26f, clrWhite, "<", 0.85f);
+                drawCenteredTextWithShadow(textBuf, 70.0f, 150.0f, 0.26f, clrWhite, ">", 0.85f);
+
+                // C-Stick (N3DS)
+                C2D_DrawCircleSolid(238.0f, 104.0f, 0.16f, 5.0f, Ui::rgba(85, 80, 105));
+
+                // ABXY Diamond
+                u32 clrX = getBtnClr(KEY_X, Ui::rgba(60, 100, 200));
+                u32 clrB = getBtnClr(KEY_B, Ui::rgba(210, 175, 40));
+                u32 clrY = getBtnClr(KEY_Y, Ui::rgba(60, 180, 80));
+                u32 clrA = getBtnClr(KEY_A, Ui::rgba(220, 55, 65));
+
+                C2D_DrawCircleSolid(258.0f, 124.0f, 0.17f, 8.0f, clrX);
+                drawCenteredTextWithShadow(textBuf, 258.0f, 124.0f, 0.34f, clrWhite, "X", 0.85f);
+
+                C2D_DrawCircleSolid(258.0f, 156.0f, 0.17f, 8.0f, clrB);
+                drawCenteredTextWithShadow(textBuf, 258.0f, 156.0f, 0.34f, clrWhite, "B", 0.85f);
+
+                C2D_DrawCircleSolid(242.0f, 140.0f, 0.17f, 8.0f, clrY);
+                drawCenteredTextWithShadow(textBuf, 242.0f, 140.0f, 0.34f, clrWhite, "Y", 0.85f);
+
+                C2D_DrawCircleSolid(274.0f, 140.0f, 0.17f, 8.0f, clrA);
+                drawCenteredTextWithShadow(textBuf, 274.0f, 140.0f, 0.34f, clrWhite, "A", 0.85f);
+
+                // START / SELECT / HOME
+                u32 clrSel = getBtnClr(KEY_SELECT, Ui::rgba(50, 44, 70));
+                u32 clrStr = getBtnClr(KEY_START, Ui::rgba(50, 44, 70));
+
+                Ui::pill(116.0f, 176.0f, 24.0f, 9.0f, 0.16f, clrSel);
+                drawCenteredTextWithShadow(textBuf, 128.0f, 180.5f, 0.28f, clrWhite, "SEL", 0.85f);
+
+                Ui::pill(148.0f, 176.0f, 24.0f, 9.0f, 0.16f, Ui::rgba(40, 36, 58));
+                drawCenteredTextWithShadow(textBuf, 160.0f, 180.5f, 0.27f, Ui::rgba(210, 205, 230), "HOME", 0.85f);
+
+                Ui::pill(180.0f, 176.0f, 24.0f, 9.0f, 0.16f, clrStr);
+                drawCenteredTextWithShadow(textBuf, 192.0f, 180.5f, 0.28f, clrWhite, "STR", 0.85f);
+            } else { // Pestañas Audio (2), Juego (3) o Visual (4): tarjetas táctiles para ajustar con stylus
+                int startOpt = activeTab * 4;
+                for (int i = 0; i < 4; ++i) {
+                    int optIdx = startOpt + i;
+                    if (optIdx >= numSettings) break;
+                    float cy = 36.0f + i * 41.0f;
+                    bool sel = (settingsOption == optIdx);
+                    Ui::panel(10.0f, cy, 300.0f, 37.0f, 0.15f, sel ? Ui::rgba(42, 34, 70, 240) : Ui::rgba(22, 19, 36, 220), sel ? clrCursor : 0);
+
+                    // Detección de toque en la fila
+                    if (isTouching && touch.px >= 10 && touch.px <= 310 && touch.py >= cy && touch.py <= cy + 37.0f) {
+                        settingsOption = optIdx;
+                        if (optIdx == 8) { // Música
+                            settings.musicVolume = std::max(0, std::min(100, (int)(((touch.px - 180.0f) / 115.0f) * 100.0f)));
+                            audio.setVolumes(settings.musicVolume, settings.sfxVolume);
+                        } else if (optIdx == 9) { // SFX
+                            settings.sfxVolume = std::max(0, std::min(100, (int)(((touch.px - 180.0f) / 115.0f) * 100.0f)));
+                            audio.setVolumes(settings.musicVolume, settings.sfxVolume);
+                        } else if (optIdx == 10) { // Offset
+                            settings.audioOffsetMs = std::max(-150, std::min(150, (int)(((touch.px - 180.0f) / 115.0f) * 300.0f - 150.0f)));
+                        } else if (optIdx == 11 && touchJustDown) { // Hitsounds Beatmap
+                            settings.beatmapHitsounds = !settings.beatmapHitsounds;
+                        } else if (optIdx == 12 && touchJustDown) { // Modo de Juego
+                            settings.gameMode = static_cast<GameMode>((settings.gameMode + 1) % 4);
+                            settings.save();
+                        } else if (optIdx == 13 && touchJustDown) { // Skin
+                            settings.skinIndex = (settings.skinIndex + 1) % std::max(1, (int)skinMgr.skins.size());
+                            applyActiveSkinAudio();
+                        } else if (optIdx == 14 && touchJustDown) { // Sliders Serpiente
+                            settings.snakingSliders = !settings.snakingSliders;
+                        } else if (optIdx == 15 && touchJustDown) { // Combo Bursts
+                            settings.comboBursts = !settings.comboBursts;
+                        } else if (optIdx == 16 && touchJustDown) { // Fondo Taiko
+                            settings.taikoBgMode = (settings.taikoBgMode + 1) % 3;
+                            settings.save();
+                        } else if (optIdx == 17) { // Cursor
+                            settings.cursorScale = std::max(0.5f, std::min(2.0f, 0.5f + ((touch.px - 180.0f) / 115.0f) * 1.5f));
+                        } else if (optIdx == 18) { // BgDim
+                            settings.bgDim = std::max(20, std::min(100, (int)(20 + ((touch.px - 180.0f) / 115.0f) * 80.0f)));
+                        } else if (optIdx == 19 && touchJustDown) { // Videos
+                            settings.enableVideo = !settings.enableVideo;
+                        }
+                        settings.clampValues();
+                    }
+
+                    if (optIdx == 8) {
+                        drawText(textBuf, 20.0f, cy + 5.0f, 0.40f, clrWhite, "Volumen Musica");
+                        char desc[32]; std::snprintf(desc, sizeof(desc), "%d%%", settings.musicVolume);
+                        drawText(textBuf, 20.0f, cy + 20.0f, 0.33f, clr300, desc);
+                        Ui::sliderBar(180.0f, cy + 14.0f, 115.0f, 9.0f, 0.25f, settings.musicVolume / 100.0f, clrCursor, sel);
+                    } else if (optIdx == 9) {
+                        drawText(textBuf, 20.0f, cy + 5.0f, 0.40f, clrWhite, "Volumen Hitsounds");
+                        char desc[32]; std::snprintf(desc, sizeof(desc), "%d%%", settings.sfxVolume);
+                        drawText(textBuf, 20.0f, cy + 20.0f, 0.33f, clr300, desc);
+                        Ui::sliderBar(180.0f, cy + 14.0f, 115.0f, 9.0f, 0.25f, settings.sfxVolume / 100.0f, clrCursor, sel);
+                    } else if (optIdx == 10) {
+                        drawText(textBuf, 20.0f, cy + 5.0f, 0.40f, clrWhite, "Offset de Audio");
+                        char desc[32]; std::snprintf(desc, sizeof(desc), "%+d ms", settings.audioOffsetMs);
+                        drawText(textBuf, 20.0f, cy + 20.0f, 0.33f, clr100, desc);
+                        float r = (settings.audioOffsetMs + 150) / 300.0f;
+                        Ui::sliderBar(180.0f, cy + 14.0f, 115.0f, 9.0f, 0.25f, r, clr300, sel);
+                    } else if (optIdx == 11) {
+                        drawText(textBuf, 20.0f, cy + 5.0f, 0.40f, clrWhite, "Hitsounds del Mapa");
+                        drawText(textBuf, 20.0f, cy + 20.0f, 0.33f, clrMuted, settings.beatmapHitsounds ? "USAR DEL MAPA" : "FORZAR SKIN");
+                        Ui::toggleSwitch(245.0f, cy + 10.0f, 48.0f, 18.0f, 0.25f, settings.beatmapHitsounds, clr100);
+                    } else if (optIdx == 12) {
+                        drawText(textBuf, 20.0f, cy + 5.0f, 0.40f, clrWhite, "Modo de Juego (Toca cambiar)");
+                        drawText(textBuf, 20.0f, cy + 20.0f, 0.33f, clr300, settings.getGameModeName());
+                        u32 mPill = (settings.gameMode == MODE_TAIKO) ? Ui::rgba(180, 45, 45) : ((settings.gameMode == MODE_CATCH) ? Ui::rgba(35, 160, 85) : ((settings.gameMode == MODE_MANIA) ? Ui::rgba(140, 35, 175) : Ui::rgba(55, 40, 95)));
+                        Ui::pill(232.0f, cy + 8.0f, 68.0f, 20.0f, 0.25f, mPill);
+                        drawCenteredText(textBuf, 266.0f, cy + 18.0f, 0.33f, clrWhite, settings.getGameModeShortName(), 0.85f);
+                    } else if (optIdx == 13) {
+                        drawText(textBuf, 20.0f, cy + 5.0f, 0.40f, clrWhite, "Skin Activo (Toca cambiar)");
+                        drawText(textBuf, 20.0f, cy + 20.0f, 0.33f, clr300, truncateString(activeSkin.name, 20).c_str());
+                        for (size_t c = 0; c < std::min((size_t)4, activeSkin.comboColors.size()); ++c) {
+                            u32 cc = C2D_Color32(activeSkin.comboColors[c].r, activeSkin.comboColors[c].g, activeSkin.comboColors[c].b, 255);
+                            C2D_DrawCircleSolid(225.0f + c * 18.0f, cy + 18.0f, 0.25f, 6.0f, cc);
+                        }
+                    } else if (optIdx == 14) {
+                        drawText(textBuf, 20.0f, cy + 5.0f, 0.40f, clrWhite, "Sliders Serpiente");
+                        drawText(textBuf, 20.0f, cy + 20.0f, 0.33f, clrMuted, settings.snakingSliders ? "ACTIVADO" : "DESACTIVADO");
+                        Ui::toggleSwitch(245.0f, cy + 10.0f, 48.0f, 18.0f, 0.25f, settings.snakingSliders, clr100);
+                    } else if (optIdx == 15) {
+                        drawText(textBuf, 20.0f, cy + 5.0f, 0.40f, clrWhite, "Combo Bursts (Mascota)");
+                        drawText(textBuf, 20.0f, cy + 20.0f, 0.33f, clrMuted, settings.comboBursts ? "ACTIVADO" : "DESACTIVADO");
+                        Ui::toggleSwitch(245.0f, cy + 10.0f, 48.0f, 18.0f, 0.25f, settings.comboBursts, clr100);
+                    } else if (optIdx == 16) {
+                        drawText(textBuf, 20.0f, cy + 5.0f, 0.40f, clrWhite, "Fondo en Taiko");
+                        drawText(textBuf, 20.0f, cy + 20.0f, 0.33f, clr300, settings.getTaikoBgModeName());
+                        u32 bClr = (settings.taikoBgMode == 0) ? Ui::rgba(225, 145, 25) : ((settings.taikoBgMode == 1) ? Ui::rgba(45, 130, 215) : Ui::rgba(165, 55, 185));
+                        Ui::pill(180.0f, cy + 9.0f, 115.0f, 20.0f, 0.25f, bClr);
+                        drawCenteredText(textBuf, 237.5f, cy + 19.0f, 0.32f, clrWhite, settings.getTaikoBgModeName(), 0.35f);
+                    } else if (optIdx == 17) {
+                        drawText(textBuf, 20.0f, cy + 5.0f, 0.40f, clrWhite, "Tamano Cursor");
+                        char desc[32]; std::snprintf(desc, sizeof(desc), "%.1fx", settings.cursorScale);
+                        drawText(textBuf, 20.0f, cy + 20.0f, 0.33f, clr300, desc);
+                        float r = (settings.cursorScale - 0.5f) / 1.5f;
+                        Ui::sliderBar(180.0f, cy + 14.0f, 115.0f, 9.0f, 0.25f, r, clrCursor, sel);
+                    } else if (optIdx == 18) {
+                        drawText(textBuf, 20.0f, cy + 5.0f, 0.40f, clrWhite, "Oscurecimiento Fondo");
+                        char desc[32]; std::snprintf(desc, sizeof(desc), "%d%%", settings.bgDim);
+                        drawText(textBuf, 20.0f, cy + 20.0f, 0.33f, clr300, desc);
+                        float r = (settings.bgDim - 20) / 80.0f;
+                        Ui::sliderBar(180.0f, cy + 14.0f, 115.0f, 9.0f, 0.25f, r, clrPrimary, sel);
+                    } else if (optIdx == 19) {
+                        drawText(textBuf, 20.0f, cy + 5.0f, 0.40f, clrWhite, "Videos de Fondo");
+                        drawText(textBuf, 20.0f, cy + 20.0f, 0.33f, clrMuted, settings.enableVideo ? "ACTIVADO" : "DESACTIVADO");
+                        Ui::toggleSwitch(245.0f, cy + 10.0f, 48.0f, 18.0f, 0.25f, settings.enableVideo, clr100);
+                    }
+                }
+            }
+
+            if (capturingKeyIndex != -1 && activeTab != 1) {
+                C2D_DrawRectSolid(0.0f, 0.0f, 0.88f, 320.0f, 240.0f, Ui::rgba(8, 6, 16, 215));
+                Ui::panel(20.0f, 50.0f, 280.0f, 140.0f, 0.90f, Ui::rgba(26, 20, 44, 250), clrCursor);
+                const char* capNames[4] = { "TECLA 1 (K1)", "TECLA 2 (K2)", "HUMO (SMOKE)", "REINICIO RAPIDO" };
+                int cIdx = std::max(0, std::min(3, capturingKeyIndex - 4));
+                drawCenteredText(textBuf, 160.0f, 72.0f, 0.48f, clrCursor, "ASIGNANDO BOTON FISICO", 0.95f);
+                drawCenteredText(textBuf, 160.0f, 96.0f, 0.42f, clrWhite, capNames[cIdx], 0.95f);
+                drawCenteredText(textBuf, 160.0f, 126.0f, 0.36f, clr100, "Pulsa cualquier boton de la consola...", 0.95f);
+                drawCenteredText(textBuf, 160.0f, 154.0f, 0.32f, clrMuted, "B o Toca aqui para Cancelar", 0.95f);
+                if (touchJustDown) {
+                    capturingKeyIndex = -1;
+                    audio.playHitSound(0);
+                }
+            }
+
+            // Barra inferior con 3 botones de acción
+            Ui::slantRectGrad(10.0f, 204.0f, 96.0f, 28.0f, 6.0f, 0.2f, Ui::rgba(45, 95, 135), Ui::rgba(25, 55, 85));
+            drawCenteredText(textBuf, 58.0f, 218.0f, 0.36f, clrWhite, (activeTab == 1) ? "DEFECTO (X)" : "CALIBRAR (X)", 0.85f);
+
+            Ui::slantRectGrad(112.0f, 204.0f, 96.0f, 28.0f, 6.0f, 0.2f, Ui::rgba(85, 65, 30), Ui::rgba(55, 40, 20));
+            drawCenteredText(textBuf, 160.0f, 218.0f, 0.36f, clrWhite, "RESET (Y)", 0.85f);
+
+            Ui::slantRectGrad(214.0f, 204.0f, 96.0f, 28.0f, 6.0f, 0.2f, clrPrimary, Ui::rgba(110, 45, 135));
+            drawCenteredText(textBuf, 262.0f, 218.0f, 0.36f, clrWhite, "GUARDAR (B)", 0.85f);
 
             if (isTouching) {
+                Ui::glow(touch.px, touch.py, 0.75f, 11.0f, Ui::withAlpha(clr300, 140), 3);
                 C2D_DrawCircleSolid(touch.px, touch.py, 0.8f, 4.5f, clr300);
             }
+            Ui::drawTransition(320.0f, 240.0f, screenFade, clrPrimary);
 
             C3D_FrameEnd(0);
             continue;
@@ -834,32 +2452,186 @@ int main(int argc, char* argv[]) {
         // =========================================================
         if (appState == STATE_SONG_SELECT) {
             audio.update();
+            float beatPulse = getBpmPulse();
+
+            // Debounce: solo cargar audio/fondo cuando el jugador deja de pasar canciones
+            if (previewDelay > 0 && --previewDelay == 0) updateSongPreview();
+            // Subir a GPU el fondo decodificado en segundo plano (si ya esta listo)
+            if (bgLoader.poll(bgTex)) bgFade = 0.0f;
+            bgFade = Ui::approach(bgFade, 255.0f, 0.12f);
             if (settings.songPreview && audio.isSongFinished()) {
                 updateSongPreview();
             }
 
+            // Animación suave de elevación e iluminación de las tarjetas inferiores estilo osu!lazer
+            footerCardHover = -1;
+            if (isTouching && !modMenuOpen && !deleteConfirmOpen && !rankingExpanded && !searchKeyboardOpen && touch.py >= 136 && touch.py <= 236) {
+                for (int k = 0; k < 5; ++k) {
+                    float bx = 8.0f + k * 62.0f;
+                    if (touch.px >= bx && touch.px <= bx + 56.0f) {
+                        footerCardHover = k;
+                        break;
+                    }
+                }
+            }
+            for (int k = 0; k < 5; ++k) {
+                float targetLift = 0.0f;
+                if (footerCardHover == k) targetLift = 1.0f;
+                else if (k == 2 && modMenuOpen) targetLift = 0.85f;
+                else if (k == 1 && !songMgr.searchQuery.empty()) targetLift = 0.25f + 0.15f * std::sin(animTick * 0.12f);
+                footerCardLift[k] = Ui::approach(footerCardLift[k], targetLift, 0.25f);
+            }
+
             // Abrir/Cerrar menú de Mods con SELECT o botón táctil en pantalla inferior
-            if (kDown & KEY_SELECT) {
+            if (kDown & KEY_SELECT && !deleteConfirmOpen && !searchKeyboardOpen) {
                 modMenuOpen = !modMenuOpen;
                 audio.playHitSound(0);
             }
-            if (touchJustDown && !modMenuOpen) {
-                if (touch.px >= 200 && touch.px <= 305 && touch.py >= 172 && touch.py <= 202) {
-                    modMenuOpen = true;
+            if (touchJustDown && !modMenuOpen && !deleteConfirmOpen && !searchKeyboardOpen) {
+                // Tocar botón pequeño [BORRAR] en el header (x: 246..312, y: 6..28)
+                if (touch.py >= 6 && touch.py <= 28 && touch.px >= 246 && touch.px <= 312) {
+                    if (!songMgr.sets.empty()) {
+                        deleteConfirmOpen = true;
+                        audio.playHitSound(0);
+                    }
+                }
+                // Tocar pestañas [ RESUMEN ] / [ RANKING LOCAL ] o el botón de acción
+                else if (touch.py >= 50 && touch.py <= 72) {
+                    if (touch.px >= 8 && touch.px <= 118) {
+                        songSelectTab = 0;
+                        rankingExpanded = false;
+                        audio.playHitSound(0);
+                    } else if (touch.px >= 122 && touch.px <= 244) {
+                        songSelectTab = 1;
+                        audio.playHitSound(0);
+                    } else if (touch.px >= 246 && touch.px <= 312) {
+                        if (songSelectTab == 1) {
+                            rankingExpanded = !rankingExpanded;
+                            audio.playHitSound(2);
+                        } else {
+                            songSelectTab = 1;
+                            audio.playHitSound(0);
+                        }
+                    }
+                }
+                // Si está en RESUMEN y toca la tarjeta de Personal Best, abrir Ranking Local
+                else if (songSelectTab == 0 && touch.py >= 72 && touch.py <= 112 && touch.px >= 8 && touch.px <= 312) {
+                    songSelectTab = 1;
                     audio.playHitSound(0);
+                }
+                // Si está en RANKING LOCAL (modo compacto) y toca la lista, expandirla
+                else if (songSelectTab == 1 && !rankingExpanded && touch.py >= 72 && touch.py <= 142 && touch.px >= 8 && touch.px <= 312) {
+                    rankingExpanded = true;
+                    audio.playHitSound(0);
+                }
+                // Si está en modo expandido y toca la barra inferior de cerrar
+                else if (rankingExpanded && touch.py >= 220 && touch.py <= 240) {
+                    rankingExpanded = false;
+                    audio.playHitSound(0);
+                }
+
+                // Solo procesar las 5 tarjetas inferiores si NO está el ranking expandido
+                if (!rankingExpanded) {
+                    for (int k = 0; k < 5; ++k) {
+                        float bx = 8.0f + k * 62.0f;
+                        if (touch.px >= bx && touch.px <= bx + 56.0f && touch.py >= 136 && touch.py <= 236) {
+                            footerCardLift[k] = 1.0f;
+                            if (k == 0) { // Alternar Modo Táctil / Tablet en la misma tarjeta
+                                settings.playOnBottomScreen = !settings.playOnBottomScreen;
+                                settings.save();
+                                audio.playHitSound(2);
+                            } else if (k == 1) { // Buscar
+                                openSearchKeyboard();
+                                touchJustDown = false;
+                                break;
+                            } else if (k == 2) { // Mods
+                                modMenuOpen = true;
+                                audio.playHitSound(0);
+                            } else if (k == 3) { // Orden
+                                songMgr.sortMode = (songMgr.sortMode + 1) % 4;
+                                songMgr.applySortAndFilter(&scoreMgr);
+                                selectedSet = 0;
+                                selectedDiff = 0;
+                                rankingScroll = 0;
+                                carouselPos = 0.0f;
+                                audio.playHitSound(2);
+                                updateSongPreview();
+                            } else if (k == 4) { // Modo de Juego (STD / TAIKO / CATCH / MANIA)
+                                if (settings.gameMode == MODE_STD) settings.gameMode = MODE_TAIKO;
+                                else if (settings.gameMode == MODE_TAIKO) settings.gameMode = MODE_CATCH;
+                                else if (settings.gameMode == MODE_CATCH) settings.gameMode = MODE_MANIA;
+                                else settings.gameMode = MODE_STD;
+                                settings.save();
+                                audio.playHitSound(2);
+                            }
+                            break;
+                        }
+                    }
                 }
             }
 
-            if (modMenuOpen) {
+            if (deleteConfirmOpen) {
                 if (kDown & KEY_B) {
+                    deleteConfirmOpen = false;
+                    audio.playHitSound(0);
+                }
+                if (kDown & KEY_A) {
+                    if (!songMgr.sets.empty() && selectedSet >= 0 && selectedSet < static_cast<int>(songMgr.sets.size())) {
+                        audio.stopMusic();
+                        songMgr.deleteSet(selectedSet, &scoreMgr);
+                        if (selectedSet >= static_cast<int>(songMgr.sets.size())) {
+                            selectedSet = std::max(0, static_cast<int>(songMgr.sets.size()) - 1);
+                        }
+                        selectedDiff = 0;
+                        carouselPos = static_cast<float>(selectedSet);
+                        audio.playHitSound(2);
+                        updateSongPreview();
+                    }
+                    deleteConfirmOpen = false;
+                }
+                if (touchJustDown) {
+                    if (touch.px >= 28 && touch.px <= 154 && touch.py >= 146 && touch.py <= 184) { // CANCELAR
+                        deleteConfirmOpen = false;
+                        audio.playHitSound(0);
+                    } else if (touch.px >= 166 && touch.px <= 292 && touch.py >= 146 && touch.py <= 184) { // BORRAR
+                        if (!songMgr.sets.empty() && selectedSet >= 0 && selectedSet < static_cast<int>(songMgr.sets.size())) {
+                            audio.stopMusic();
+                            songMgr.deleteSet(selectedSet, &scoreMgr);
+                            if (selectedSet >= static_cast<int>(songMgr.sets.size())) {
+                                selectedSet = std::max(0, static_cast<int>(songMgr.sets.size()) - 1);
+                            }
+                            selectedDiff = 0;
+                            carouselPos = static_cast<float>(selectedSet);
+                            audio.playHitSound(2);
+                            updateSongPreview();
+                        }
+                        deleteConfirmOpen = false;
+                    }
+                }
+            } else if (modMenuOpen) {
+                if (kDown & (KEY_B | KEY_SELECT)) {
                     modMenuOpen = false;
                     audio.playHitSound(0);
                     updateSongPreview();
                 }
-                if (kDown & KEY_DLEFT)  { modCursor = (modCursor + 6) % 7; audio.playHitSound(0); }
-                if (kDown & KEY_DRIGHT) { modCursor = (modCursor + 1) % 7; audio.playHitSound(0); }
-                if (kDown & KEY_DUP)    { modCursor = (modCursor + 4) % 7; audio.playHitSound(0); }
-                if (kDown & KEY_DDOWN)  { modCursor = (modCursor + 3) % 7; audio.playHitSound(0); }
+                if (kDown & KEY_DLEFT) {
+                    if (modCursor % 5 == 0) modCursor += 4;
+                    else modCursor -= 1;
+                    audio.playHitSound(0);
+                }
+                if (kDown & KEY_DRIGHT) {
+                    if (modCursor % 5 == 4) modCursor -= 4;
+                    else modCursor += 1;
+                    audio.playHitSound(0);
+                }
+                if (kDown & KEY_DUP) {
+                    modCursor = (modCursor + 10) % 15;
+                    audio.playHitSound(0);
+                }
+                if (kDown & KEY_DDOWN) {
+                    modCursor = (modCursor + 5) % 15;
+                    audio.playHitSound(0);
+                }
 
                 if (kDown & KEY_A) {
                     toggleModByIndex(modCursor);
@@ -873,15 +2645,15 @@ int main(int argc, char* argv[]) {
                     updateSongPreview();
                 }
 
-                // Soporte táctil para las 7 tarjetas de Mods en la pantalla inferior
+                // Soporte táctil para las 15 tarjetas de Mods en la cuadrícula 5x3
                 if (touchJustDown) {
-                    for (int m = 0; m < 7; ++m) {
-                        int col = m % 4;
-                        int row = m / 4;
-                        float mx = 16.0f + col * 73.0f;
-                        float my = 56.0f + row * 56.0f;
-                        if (touch.px >= mx && touch.px <= mx + 66.0f &&
-                            touch.py >= my && touch.py <= my + 46.0f) {
+                    for (int m = 0; m < 15; ++m) {
+                        int col = m % 5;
+                        int row = m / 5;
+                        float mx = 8.0f + col * 62.0f;
+                        float my = 44.0f + row * 44.0f;
+                        if (touch.px >= mx && touch.px <= mx + 56.0f &&
+                            touch.py >= my && touch.py <= my + 38.0f) {
                             modCursor = m;
                             toggleModByIndex(m);
                             audio.playHitSound(2);
@@ -889,13 +2661,337 @@ int main(int argc, char* argv[]) {
                             break;
                         }
                     }
+                    // Botón Limpiar (esquina superior derecha) o volver
+                    if (touch.px >= 220 && touch.px <= 312 && touch.py >= 6 && touch.py <= 36) {
+                        settings.activeMods = MOD_NONE;
+                        settings.save();
+                        audio.playHitSound(0);
+                        updateSongPreview();
+                    }
+                }
+            } else if (searchKeyboardOpen) {
+                if (searchKeyFlashTimer > 0) searchKeyFlashTimer--;
+
+                // Botones físicos cuando el teclado está abierto
+                if (kDown & (KEY_B | KEY_START)) {
+                    searchKeyboardOpen = false;
+                    audio.playHitSound(0);
+                }
+                else if (kDown & KEY_X) {
+                    songMgr.searchQuery.clear();
+                    songMgr.applySortAndFilter(&scoreMgr);
+                    selectedSet = 0;
+                    selectedDiff = 0;
+                    rankingScroll = 0;
+                    carouselPos = 0.0f;
+                    audio.playHitSound(0);
+                    updateSongPreview();
+                }
+                else if (kDown & KEY_Y) {
+                    if (!songMgr.searchQuery.empty()) {
+                        songMgr.searchQuery.pop_back();
+                        songMgr.applySortAndFilter(&scoreMgr);
+                        selectedSet = 0;
+                        selectedDiff = 0;
+                        rankingScroll = 0;
+                        carouselPos = 0.0f;
+                        audio.playHitSound(0);
+                        updateSongPreview();
+                    }
+                }
+                else if (kDown & (KEY_ZL | KEY_ZR)) {
+                    searchKeyboardOpen = false;
+                    audio.playHitSound(0);
+                }
+                else if (kDown & KEY_A) {
+                    searchKeyboardOpen = false;
+                    audio.playHitSound(2);
+                }
+
+                // Navegar por la lista filtrada de canciones mientras el teclado está abierto
+                if (!songMgr.sets.empty()) {
+                    int numSets = static_cast<int>(songMgr.sets.size());
+                    int setDelta = 0;
+                    if (kDown & (KEY_DUP | KEY_L))   setDelta = -1;
+                    if (kDown & (KEY_DDOWN | KEY_R)) setDelta = +1;
+                    if (setDelta == 0 && analogNavCooldown == 0) {
+                        if (cstick.dy > 45 || cpad.dy > 65) {
+                            setDelta = -1;
+                            analogNavCooldown = 11;
+                        } else if (cstick.dy < -45 || cpad.dy < -65) {
+                            setDelta = +1;
+                            analogNavCooldown = 11;
+                        }
+                    }
+                    if (setDelta != 0) {
+                        selectedSet = (selectedSet + setDelta + numSets) % numSets;
+                        selectedDiff = 0;
+                        rankingScroll = 0;
+                        carouselPos = static_cast<float>(selectedSet);
+                        audio.playHitSound(0);
+                        previewDelay = 12;
+                    }
+                }
+
+                // Mantener pulsado el botón de borrar para repetición rápida
+                bool touchingDelete = isTouching && (
+                    (touch.px >= 271.0f && touch.px <= 316.0f && touch.py >= 54.0f && touch.py <= 86.0f) ||
+                    (touch.px >= 208.0f && touch.px <= 260.0f && touch.py >= 194.0f && touch.py <= 236.0f)
+                );
+                if (touchingDelete) {
+                    searchBackspaceHoldTimer++;
+                    if (searchBackspaceHoldTimer > 20 && (searchBackspaceHoldTimer % 4 == 0)) {
+                        if (!songMgr.searchQuery.empty()) {
+                            songMgr.searchQuery.pop_back();
+                            songMgr.applySortAndFilter(&scoreMgr);
+                            selectedSet = 0;
+                            selectedDiff = 0;
+                            rankingScroll = 0;
+                            carouselPos = 0.0f;
+                            audio.playHitSound(0);
+                            updateSongPreview();
+                        }
+                    }
+                } else {
+                    searchBackspaceHoldTimer = 0;
+                }
+
+                // Entrada táctil por pulsación única
+                if (touchJustDown) {
+                    // 1. Cabecera: Limpiar [✕] o Listo [LISTO]
+                    if (touch.px >= 232.0f && touch.px <= 258.0f && touch.py >= 3.0f && touch.py <= 31.0f) {
+                        songMgr.searchQuery.clear();
+                        songMgr.applySortAndFilter(&scoreMgr);
+                        selectedSet = 0;
+                        selectedDiff = 0;
+                        rankingScroll = 0;
+                        carouselPos = 0.0f;
+                        audio.playHitSound(0);
+                        updateSongPreview();
+                    } else if (touch.px >= 262.0f && touch.px <= 316.0f && touch.py >= 3.0f && touch.py <= 31.0f) {
+                        searchKeyboardOpen = false;
+                        audio.playHitSound(2);
+                    }
+                    // 2. Fila de Filtros Rápidos (Chips) en y: 34..52
+                    else if (touch.py >= 34.0f && touch.py <= 52.0f) {
+                        if (touch.px >= 4.0f && touch.px <= 44.0f) { // TODOS
+                            songMgr.searchQuery.clear();
+                            songMgr.applySortAndFilter(&scoreMgr);
+                            selectedSet = 0;
+                            selectedDiff = 0;
+                            rankingScroll = 0;
+                            carouselPos = 0.0f;
+                            audio.playHitSound(2);
+                            updateSongPreview();
+                        } else if (touch.px >= 47.0f && touch.px <= 79.0f) { // STD
+                            toggleSearchTag("mode:std");
+                        } else if (touch.px >= 82.0f && touch.px <= 122.0f) { // TAIKO
+                            toggleSearchTag("mode:taiko");
+                        } else if (touch.px >= 125.0f && touch.px <= 165.0f) { // CATCH
+                            toggleSearchTag("mode:catch");
+                        } else if (touch.px >= 168.0f && touch.px <= 208.0f) { // MANIA
+                            toggleSearchTag("mode:mania");
+                        } else if (touch.px >= 211.0f && touch.px <= 243.0f) { // ★4+
+                            toggleSearchTag("★4");
+                        } else if (touch.px >= 246.0f && touch.px <= 278.0f) { // ★5+
+                            toggleSearchTag("★5");
+                        }
+                    }
+                    // 3. Fila 0: Números 1..0 y Borrar superior (y: 54..86)
+                    else if (touch.py >= 54.0f && touch.py <= 86.0f) {
+                        bool hit = false;
+                        const char* numChars = "1234567890";
+                        for (int i = 0; i < 10; ++i) {
+                            float kx = 4.0f + i * 26.5f;
+                            if (touch.px >= kx && touch.px <= kx + 24.5f) {
+                                if (songMgr.searchQuery.size() < 32) {
+                                    songMgr.searchQuery += numChars[i];
+                                    searchLastKeyIndex = i;
+                                    searchKeyFlashTimer = 6;
+                                    songMgr.applySortAndFilter(&scoreMgr);
+                                    selectedSet = 0;
+                                    selectedDiff = 0;
+                                    rankingScroll = 0;
+                                    carouselPos = 0.0f;
+                                    audio.playHitSound(0);
+                                    updateSongPreview();
+                                }
+                                hit = true;
+                                break;
+                            }
+                        }
+                        if (!hit && touch.px >= 271.0f && touch.px <= 316.0f) {
+                            if (!songMgr.searchQuery.empty()) {
+                                songMgr.searchQuery.pop_back();
+                                searchLastKeyIndex = 10;
+                                searchKeyFlashTimer = 6;
+                                songMgr.applySortAndFilter(&scoreMgr);
+                                selectedSet = 0;
+                                selectedDiff = 0;
+                                rankingScroll = 0;
+                                carouselPos = 0.0f;
+                                audio.playHitSound(0);
+                                updateSongPreview();
+                            }
+                        }
+                    }
+                    // 4. Fila 1: Q W E R T Y U I O P (y: 89..121)
+                    else if (touch.py >= 89.0f && touch.py <= 121.0f) {
+                        const char* r1Chars = "qwertyuiop";
+                        for (int i = 0; i < 10; ++i) {
+                            float kx = 4.0f + i * 31.0f;
+                            if (touch.px >= kx && touch.px <= kx + 29.0f) {
+                                if (songMgr.searchQuery.size() < 32) {
+                                    songMgr.searchQuery += r1Chars[i];
+                                    searchLastKeyIndex = 11 + i;
+                                    searchKeyFlashTimer = 6;
+                                    songMgr.applySortAndFilter(&scoreMgr);
+                                    selectedSet = 0;
+                                    selectedDiff = 0;
+                                    rankingScroll = 0;
+                                    carouselPos = 0.0f;
+                                    audio.playHitSound(0);
+                                    updateSongPreview();
+                                }
+                                break;
+                            }
+                        }
+                    }
+                    // 5. Fila 2: A S D F G H J K L - (y: 124..156)
+                    else if (touch.py >= 124.0f && touch.py <= 156.0f) {
+                        const char* r2Chars = "asdfghjkl-";
+                        for (int i = 0; i < 10; ++i) {
+                            float kx = 8.0f + i * 30.2f;
+                            if (touch.px >= kx && touch.px <= kx + 28.2f) {
+                                if (songMgr.searchQuery.size() < 32) {
+                                    songMgr.searchQuery += r2Chars[i];
+                                    searchLastKeyIndex = 21 + i;
+                                    searchKeyFlashTimer = 6;
+                                    songMgr.applySortAndFilter(&scoreMgr);
+                                    selectedSet = 0;
+                                    selectedDiff = 0;
+                                    rankingScroll = 0;
+                                    carouselPos = 0.0f;
+                                    audio.playHitSound(0);
+                                    updateSongPreview();
+                                }
+                                break;
+                            }
+                        }
+                    }
+                    // 6. Fila 3: Z X C V B N M . / (y: 159..191)
+                    else if (touch.py >= 159.0f && touch.py <= 191.0f) {
+                        const char* r3Chars = "zxcvbnm./";
+                        for (int i = 0; i < 9; ++i) {
+                            float kx = 16.0f + i * 32.0f;
+                            if (touch.px >= kx && touch.px <= kx + 29.8f) {
+                                if (songMgr.searchQuery.size() < 32) {
+                                    songMgr.searchQuery += r3Chars[i];
+                                    searchLastKeyIndex = 31 + i;
+                                    searchKeyFlashTimer = 6;
+                                    songMgr.applySortAndFilter(&scoreMgr);
+                                    selectedSet = 0;
+                                    selectedDiff = 0;
+                                    rankingScroll = 0;
+                                    carouselPos = 0.0f;
+                                    audio.playHitSound(0);
+                                    updateSongPreview();
+                                }
+                                break;
+                            }
+                        }
+                    }
+                    // 7. Fila 4: Acciones inferiores (y: 194..238)
+                    else if (touch.py >= 194.0f && touch.py <= 238.0f) {
+                        // Limpiar (x: 4..60)
+                        if (touch.px >= 4.0f && touch.px <= 60.0f) {
+                            songMgr.searchQuery.clear();
+                            searchLastKeyIndex = 40;
+                            searchKeyFlashTimer = 6;
+                            songMgr.applySortAndFilter(&scoreMgr);
+                            selectedSet = 0;
+                            selectedDiff = 0;
+                            rankingScroll = 0;
+                            carouselPos = 0.0f;
+                            audio.playHitSound(0);
+                            updateSongPreview();
+                        }
+                        // Espacio (x: 63..205)
+                        else if (touch.px >= 63.0f && touch.px <= 205.0f) {
+                            if (songMgr.searchQuery.size() < 32 && !songMgr.searchQuery.empty() && songMgr.searchQuery.back() != ' ') {
+                                songMgr.searchQuery += ' ';
+                                searchLastKeyIndex = 41;
+                                searchKeyFlashTimer = 6;
+                                audio.playHitSound(0);
+                            }
+                        }
+                        // Borrar (x: 208..260)
+                        else if (touch.px >= 208.0f && touch.px <= 260.0f) {
+                            if (!songMgr.searchQuery.empty()) {
+                                songMgr.searchQuery.pop_back();
+                                searchLastKeyIndex = 42;
+                                searchKeyFlashTimer = 6;
+                                songMgr.applySortAndFilter(&scoreMgr);
+                                selectedSet = 0;
+                                selectedDiff = 0;
+                                rankingScroll = 0;
+                                carouselPos = 0.0f;
+                                audio.playHitSound(0);
+                                updateSongPreview();
+                            }
+                        }
+                        // OK / Listo (x: 263..316)
+                        else if (touch.px >= 263.0f && touch.px <= 316.0f) {
+                            searchLastKeyIndex = 43;
+                            searchKeyFlashTimer = 6;
+                            searchKeyboardOpen = false;
+                            audio.playHitSound(2);
+                        }
+                    }
                 }
             } else {
-                if (kDown & KEY_B) {
-                    audio.stopMusic();
-                    audio.playHitSound(0);
-                    appState = STATE_MAIN_MENU;
-                    continue;
+                if (rankingExpanded) {
+                    if (kDown & KEY_B) {
+                        rankingExpanded = false;
+                        audio.playHitSound(0);
+                        continue;
+                    }
+                    if (kDown & KEY_DUP) {
+                        if (rankingScroll > 0) {
+                            rankingScroll--;
+                            audio.playHitSound(0);
+                        }
+                    }
+                    if (kDown & KEY_DDOWN) {
+                        rankingScroll++;
+                        audio.playHitSound(0);
+                    }
+                } else {
+                    if (kDown & KEY_B) {
+                        if (songSelectTab != 0) {
+                            songSelectTab = 0;
+                            audio.playHitSound(0);
+                            continue;
+                        }
+                        audio.playHitSound(0);
+                        appState = STATE_MAIN_MENU;
+                        continue;
+                    }
+                }
+
+                if (kDown & KEY_START) {
+                    songMgr.sortMode = (songMgr.sortMode + 1) % 4;
+                    songMgr.applySortAndFilter(&scoreMgr);
+                    selectedSet = 0;
+                    selectedDiff = 0;
+                    rankingScroll = 0;
+                    carouselPos = 0.0f;
+                    audio.playHitSound(2);
+                    updateSongPreview();
+                }
+
+                if (kDown & (KEY_ZL | KEY_ZR)) {
+                    openSearchKeyboard();
                 }
 
                 if (kDown & KEY_X) {
@@ -917,31 +3013,44 @@ int main(int argc, char* argv[]) {
 
                 if (!songMgr.sets.empty()) {
                     int numSets = static_cast<int>(songMgr.sets.size());
-                    if (kDown & (KEY_DLEFT | KEY_L)) {
-                        selectedSet = (selectedSet - 1 + numSets) % numSets;
-                        selectedDiff = 0;
-                        audio.playHitSound(0);
-                        updateSongPreview();
+                    int setDelta = 0;
+                    if (kDown & (KEY_DUP | KEY_L))   setDelta = -1;
+                    if (kDown & (KEY_DDOWN | KEY_R)) setDelta = +1;
+
+                    // Desplazamiento vertical de canciones con C-Stick (New 3DS) o Circle Pad (Arriba / Abajo)
+                    if (setDelta == 0 && analogNavCooldown == 0 && !rankingExpanded) {
+                        if (cstick.dy > 45 || cpad.dy > 65) {
+                            setDelta = -1;
+                            analogNavCooldown = (std::abs(cstick.dy) > 90 || std::abs(cpad.dy) > 110) ? 5 : 8;
+                        } else if (cstick.dy < -45 || cpad.dy < -65) {
+                            setDelta = +1;
+                            analogNavCooldown = (std::abs(cstick.dy) > 90 || std::abs(cpad.dy) > 110) ? 5 : 8;
+                        }
                     }
-                    if (kDown & (KEY_DRIGHT | KEY_R)) {
-                        selectedSet = (selectedSet + 1) % numSets;
+
+                    if (setDelta != 0) {
+                        selectedSet = (selectedSet + setDelta + numSets) % numSets;
                         selectedDiff = 0;
+                        rankingScroll = 0;
                         audio.playHitSound(0);
-                        updateSongPreview();
+                        previewDelay = isNew3DS ? 6 : 14;
                     }
 
                     const auto& curSet = songMgr.sets[selectedSet];
                     int numDiffs = static_cast<int>(curSet.difficulties.size());
                     if (numDiffs > 0) {
-                        if (kDown & KEY_DUP) {
-                            selectedDiff = (selectedDiff - 1 + numDiffs) % numDiffs;
-                            audio.playHitSound(0);
-                            updateSongPreview();
+                        int diffDelta = 0;
+                        if (kDown & KEY_DLEFT)  diffDelta = -1;
+                        if (kDown & KEY_DRIGHT) diffDelta = +1;
+                        if (diffDelta == 0 && analogNavCooldown == 0 && !rankingExpanded) {
+                            if (cstick.dx < -45 || cpad.dx < -65)      { diffDelta = -1; analogNavCooldown = 10; }
+                            else if (cstick.dx > 45 || cpad.dx > 65)   { diffDelta = +1; analogNavCooldown = 10; }
                         }
-                        if (kDown & KEY_DDOWN) {
-                            selectedDiff = (selectedDiff + 1) % numDiffs;
+                        if (diffDelta != 0) {
+                            selectedDiff = (selectedDiff + diffDelta + numDiffs) % numDiffs;
+                            rankingScroll = 0;
                             audio.playHitSound(0);
-                            updateSongPreview();
+                            previewDelay = isNew3DS ? 4 : 8;
                         }
 
                         if (kDown & KEY_A) {
@@ -952,254 +3061,937 @@ int main(int argc, char* argv[]) {
                 }
             }
 
-            C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
-
-            // --- PANTALLA SUPERIOR: FONDO DEL BEATMAP, LISTA DE CANCIONES Y ESTRELLAS (★) ---
-            C2D_TargetClear(topScreen, clrBgDark);
-            C2D_SceneBegin(topScreen);
-
-            if (bgTex.loaded) {
-                bgTex.drawRect(0.0f, 0.0f, 400.0f, 240.0f, 0.02f, 255);
-                u8 dimAlpha = static_cast<u8>((settings.bgDim * 200) / 100);
-                C2D_DrawRectSolid(0.0f, 0.0f, 0.04f, 400.0f, 240.0f, Ui::rgba(14, 12, 22, dimAlpha));
-            } else {
-                Ui::backdrop(400.0f, 240.0f, static_cast<float>(animTick), Ui::rgba(30, 18, 54), Ui::rgba(10, 8, 22), clrPrimary, 0.02f);
-            }
-            // Vineta izquierda para dar legibilidad al panel de informacion
-            Ui::gradH(0.0f, 0.0f, 240.0f, 240.0f, 0.05f, Ui::rgba(8, 6, 16, 220), Ui::rgba(8, 6, 16, 0));
-
-            // Cabecera
-            Ui::gradV(0.0f, 0.0f, 400.0f, 30.0f, 0.3f, Ui::rgba(18, 15, 32, 245), Ui::rgba(18, 15, 32, 150));
-            C2D_DrawRectSolid(0.0f, 29.0f, 0.31f, 400.0f, 1.5f, Ui::withAlpha(clrPrimary, 200));
-            drawText(textBuf, 12.0f, 6.0f, 0.55f, clrWhite, "Seleccion de Cancion");
-            char headerInfo[96];
-            std::snprintf(headerInfo, sizeof(headerInfo), "%d / %d",
-                songMgr.sets.empty() ? 0 : (selectedSet + 1),
-                static_cast<int>(songMgr.sets.size()));
-            Ui::pill(334.0f, 6.0f, 56.0f, 18.0f, 0.32f, Ui::rgba(60, 50, 90, 230));
-            drawCenteredText(textBuf, 362.0f, 15.0f, 0.40f, clrWhite, headerInfo, 0.9f);
-
             carouselPos = Ui::approach(carouselPos, static_cast<float>(selectedSet), 0.22f);
 
-            if (songMgr.sets.empty()) {
-                Ui::panel(40.0f, 70.0f, 320.0f, 100.0f, 0.3f, Ui::rgba(30, 27, 44, 235), clrMiss);
-                drawText(textBuf, 56.0f, 82.0f, 0.5f, clrMiss, "No se encontraron beatmaps (.osu / .osz)");
-                drawText(textBuf, 56.0f, 110.0f, 0.43f, clrWhite, "Coloca carpetas o archivos .osz en:");
-                drawText(textBuf, 56.0f, 130.0f, 0.45f, clr300, "sdmc:/3ds/osu-3ds/songs/");
-            } else {
-                const int nSets = static_cast<int>(songMgr.sets.size());
+            C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
 
-                // ---- Carrusel de canciones (derecha), la seleccionada sale hacia la izquierda ----
-                for (int off = -4; off <= 4; ++off) {
-                    int idx = selectedSet + off;
-                    if (idx < 0 || idx >= nSets) continue;
-                    float rel = idx - carouselPos;
-                    float dist = std::fabs(rel);
-                    if (dist > 4.2f) continue;
-                    const auto& cs = songMgr.sets[idx];
-                    if (cs.difficulties.empty()) continue;
+            // --- PANTALLA SUPERIOR: FONDO DEL BEATMAP, LISTA DE CANCIONES Y ESTRELLAS (★) EN 3D ESTEREOSCÓPICO ---
+            for (int eye = 0; eye < (stereoActive ? 2 : 1); ++eye) {
+                C3D_RenderTarget* curTop = (eye == 0) ? topScreen : topScreenRight;
+                float eyeSign = stereoActive ? ((eye == 0) ? 1.0f : -1.0f) : 0.0f;
+                auto depthShift = [&](float px) { return eyeSign * slider3D * px; };
 
-                    bool sel = (idx == selectedSet);
-                    float focus = std::max(0.0f, 1.0f - dist);
-                    float cardH = 36.0f + focus * 12.0f;
-                    float cy = 122.0f + rel * 44.0f;
-                    float cx = 214.0f - focus * 40.0f + std::max(0.0f, dist - 1.0f) * 6.0f;
-                    float cardY = cy - cardH * 0.5f;
-                    float cardW = 400.0f - cx + 14.0f;
-                    if (cardY > 240.0f || cardY + cardH < 30.0f) continue;
+                C2D_TargetClear(curTop, clrBgDark);
+                C2D_SceneBegin(curTop);
 
-                    float maxStars = cs.difficulties.back().starRating;
-                    u32 starClr = getStarRatingColor(getModAdjustedStars(maxStars, settings.activeMods));
-                    u8 fade = static_cast<u8>(255.0f * std::max(0.35f, 1.0f - dist * 0.18f));
+                float dBg = depthShift(-3.5f);
+                if (bgTex.loaded) {
+                    Ui::backdrop(400.0f, 240.0f, static_cast<float>(animTick), Ui::rgba(30, 18, 54), Ui::rgba(10, 8, 22), clrPrimary, 0.01f);
+                    bgTex.drawRect(dBg, 0.0f, 400.0f, 240.0f, 0.02f, static_cast<u8>(bgFade));
+                    u8 dimAlpha = static_cast<u8>((settings.bgDim * 200) / 100);
+                    C2D_DrawRectSolid(0.0f, 0.0f, 0.04f, 400.0f, 240.0f, Ui::rgba(14, 12, 22, dimAlpha));
+                } else {
+                    Ui::backdrop(400.0f, 240.0f, static_cast<float>(animTick), Ui::rgba(30, 18, 54), Ui::rgba(10, 8, 22), clrPrimary, 0.02f);
+                }
+                // Vineta izquierda para dar legibilidad al panel de informacion
+                Ui::gradH(0.0f, 0.0f, 240.0f, 240.0f, 0.05f, Ui::rgba(8, 6, 16, 220), Ui::rgba(8, 6, 16, 0));
 
-                    u32 leftC  = sel ? Ui::withAlpha(Ui::brighten(starClr, 0.85f), 245) : Ui::rgba(36, 32, 56, fade);
-                    u32 rightC = sel ? Ui::rgba(52, 40, 86, 245) : Ui::rgba(22, 19, 36, fade);
-                    C2D_DrawTriangle(cx + 14.0f + 2.0f, cardY + 3.0f, Ui::rgba(0, 0, 0, 80), cx + cardW + 2.0f, cardY + 3.0f, Ui::rgba(0, 0, 0, 80), cx + 2.0f, cardY + cardH + 3.0f, Ui::rgba(0, 0, 0, 80), 0.09f);
-                    Ui::slantRectGrad(cx, cardY, cardW, cardH, 14.0f, 0.1f, leftC, rightC);
-                    // borde de acento
-                    C2D_DrawLine(cx + 14.0f, cardY, starClr, cx, cardY + cardH, starClr, sel ? 3.0f : 2.0f, 0.12f);
-                    if (sel) {
-                        C2D_DrawLine(cx + 14.0f, cardY, Ui::rgba(255, 255, 255, 220), cx + cardW, cardY, Ui::rgba(255, 255, 255, 220), 1.5f, 0.12f);
-                        C2D_DrawLine(cx, cardY + cardH, Ui::rgba(255, 255, 255, 120), cx + cardW - 14.0f, cardY + cardH, Ui::rgba(255, 255, 255, 120), 1.5f, 0.12f);
-                    }
+                // Cabecera superior estilo osu!lazer con branding y badges
+                Ui::gradV(0.0f, 0.0f, 400.0f, 30.0f, 0.3f, Ui::rgba(14, 11, 24, 250), Ui::rgba(14, 11, 24, 180));
+                C2D_DrawRectSolid(0.0f, 29.0f, 0.31f, 400.0f, 1.5f, Ui::rgba(255, 102, 171, 190));
 
-                    u32 titleClr = sel ? clrWhite : Ui::rgba(215, 210, 235, fade);
-                    drawText(textBuf, cx + 22.0f, cardY + 4.0f, sel ? 0.50f : 0.43f, titleClr, truncateString(cs.title, sel ? 26 : 24).c_str(), 0.6f);
-                    drawText(textBuf, cx + 22.0f, cardY + (sel ? 22.0f : 19.0f), 0.34f, Ui::rgba(190, 185, 215, fade), truncateString(cs.artist, 26).c_str(), 0.6f);
-                    if (sel) {
-                        drawText(textBuf, cx + 22.0f, cardY + 34.0f, 0.30f, Ui::rgba(255, 224, 120, 255),
-                                 truncateString("mapeado por " + cs.difficulties[std::min(selectedDiff, (int)cs.difficulties.size() - 1)].creator, 30).c_str(), 0.6f);
-                    }
+                Ui::pill(10.0f, 6.0f, 42.0f, 18.0f, 0.32f, Ui::rgba(255, 102, 171, 230));
+                drawCenteredText(textBuf, 31.0f, 15.0f, 0.37f, clrWhite, "osu!", 0.9f);
+                drawText(textBuf, 58.0f, 7.5f, 0.44f, clrWhite, "SELECCION DE CANCION", 0.9f);
 
-                    char sTag[16];
-                    std::snprintf(sTag, sizeof(sTag), "*%.2f", getModAdjustedStars(maxStars, settings.activeMods));
-                    float pw = 40.0f;
-                    Ui::pill(400.0f - pw - 6.0f, cardY + cardH * 0.5f - 7.0f, pw, 14.0f, 0.5f, Ui::withAlpha(starClr, fade));
-                    drawCenteredText(textBuf, 400.0f - pw * 0.5f - 6.0f, cardY + cardH * 0.5f, 0.32f, Ui::rgba(20, 16, 30), sTag, 0.7f);
+                if (searchKeyboardOpen) {
+                    std::string fBadge = songMgr.searchQuery.empty() ? "Buscador..." : truncateString(songMgr.searchQuery, 12);
+                    Ui::pill(210.0f, 6.0f, 130.0f, 18.0f, 0.32f, Ui::rgba(255, 102, 171, 230));
+                    drawCenteredTextWithShadow(textBuf, 275.0f, 15.0f, 0.34f, clrWhite, fBadge.c_str(), 0.9f);
+                } else if (!songMgr.searchQuery.empty()) {
+                    std::string fBadge = "Filtro: " + truncateString(songMgr.searchQuery, 10);
+                    Ui::pill(236.0f, 6.0f, 104.0f, 18.0f, 0.32f, Ui::rgba(0, 180, 220, 230));
+                    drawCenteredTextWithShadow(textBuf, 288.0f, 15.0f, 0.34f, clrWhite, fBadge.c_str(), 0.9f);
+                } else {
+                    char sortBadge[64];
+                    std::snprintf(sortBadge, sizeof(sortBadge), "Orden: %s", SongManager::getSortModeName(songMgr.sortMode));
+                    Ui::pill(236.0f, 6.0f, 104.0f, 18.0f, 0.32f, Ui::rgba(45, 38, 72, 230));
+                    drawCenteredTextWithShadow(textBuf, 288.0f, 15.0f, 0.34f, clrCursor, sortBadge, 0.9f);
                 }
 
-                // ---- Panel de informacion (izquierda) ----
-                const auto& curSet = songMgr.sets[selectedSet];
-                const int totalDiffs = static_cast<int>(curSet.difficulties.size());
-                const int dIdx = std::max(0, std::min(selectedDiff, totalDiffs - 1));
+                char headerInfo[96];
+                std::snprintf(headerInfo, sizeof(headerInfo), "%d / %d",
+                    songMgr.sets.empty() ? 0 : (selectedSet + 1),
+                    static_cast<int>(songMgr.sets.size()));
+                Ui::pill(346.0f, 6.0f, 46.0f, 18.0f, 0.32f, Ui::rgba(36, 30, 54, 230));
+                drawCenteredText(textBuf, 369.0f, 15.0f, 0.36f, clrWhite, headerInfo, 0.9f);
 
-                Ui::panel(8.0f, 36.0f, 166.0f, 74.0f, 0.3f, Ui::rgba(24, 21, 40, 225), clrPrimary);
-                drawText(textBuf, 16.0f, 40.0f, 0.50f, clrWhite, truncateString(curSet.title, 22).c_str(), 0.6f);
-                drawText(textBuf, 16.0f, 58.0f, 0.40f, clrCursor, truncateString(curSet.artist, 26).c_str(), 0.6f);
-                if (totalDiffs > 0) {
-                    const auto& dd = curSet.difficulties[dIdx];
-                    drawText(textBuf, 16.0f, 73.0f, 0.34f, clrMuted, truncateString("Mapa por " + dd.creator, 28).c_str(), 0.6f);
-                    char cnt[64];
-                    std::snprintf(cnt, sizeof(cnt), "%d circ  %d sld  %d spn", dd.circleCount, dd.sliderCount, dd.spinnerCount);
-                    drawText(textBuf, 16.0f, 88.0f, 0.34f, Ui::rgba(150, 215, 255), cnt, 0.6f);
-                }
+                if (songMgr.sets.empty()) {
+                    float dEmpty = depthShift(2.5f);
+                    Ui::panel(40.0f + dEmpty, 70.0f, 320.0f, 100.0f, 0.3f, Ui::rgba(30, 27, 44, 235), clrMiss);
+                    if (!songMgr.searchQuery.empty()) {
+                        drawText(textBuf, 56.0f + dEmpty, 82.0f, 0.48f, clrCursor, "Sin resultados para la busqueda:");
+                        drawText(textBuf, 56.0f + dEmpty, 108.0f, 0.46f, clrWhite, truncateString("\"" + songMgr.searchQuery + "\"", 34).c_str());
+                        drawText(textBuf, 56.0f + dEmpty, 134.0f, 0.40f, clr300, "Toca BUSCAR en la pantalla inferior para limpiar");
+                    } else {
+                        drawText(textBuf, 56.0f + dEmpty, 82.0f, 0.5f, clrMiss, "No se encontraron beatmaps (.osu / .osz)");
+                        drawText(textBuf, 56.0f + dEmpty, 110.0f, 0.43f, clrWhite, "Coloca carpetas o archivos .osz en:");
+                        drawText(textBuf, 56.0f + dEmpty, 130.0f, 0.45f, clr300, "sdmc:/3ds/osu-3ds/songs/");
+                    }
+                } else {
+                    const int nSets = static_cast<int>(songMgr.sets.size());
 
-                // ---- Burbujas de dificultad (estilo lazer) ----
-                if (totalDiffs > 0) {
-                    Ui::panel(8.0f, 118.0f, 166.0f, 86.0f, 0.3f, Ui::rgba(24, 21, 40, 225));
-                    const int maxB = 8;
-                    int bStart = std::max(0, std::min(dIdx - maxB / 2, totalDiffs - maxB));
-                    int bEnd = std::min(totalDiffs, bStart + maxB);
-                    for (int i = bStart; i < bEnd; ++i) {
-                        float bx = 22.0f + (i - bStart) * 19.0f;
-                        float by = 136.0f;
-                        bool isSel = (i == dIdx);
-                        float st = getModAdjustedStars(curSet.difficulties[i].starRating, settings.activeMods);
-                        u32 sc = getStarRatingColor(st);
-                        if (isSel) {
-                            Ui::glow(bx, by, 0.35f, 15.0f, Ui::withAlpha(sc, 140), 4);
-                            C2D_DrawCircleSolid(bx, by, 0.4f, 9.5f, sc);
-                            Ui::ring(bx, by, 0.45f, 11.5f, 1.5f, clrWhite, 18);
+                    // ---- Carrusel de canciones (derecha), con profundidad 3D escalonada y latido BPM ----
+                    for (int off = -4; off <= 4; ++off) {
+                        int idx = selectedSet + off;
+                        if (idx < 0 || idx >= nSets) continue;
+                        float rel = idx - carouselPos;
+                        float dist = std::fabs(rel);
+                        if (dist > 4.2f) continue;
+                        const auto& cs = songMgr.sets[idx];
+                        if (cs.difficulties.empty()) continue;
+
+                        bool sel = (idx == selectedSet);
+                        float focus = std::max(0.0f, 1.0f - dist);
+                        float dCard = depthShift(0.8f + focus * 3.2f - dist * 0.45f);
+                        float cardH = 36.0f + focus * 12.0f;
+                        float cy = 122.0f + rel * 44.0f;
+                        float cx = 214.0f - focus * 40.0f - (sel ? beatPulse * 4.5f : 0.0f) + std::max(0.0f, dist - 1.0f) * 6.0f + dCard;
+                        float cardY = cy - cardH * 0.5f;
+                        float cardW = 400.0f - (cx - dCard) + 14.0f;
+                        if (cardY > 240.0f || cardY + cardH < 30.0f) continue;
+
+                        float maxStars = cs.difficulties.back().starRating;
+                        u32 starClr = getStarRatingColor(getModAdjustedStars(maxStars, settings.activeMods));
+                        u8 fade = static_cast<u8>(255.0f * std::max(0.35f, 1.0f - dist * 0.18f));
+
+                        u32 leftC  = sel ? Ui::withAlpha(Ui::brighten(starClr, 0.82f + beatPulse * 0.18f), 245) : Ui::rgba(36, 32, 56, fade);
+                        u32 rightC = sel ? Ui::rgba(52, 40, 86, 245) : Ui::rgba(22, 19, 36, fade);
+                        C2D_DrawTriangle(cx + 14.0f + 2.0f, cardY + 3.0f, Ui::rgba(0, 0, 0, 80), cx + cardW + 2.0f, cardY + 3.0f, Ui::rgba(0, 0, 0, 80), cx + 2.0f, cardY + cardH + 3.0f, Ui::rgba(0, 0, 0, 80), 0.09f);
+                        Ui::slantRectGrad(cx, cardY, cardW, cardH, 14.0f, 0.1f, leftC, rightC);
+                        // borde de acento
+                        C2D_DrawLine(cx + 14.0f, cardY, starClr, cx, cardY + cardH, starClr, sel ? 3.0f : 2.0f, 0.12f);
+                        if (sel) {
+                            C2D_DrawLine(cx + 14.0f, cardY, Ui::rgba(255, 255, 255, 220), cx + cardW, cardY, Ui::rgba(255, 255, 255, 220), 1.5f, 0.12f);
+                            C2D_DrawLine(cx, cardY + cardH, Ui::rgba(255, 255, 255, 120), cx + cardW - 14.0f, cardY + cardH, Ui::rgba(255, 255, 255, 120), 1.5f, 0.12f);
+                        }
+
+                        u32 titleClr = sel ? clrWhite : Ui::rgba(215, 210, 235, fade);
+                        drawText(textBuf, cx + 22.0f, cardY + 4.0f, sel ? 0.50f : 0.43f, titleClr, truncateString(cs.title, sel ? 26 : 24).c_str(), 0.6f);
+                        drawText(textBuf, cx + 22.0f, cardY + (sel ? 22.0f : 19.0f), 0.34f, Ui::rgba(190, 185, 215, fade), truncateString(cs.artist, 26).c_str(), 0.6f);
+                        if (sel) {
+                            drawText(textBuf, cx + 22.0f, cardY + 34.0f, 0.30f, Ui::rgba(255, 224, 120, 255),
+                                     truncateString("mapeado por " + cs.difficulties[std::min(selectedDiff, (int)cs.difficulties.size() - 1)].creator, 30).c_str(), 0.6f);
+                        }
+
+                        char sTag[16];
+                        std::snprintf(sTag, sizeof(sTag), "*%.2f", getModAdjustedStars(maxStars, settings.activeMods));
+                        float pw = 40.0f;
+                        Ui::pill(400.0f - pw - 6.0f + dCard, cardY + cardH * 0.5f - 7.0f, pw, 14.0f, 0.5f, Ui::withAlpha(starClr, fade));
+                        drawCenteredText(textBuf, 400.0f - pw * 0.5f - 6.0f + dCard, cardY + cardH * 0.5f, 0.32f, Ui::rgba(20, 16, 30), sTag, 0.7f);
+                    }
+
+                    // ---- Panel de informacion (izquierda) flotando hacia adelante en 3D ----
+                    const auto& curSet = songMgr.sets[selectedSet];
+                    const int totalDiffs = static_cast<int>(curSet.difficulties.size());
+                    const int dIdx = std::max(0, std::min(selectedDiff, totalDiffs - 1));
+                    float dInfo = depthShift(2.2f);
+
+                    Ui::panel(8.0f + dInfo, 36.0f, 166.0f, 74.0f, 0.3f, Ui::rgba(24, 21, 40, 225), clrPrimary);
+                    drawText(textBuf, 16.0f + dInfo, 40.0f, 0.50f, clrWhite, truncateString(curSet.title, 22).c_str(), 0.6f);
+                    drawText(textBuf, 16.0f + dInfo, 58.0f, 0.40f, clrCursor, truncateString(curSet.artist, 26).c_str(), 0.6f);
+                    if (totalDiffs > 0) {
+                        const auto& dd = curSet.difficulties[dIdx];
+                        drawText(textBuf, 16.0f + dInfo, 73.0f, 0.34f, clrMuted, truncateString("Mapa por " + dd.creator, 28).c_str(), 0.6f);
+                        char cnt[64];
+                        float liveBpm = dd.getBPM(getModsSpeedMultiplier(settings.activeMods));
+                        std::snprintf(cnt, sizeof(cnt), "%.0f BPM | %dc %ds%s",
+                            liveBpm, dd.circleCount, dd.sliderCount,
+                            curSet.hasVideo ? " | [VIDEO]" : "");
+                        drawText(textBuf, 16.0f + dInfo, 88.0f, 0.34f, curSet.hasVideo ? clr100 : Ui::rgba(150, 215, 255), cnt, 0.6f);
+                    }
+
+                    // ---- Burbujas de dificultad (estilo lazer) con latido BPM ----
+                    if (totalDiffs > 0) {
+                        Ui::panel(8.0f + dInfo, 118.0f, 166.0f, 86.0f, 0.3f, Ui::rgba(24, 21, 40, 225));
+                        const int maxB = 8;
+                        int bStart = std::max(0, std::min(dIdx - maxB / 2, totalDiffs - maxB));
+                        int bEnd = std::min(totalDiffs, bStart + maxB);
+                        for (int i = bStart; i < bEnd; ++i) {
+                            float bx = 22.0f + (i - bStart) * 19.0f + dInfo;
+                            float by = 136.0f;
+                            bool isSel = (i == dIdx);
+                            float st = getModAdjustedStars(curSet.difficulties[i].starRating, settings.activeMods);
+                            u32 sc = getStarRatingColor(st);
+                            if (isSel) {
+                                float bR = 9.2f + beatPulse * 1.4f;
+                                float dBub = depthShift(1.0f);
+                                Ui::glow(bx + dBub, by, 0.35f, 14.5f + beatPulse * 3.0f, Ui::withAlpha(sc, static_cast<u8>(130 + beatPulse * 50)), 4);
+                                C2D_DrawCircleSolid(bx + dBub, by, 0.4f, bR, sc);
+                                Ui::ring(bx + dBub, by, 0.45f, bR + 2.0f, 1.5f, clrWhite, 18);
+                            } else {
+                                C2D_DrawCircleSolid(bx, by, 0.4f, 6.0f, Ui::withAlpha(sc, 190));
+                            }
+                        }
+                        const auto& sd = curSet.difficulties[dIdx];
+                        float selStars = getModAdjustedStars(sd.starRating, settings.activeMods);
+                        u32 selClr = getStarRatingColor(selStars);
+                        drawText(textBuf, 14.0f + dInfo, 154.0f, 0.42f, clrWhite, truncateString(sd.version, 24).c_str(), 0.6f);
+                        char sl[48];
+                        std::snprintf(sl, sizeof(sl), "*%.2f", selStars);
+                        Ui::pill(14.0f + dInfo, 172.0f, 46.0f, 15.0f, 0.5f, selClr);
+                        drawCenteredText(textBuf, 37.0f + dInfo, 179.5f, 0.34f, Ui::rgba(20, 16, 30), sl, 0.7f);
+                        int curSelMode = (settings.gameMode == MODE_TAIKO || sd.mode == 1) ? 1 : (settings.gameMode == MODE_CATCH || sd.mode == 2) ? 2 : (settings.gameMode == MODE_MANIA || sd.mode == 3) ? 3 : 0;
+                        const auto* rec = scoreMgr.getRecord(sd.osuPath, curSelMode);
+                        if (rec) {
+                            std::snprintf(sl, sizeof(sl), "%s  %.1f%%", rec->bestGrade.c_str(), rec->bestAcc);
+                            drawText(textBuf, 68.0f + dInfo, 172.0f, 0.38f, clr100, sl, 0.6f);
+                            std::snprintf(sl, sizeof(sl), "%.0f pp", rec->bestPP);
+                            drawText(textBuf, 68.0f + dInfo, 186.0f, 0.34f, clr300, sl, 0.6f);
                         } else {
-                            C2D_DrawCircleSolid(bx, by, 0.4f, 6.0f, Ui::withAlpha(sc, 190));
+                            drawText(textBuf, 68.0f + dInfo, 174.0f, 0.34f, clrMuted, "Sin record", 0.6f);
                         }
                     }
-                    const auto& sd = curSet.difficulties[dIdx];
-                    float selStars = getModAdjustedStars(sd.starRating, settings.activeMods);
-                    u32 selClr = getStarRatingColor(selStars);
-                    drawText(textBuf, 14.0f, 154.0f, 0.42f, clrWhite, truncateString(sd.version, 24).c_str(), 0.6f);
-                    char sl[48];
-                    std::snprintf(sl, sizeof(sl), "*%.2f", selStars);
-                    Ui::pill(14.0f, 172.0f, 46.0f, 15.0f, 0.5f, selClr);
-                    drawCenteredText(textBuf, 37.0f, 179.5f, 0.34f, Ui::rgba(20, 16, 30), sl, 0.7f);
-                    const auto* rec = scoreMgr.getRecord(sd.osuPath);
-                    if (rec) {
-                        std::snprintf(sl, sizeof(sl), "%s  %.1f%%", rec->bestGrade.c_str(), rec->bestAcc);
-                        drawText(textBuf, 68.0f, 172.0f, 0.38f, clr100, sl, 0.6f);
-                        std::snprintf(sl, sizeof(sl), "%.0f pp", rec->bestPP);
-                        drawText(textBuf, 68.0f, 186.0f, 0.34f, clr300, sl, 0.6f);
-                    } else {
-                        drawText(textBuf, 68.0f, 174.0f, 0.34f, clrMuted, "Sin record", 0.6f);
-                    }
                 }
-            }
 
-            // Barra inferior de atajos
-            Ui::gradV(0.0f, 212.0f, 400.0f, 28.0f, 0.3f, Ui::rgba(18, 15, 32, 170), Ui::rgba(18, 15, 32, 250));
-            drawText(textBuf, 6.0f, 220.0f, 0.36f, clr300,
-                "A: Jugar | SELECT: Mods | Y: Wi-Fi | X: Config | B: Menu");
+                // Barra inferior de atajos
+                Ui::gradV(0.0f, 212.0f, 400.0f, 28.0f, 0.3f, Ui::rgba(18, 15, 32, 170), Ui::rgba(18, 15, 32, 250));
+                if (searchKeyboardOpen) {
+                    drawTextWithShadow(textBuf, 6.0f, 220.0f, 0.35f, clrCursor,
+                        "BUSCADOR EN VIVO: Toca letras abajo | B: Listo | X: Limpiar | Y: Borrar");
+                } else {
+                    drawTextWithShadow(textBuf, 6.0f, 220.0f, 0.35f, clr300,
+                        "A: Jugar | START: Orden | SELECT: Mods | Y: Wi-Fi | X: Config");
+                }
+                Ui::drawTransition(400.0f, 240.0f, screenFade, clrPrimary);
+            }
 
             // --- PANTALLA INFERIOR: DETALLES, ESTRELLAS, PP Y RECORD O SELECTOR DE MODS ---
             C2D_TargetClear(bottomScreen, clrTabletBg);
             C2D_SceneBegin(bottomScreen);
 
             Ui::backdrop(320.0f, 240.0f, static_cast<float>(animTick), Ui::rgba(26, 20, 44), Ui::rgba(12, 10, 22), clrPrimary, 0.02f);
-            Ui::panel(10.0f, 10.0f, 300.0f, 220.0f, 0.1f, Ui::rgba(30, 27, 44, 235), clrPrimary);
+            if (bgTex.loaded) {
+                bgTex.drawRect(0.0f, 0.0f, 320.0f, 240.0f, 0.03f, 65);
+                C2D_DrawRectSolid(0.0f, 0.0f, 0.04f, 320.0f, 240.0f, Ui::rgba(14, 11, 24, 175));
+            }
+            if (searchKeyboardOpen) {
+                // Fondo oscuro estilizado para el teclado
+                Ui::panel(2.0f, 2.0f, 316.0f, 236.0f, 0.50f, Ui::rgba(14, 10, 22, 255), clrPrimary);
 
-            if (modMenuOpen) {
-                drawText(textBuf, 20.0f, 16.0f, 0.48f, clrCursor, "Selector de Modificadores (Mods)");
-                char multStr[64];
-                std::snprintf(multStr, sizeof(multStr), "Multiplicador Score: %.2fx", getModsScoreMultiplier(settings.activeMods));
-                drawText(textBuf, 20.0f, 35.0f, 0.41f, clr300, multStr);
+                // =========================================================
+                // 1. BARRA DE BÚSQUEDA Y ENTRADA DE TEXTO (y: 3..31)
+                // =========================================================
+                Ui::panel(4.0f, 3.0f, 226.0f, 28.0f, 0.55f, Ui::rgba(24, 18, 36, 255), clrPrimary);
+                // Icono de lupa estilizada
+                drawRing(14.0f, 17.0f, 5.0f, 1.4f, clrCursor, 14, 0.58f);
+                C2D_DrawLine(18.0f, 21.0f, clrCursor, 22.0f, 25.0f, clrCursor, 2.0f, 0.58f);
 
-                const char* modCodes[7] = { "EZ", "NF", "HT", "HR", "DT", "HD", "AUTO" };
-                const char* modNames[7] = { "Easy", "NoFail", "0.75x", "HardRock", "1.50x", "Hidden", "Bot" };
-                static const uint32_t modBits[7] = {
-                    MOD_EZ, MOD_NF, MOD_HT, MOD_HR, MOD_DT, MOD_HD, MOD_AUTO
+                if (!songMgr.searchQuery.empty()) {
+                    bool showCursor = (animTick / 20) % 2 == 0;
+                    std::string dispQuery = truncateString(songMgr.searchQuery, 22);
+                    if (showCursor) dispQuery += "|";
+                    drawTextWithShadow(textBuf, 27.0f, 7.0f, 0.40f, clrWhite, dispQuery.c_str(), 0.62f);
+                } else {
+                    bool showCursor = (animTick / 20) % 2 == 0;
+                    drawTextWithShadow(textBuf, 27.0f, 7.0f, 0.35f, Ui::rgba(160, 150, 185),
+                        showCursor ? "Escribe o toca un filtro...|" : "Escribe o toca un filtro...", 0.62f);
+                }
+
+                // Botón Limpiar [X]
+                Ui::panel(232.0f, 3.0f, 26.0f, 28.0f, 0.55f, Ui::rgba(52, 22, 38, 255), Ui::rgba(255, 80, 100));
+                drawCenteredTextWithShadow(textBuf, 245.0f, 17.0f, 0.38f, Ui::rgba(255, 140, 160), "X", 0.62f);
+
+                // Botón Listo [LISTO]
+                Ui::panel(262.0f, 3.0f, 54.0f, 28.0f, 0.55f, Ui::rgba(22, 68, 42, 255), clr100);
+                drawCenteredTextWithShadow(textBuf, 289.0f, 17.0f, 0.36f, clrWhite, "LISTO", 0.62f);
+
+                // =========================================================
+                // 2. FILA DE FILTROS RÁPIDOS / CHIPS (y: 34..52)
+                // =========================================================
+                bool hasStd = (songMgr.searchQuery.find("mode:std") != std::string::npos);
+                bool hasTaiko = (songMgr.searchQuery.find("mode:taiko") != std::string::npos);
+                bool hasCatch = (songMgr.searchQuery.find("mode:catch") != std::string::npos);
+                bool hasMania = (songMgr.searchQuery.find("mode:mania") != std::string::npos);
+                bool hasStar4 = (songMgr.searchQuery.find("★4") != std::string::npos || songMgr.searchQuery.find("stars>4") != std::string::npos);
+                bool hasStar5 = (songMgr.searchQuery.find("★5") != std::string::npos || songMgr.searchQuery.find("stars>5") != std::string::npos);
+
+                // Chip TODOS
+                bool noFilter = songMgr.searchQuery.empty();
+                Ui::panel(4.0f, 34.0f, 40.0f, 17.0f, 0.55f,
+                    noFilter ? Ui::rgba(75, 45, 110, 240) : Ui::rgba(24, 20, 38, 230),
+                    noFilter ? clrCursor : Ui::rgba(60, 52, 80));
+                drawCenteredTextWithShadow(textBuf, 24.0f, 42.5f, 0.28f, noFilter ? clrWhite : Ui::rgba(195, 185, 220), "TODOS", 0.62f);
+
+                // Chip STD
+                Ui::panel(47.0f, 34.0f, 32.0f, 17.0f, 0.55f,
+                    hasStd ? Ui::rgba(75, 25, 60, 240) : Ui::rgba(24, 20, 38, 230),
+                    hasStd ? Ui::rgba(255, 102, 171) : Ui::rgba(60, 52, 80));
+                drawCenteredTextWithShadow(textBuf, 63.0f, 42.5f, 0.28f, hasStd ? Ui::rgba(255, 150, 205) : Ui::rgba(195, 185, 220), "STD", 0.62f);
+
+                // Chip TAIKO
+                Ui::panel(82.0f, 34.0f, 40.0f, 17.0f, 0.55f,
+                    hasTaiko ? Ui::rgba(75, 25, 32, 240) : Ui::rgba(24, 20, 38, 230),
+                    hasTaiko ? Ui::rgba(255, 75, 80) : Ui::rgba(60, 52, 80));
+                drawCenteredTextWithShadow(textBuf, 102.0f, 42.5f, 0.28f, hasTaiko ? Ui::rgba(255, 140, 150) : Ui::rgba(195, 185, 220), "TAIKO", 0.62f);
+
+                // Chip CATCH
+                Ui::panel(125.0f, 34.0f, 40.0f, 17.0f, 0.55f,
+                    hasCatch ? Ui::rgba(20, 70, 40, 240) : Ui::rgba(24, 20, 38, 230),
+                    hasCatch ? Ui::rgba(45, 215, 115) : Ui::rgba(60, 52, 80));
+                drawCenteredTextWithShadow(textBuf, 145.0f, 42.5f, 0.28f, hasCatch ? Ui::rgba(140, 255, 180) : Ui::rgba(195, 185, 220), "CATCH", 0.62f);
+
+                // Chip MANIA
+                Ui::panel(168.0f, 34.0f, 40.0f, 17.0f, 0.55f,
+                    hasMania ? Ui::rgba(20, 60, 85, 240) : Ui::rgba(24, 20, 38, 230),
+                    hasMania ? Ui::rgba(70, 195, 255) : Ui::rgba(60, 52, 80));
+                drawCenteredTextWithShadow(textBuf, 188.0f, 42.5f, 0.28f, hasMania ? Ui::rgba(155, 235, 255) : Ui::rgba(195, 185, 220), "MANIA", 0.62f);
+
+                // Chip *4+
+                Ui::panel(211.0f, 34.0f, 32.0f, 17.0f, 0.55f,
+                    hasStar4 ? Ui::rgba(75, 62, 20, 240) : Ui::rgba(24, 20, 38, 230),
+                    hasStar4 ? Ui::rgba(255, 215, 0) : Ui::rgba(60, 52, 80));
+                drawCenteredTextWithShadow(textBuf, 227.0f, 42.5f, 0.28f, hasStar4 ? Ui::rgba(255, 235, 95) : Ui::rgba(195, 185, 220), "*4+", 0.62f);
+
+                // Chip *5+
+                Ui::panel(246.0f, 34.0f, 32.0f, 17.0f, 0.55f,
+                    hasStar5 ? Ui::rgba(75, 45, 20, 240) : Ui::rgba(24, 20, 38, 230),
+                    hasStar5 ? Ui::rgba(255, 140, 50) : Ui::rgba(60, 52, 80));
+                drawCenteredTextWithShadow(textBuf, 262.0f, 42.5f, 0.28f, hasStar5 ? Ui::rgba(255, 180, 105) : Ui::rgba(195, 185, 220), "*5+", 0.62f);
+
+                // Contador de resultados
+                char cntBadge[16];
+                std::snprintf(cntBadge, sizeof(cntBadge), "%d", static_cast<int>(songMgr.sets.size()));
+                Ui::panel(281.0f, 34.0f, 35.0f, 17.0f, 0.55f, Ui::rgba(30, 24, 48, 240), clrCursor);
+                drawCenteredTextWithShadow(textBuf, 298.5f, 42.5f, 0.28f, clrCursor, cntBadge, 0.62f);
+
+                // =========================================================
+                // 3. TECLADO QWERTY TÁCTIL (y: 54..238)
+                // =========================================================
+                auto drawSearchKey = [&](int keyId, float kx, float ky, float kw, float kh, const char* label, float fontScale, u32 customFill = 0, u32 customBorder = 0) {
+                    bool isFlashed = (searchKeyFlashTimer > 0 && searchLastKeyIndex == keyId);
+                    u32 bg = isFlashed ? Ui::rgba(255, 102, 171, 255)
+                           : (customFill != 0 ? customFill : Ui::rgba(32, 26, 48, 255));
+                    u32 bdr = isFlashed ? clrWhite
+                            : (customBorder != 0 ? customBorder : Ui::rgba(75, 65, 105, 255));
+                    u32 textClr = isFlashed ? clrWhite : Ui::rgba(250, 248, 255);
+
+                    Ui::panel(kx, ky, kw, kh, 0.60f, bg, bdr);
+                    C2D_DrawRectSolid(kx + 1.0f, ky + 1.0f, 0.62f, kw - 2.0f, 1.2f, isFlashed ? clrWhite : Ui::rgba(255, 255, 255, 50));
+                    drawCenteredTextWithShadow(textBuf, kx + kw * 0.5f, ky + kh * 0.5f, fontScale, textClr, label, 0.68f);
                 };
 
-                for (int m = 0; m < 7; ++m) {
-                    int col = m % 4;
-                    int row = m / 4;
-                    float mx = 16.0f + col * 73.0f;
-                    float my = 56.0f + row * 56.0f;
-                    bool active = (settings.activeMods & modBits[m]) != 0;
-                    bool cursorOn = (modCursor == m);
+                // Fila 0: 1 2 3 4 5 6 7 8 9 0 + Borrar (y: 54..86)
+                const char* numLabels[] = {"1","2","3","4","5","6","7","8","9","0"};
+                for (int i = 0; i < 10; ++i) {
+                    float kx = 4.0f + i * 26.5f;
+                    drawSearchKey(i, kx, 54.0f, 24.5f, 32.0f, numLabels[i], 0.44f);
+                }
+                drawSearchKey(10, 271.0f, 54.0f, 45.0f, 32.0f, "BORR", 0.32f, Ui::rgba(56, 24, 42, 255), Ui::rgba(255, 100, 130));
 
-                    u32 cardBg = active ? C2D_Color32(75, 165, 110, 235) : C2D_Color32(42, 38, 60, 255);
-                    C2D_DrawRectSolid(mx, my, 0.2f, 66.0f, 46.0f, cardBg);
-                    drawRectOutline(mx, my, 66.0f, 46.0f, cursorOn ? 2.0f : 1.0f, cursorOn ? clrCursor : clrMuted);
-                    drawCenteredText(textBuf, mx + 33.0f, my + 16.0f, 0.50f, clrWhite, modCodes[m]);
-                    drawCenteredText(textBuf, mx + 33.0f, my + 34.0f, 0.36f, clrWhite, modNames[m]);
+                // Fila 1: Q W E R T Y U I O P (y: 89..121)
+                const char* r1Labels[] = {"Q","W","E","R","T","Y","U","I","O","P"};
+                for (int i = 0; i < 10; ++i) {
+                    float kx = 4.0f + i * 31.0f;
+                    drawSearchKey(11 + i, kx, 89.0f, 29.0f, 32.0f, r1Labels[i], 0.44f);
                 }
 
-                drawText(textBuf, 18.0f, 176.0f, 0.39f, clrWhite, "A / Tocar: Activar Mod | Y: Limpiar Mods");
-                drawText(textBuf, 18.0f, 196.0f, 0.39f, clr300, "SELECT o B: Volver a la cancion");
-            } else if (!songMgr.sets.empty() && !songMgr.sets[selectedSet].difficulties.empty()) {
-                const auto& curSet = songMgr.sets[selectedSet];
-                const auto& d = curSet.difficulties[selectedDiff];
-
-                float dispCS = d.cs, dispAR = d.ar, dispOD = d.od, dispHP = d.hp;
-                if (settings.activeMods & MOD_EZ) {
-                    dispCS *= 0.5f; dispAR *= 0.5f; dispOD *= 0.5f; dispHP *= 0.5f;
-                }
-                if (settings.activeMods & MOD_HR) {
-                    dispCS = std::min(10.0f, dispCS * 1.3f);
-                    dispAR = std::min(10.0f, dispAR * 1.4f);
-                    dispOD = std::min(10.0f, dispOD * 1.4f);
-                    dispHP = std::min(10.0f, dispHP * 1.4f);
+                // Fila 2: A S D F G H J K L - (y: 124..156)
+                const char* r2Labels[] = {"A","S","D","F","G","H","J","K","L","-"};
+                for (int i = 0; i < 10; ++i) {
+                    float kx = 8.0f + i * 30.2f;
+                    drawSearchKey(21 + i, kx, 124.0f, 28.2f, 32.0f, r2Labels[i], 0.44f);
                 }
 
-                float modStars = getModAdjustedStars(d.starRating, settings.activeMods);
-                float maxSSPP  = calculatePP(d.starRating, d.ar, d.od, d.maxPossibleCombo, d.maxPossibleCombo,
-                                             d.totalObjects(), 0, 0, 0, settings.activeMods & ~MOD_AUTO);
+                // Fila 3: Z X C V B N M . / (y: 159..191)
+                const char* r3Labels[] = {"Z","X","C","V","B","N","M",".","/"};
+                for (int i = 0; i < 9; ++i) {
+                    float kx = 16.0f + i * 32.0f;
+                    drawSearchKey(31 + i, kx, 159.0f, 29.8f, 32.0f, r3Labels[i], 0.44f);
+                }
 
-                char starHeader[96];
-                std::snprintf(starHeader, sizeof(starHeader), "Dificultad: *%.2f Estrellas | SS: %.0f pp", modStars, maxSSPP);
-                drawText(textBuf, 18.0f, 15.0f, 0.43f, getStarRatingColor(modStars), starHeader);
+                // Fila 4: Acciones inferiores (y: 194..236)
+                drawSearchKey(40, 4.0f, 194.0f, 56.0f, 42.0f, "LIMPIAR", 0.30f, Ui::rgba(52, 22, 38, 255), Ui::rgba(255, 90, 110));
+                drawSearchKey(41, 63.0f, 194.0f, 142.0f, 42.0f, "ESPACIO", 0.35f, Ui::rgba(36, 30, 56, 255), Ui::rgba(90, 80, 125));
+                drawSearchKey(42, 208.0f, 194.0f, 52.0f, 42.0f, "BORRAR", 0.30f, Ui::rgba(56, 24, 42, 255), Ui::rgba(255, 120, 140));
+                drawSearchKey(43, 263.0f, 194.0f, 53.0f, 42.0f, "OK", 0.36f, Ui::rgba(22, 68, 42, 255), clr100);
+            } else if (modMenuOpen) {
+                Ui::panel(6.0f, 6.0f, 308.0f, 228.0f, 0.10f, Ui::rgba(22, 18, 34, 250), clrPrimary);
 
-                char objSummary[96];
-                std::snprintf(objSummary, sizeof(objSummary), "Circulos: %d | Sliders: %d | Spinners: %d",
-                    d.circleCount, d.sliderCount, d.spinnerCount);
-                drawText(textBuf, 18.0f, 34.0f, 0.38f, clrMuted, objSummary);
+                // Cabecera del menú de Mods
+                Ui::pill(12.0f, 10.0f, 44.0f, 15.0f, 0.14f, Ui::rgba(255, 102, 171, 220));
+                drawCenteredText(textBuf, 34.0f, 17.5f, 0.35f, clrWhite, "MODS", 0.16f);
+                drawText(textBuf, 60.0f, 10.0f, 0.42f, clrWhite, "Modificadores de Juego", 0.16f);
 
-                u32 barBg = C2D_Color32(18, 16, 26, 255);
-                drawStatBar(textBuf, 18.0f, 54.0f,  "CS", dispCS, clrPrimary, barBg, clrWhite);
-                drawStatBar(textBuf, 18.0f, 72.0f,  "AR", dispAR, clr100,     barBg, clrWhite);
-                drawStatBar(textBuf, 18.0f, 90.0f,  "OD", dispOD, clr300,     barBg, clrWhite);
-                drawStatBar(textBuf, 18.0f, 108.0f, "HP", dispHP, clr50,      barBg, clrWhite);
-
-                // Tarjeta de Récord Personal + Mejor PP a la derecha
-                C2D_DrawRectSolid(176.0f, 52.0f, 0.2f, 126.0f, 78.0f, C2D_Color32(22, 20, 34, 255));
-                drawRectOutline(176.0f, 52.0f, 126.0f, 78.0f, 1.0f, clrMuted);
-                const auto* rec = scoreMgr.getRecord(d.osuPath);
-                if (rec) {
-                    char recLine[64];
-                    std::snprintf(recLine, sizeof(recLine), "Rango: %s (%.1f%%)", rec->bestGrade.c_str(), rec->bestAcc);
-                    drawText(textBuf, 182.0f, 56.0f, 0.39f, clrCursor, recLine);
-                    std::snprintf(recLine, sizeof(recLine), "Best PP: %.1f pp", rec->bestPP);
-                    drawText(textBuf, 182.0f, 74.0f, 0.39f, clr300, recLine);
-                    std::snprintf(recLine, sizeof(recLine), "Score: %d", rec->bestScore);
-                    drawText(textBuf, 182.0f, 92.0f, 0.38f, clrWhite, recLine);
-                    std::snprintf(recLine, sizeof(recLine), "Combo: %dx", rec->bestCombo);
-                    drawText(textBuf, 182.0f, 109.0f, 0.38f, clr100, recLine);
+                // Multiplicador total de score
+                float mult = getModsScoreMultiplier(settings.activeMods);
+                char multStr[32];
+                if (settings.activeMods & (MOD_AUTO | MOD_RX | MOD_AP)) {
+                    std::snprintf(multStr, sizeof(multStr), "Unranked");
                 } else {
-                    drawCenteredText(textBuf, 239.0f, 90.0f, 0.40f, clrMuted, "Sin Record aun");
+                    std::snprintf(multStr, sizeof(multStr), "Score: %.2fx", mult);
+                }
+                u32 multClr = (mult > 1.0f) ? clr100 : ((mult == 1.0f) ? clr300 : clrMiss);
+                Ui::pill(222.0f, 9.0f, 88.0f, 16.0f, 0.14f, Ui::rgba(30, 24, 48, 220));
+                drawCenteredText(textBuf, 266.0f, 17.0f, 0.34f, multClr, multStr, 0.16f);
+
+                drawText(textBuf, 12.0f, 28.0f, 0.28f, clrMuted, "A/Touch: Alternar | Y: Limpiar | B: Cerrar", 0.16f);
+
+                // Cuadrícula 5x3 de los 15 Modificadores
+                for (int m = 0; m < 15; ++m) {
+                    int col = m % 5;
+                    int row = m / 5;
+                    float mx = 8.0f + col * 62.0f;
+                    float my = 43.0f + row * 43.0f;
+                    bool active = (settings.activeMods & modTable[m].bit) != 0;
+                    bool cursorOn = (modCursor == m);
+                    u32 mClr = modTable[m].color;
+
+                    u32 cardBg = active
+                        ? Ui::lerpColor(Ui::rgba(26, 22, 40, 245), mClr, 0.38f)
+                        : (cursorOn ? Ui::rgba(42, 36, 62, 240) : Ui::rgba(28, 24, 42, 230));
+
+                    Ui::panel(mx, my, 56.0f, 39.0f, 0.20f, cardBg, cursorOn ? clrCursor : (active ? mClr : Ui::rgba(55, 48, 80)));
+                    if (active) {
+                        C2D_DrawRectSolid(mx + 2.0f, my, 0.22f, 52.0f, 2.5f, mClr);
+                    }
+                    drawRectOutline(mx, my, 56.0f, 39.0f, cursorOn ? 1.8f : 1.0f, cursorOn ? clrCursor : (active ? mClr : Ui::rgba(55, 48, 80)), 0.24f);
+                    drawCenteredText(textBuf, mx + 28.0f, my + 13.0f, 0.48f, active ? clrWhite : Ui::brighten(mClr, 1.25f), modTable[m].code, 0.25f);
+                    drawCenteredText(textBuf, mx + 28.0f, my + 28.0f, 0.29f, active ? clrWhite : clrMuted, modTable[m].shortName, 0.25f);
                 }
 
-                std::string modLine = "Mods: " + formatModsString(settings.activeMods);
-                drawText(textBuf, 18.0f, 138.0f, 0.42f, clrCursor, modLine.c_str());
+                // Panel inferior con descripción enriquecida del mod seleccionado
+                int selM = std::max(0, std::min(14, modCursor));
+                const auto& curDef = modTable[selM];
+                bool curActive = (settings.activeMods & curDef.bit) != 0;
 
-                std::string skinStr = "Skin: " + truncateString(activeSkin.name, 26);
-                drawText(textBuf, 18.0f, 158.0f, 0.40f, clrWhite, skinStr.c_str());
+                Ui::panel(8.0f, 174.0f, 304.0f, 56.0f, 0.20f, Ui::rgba(18, 14, 28, 248), curDef.color);
+                C2D_DrawRectSolid(8.0f, 174.0f, 0.23f, 304.0f, 2.0f, curDef.color);
 
-                // Botón táctil para abrir el menú de Mods
-                C2D_DrawRectSolid(200.0f, 172.0f, 0.2f, 102.0f, 30.0f, clrPrimary);
-                drawRectOutline(200.0f, 172.0f, 102.0f, 30.0f, 1.5f, clrWhite);
-                drawCenteredText(textBuf, 251.0f, 187.0f, 0.43f, clrWhite, "MODS (SELECT)");
+                // Badge y nombre del mod seleccionado
+                Ui::pill(14.0f, 179.0f, 28.0f, 14.0f, 0.24f, curDef.color);
+                drawCenteredText(textBuf, 28.0f, 186.0f, 0.33f, clrWhite, curDef.code, 0.26f);
+                drawText(textBuf, 46.0f, 179.0f, 0.40f, clrWhite, curDef.fullName, 0.26f);
 
-                drawText(textBuf, 18.0f, 208.0f, 0.36f, clrMuted, "Audio MP3/OGG + Fondos JPG/PNG activos");
+                // Insignia de estado ACTIVO / INACTIVO
+                Ui::pill(242.0f, 179.0f, 62.0f, 14.0f, 0.24f, curActive ? Ui::rgba(25, 75, 45, 235) : Ui::rgba(35, 30, 50, 235));
+                drawCenteredText(textBuf, 273.0f, 186.0f, 0.29f, curActive ? clr100 : clrMuted, curActive ? "ACTIVO" : "INACTIVO", 0.26f);
+
+                // Texto descriptivo del efecto del mod
+                drawText(textBuf, 14.0f, 196.0f, 0.33f, Ui::rgba(220, 215, 240), curDef.desc, 0.26f);
+                drawText(textBuf, 14.0f, 213.0f, 0.28f, clr300, "Pulsa A o toca para activar/desactivar este mod", 0.26f);
+            } else {
+                if (!songMgr.sets.empty() && !songMgr.sets[selectedSet].difficulties.empty()) {
+                    const auto& curSet = songMgr.sets[selectedSet];
+                    const auto& d = curSet.difficulties[selectedDiff];
+
+                    float dispCS = d.cs, dispAR = d.ar, dispOD = d.od, dispHP = d.hp;
+                    if (settings.activeMods & MOD_EZ) {
+                        dispCS *= 0.5f; dispAR *= 0.5f; dispOD *= 0.5f; dispHP *= 0.5f;
+                    }
+                    if (settings.activeMods & MOD_HR) {
+                        dispCS = std::min(10.0f, dispCS * 1.3f);
+                        dispAR = std::min(10.0f, dispAR * 1.4f);
+                        dispOD = std::min(10.0f, dispOD * 1.4f);
+                        dispHP = std::min(10.0f, dispHP * 1.4f);
+                    }
+
+                    float modStars = getModAdjustedStars(d.starRating, settings.activeMods);
+                    float maxSSPP  = calculatePP(d.starRating, d.ar, d.od, d.maxPossibleCombo, d.maxPossibleCombo,
+                                                 d.totalObjects(), 0, 0, 0, settings.activeMods & ~MOD_AUTO);
+                    int curDiffMode = (settings.gameMode == MODE_TAIKO || d.mode == 1) ? 1 : (settings.gameMode == MODE_CATCH || d.mode == 2) ? 2 : (settings.gameMode == MODE_MANIA || d.mode == 3) ? 3 : 0;
+                    const auto* rec = scoreMgr.getRecord(d.osuPath, curDiffMode);
+
+                    // =========================================================================
+                    // 1. HEADER CARD ESTILO OSU!LAZER: TITULO, ARTISTA Y METRICAS (y: 6..54)
+                    // =========================================================================
+                    Ui::panel(8.0f, 6.0f, 304.0f, 48.0f, 0.15f, Ui::rgba(20, 16, 32, 245), Ui::rgba(50, 42, 75));
+
+                    // Badge [RANKED] estilo osu!lazer + Título
+                    Ui::pill(14.0f, 9.0f, 48.0f, 13.0f, 0.22f, Ui::rgba(25, 95, 45, 230));
+                    drawCenteredText(textBuf, 38.0f, 15.5f, 0.29f, Ui::rgba(110, 235, 110), "RANKED");
+                    drawText(textBuf, 66.0f, 8.5f, 0.42f, clrWhite, truncateString(curSet.title, 22).c_str(), 0.30f);
+
+                    // Botón pequeño [ BORRAR ] en el header (x: 250, y: 8.5, w: 56, h: 14)
+                    Ui::pill(250.0f, 8.5f, 56.0f, 14.0f, 0.22f, Ui::rgba(140, 25, 38, 230));
+                    drawRectOutline(250.0f, 8.5f, 56.0f, 14.0f, 1.0f, Ui::rgba(255, 75, 95), 0.24f);
+                    drawCenteredText(textBuf, 278.0f, 15.5f, 0.28f, Ui::rgba(255, 220, 225), "BORRAR", 0.32f);
+
+                    // Artista y Creador
+                    std::string artistCreator = curSet.artist + "  //  " + d.creator;
+                    drawText(textBuf, 14.0f, 23.5f, 0.32f, Ui::rgba(185, 180, 210), truncateString(artistCreator, 36).c_str(), 0.30f);
+
+                    // Rating de estrellas estilo lazer + Dificultad + Specs inline
+                    u32 starClr = getStarRatingColor(modStars);
+                    char starBadge[24];
+                    std::snprintf(starBadge, sizeof(starBadge), "* %.2f", modStars);
+                    Ui::pill(14.0f, 37.0f, 46.0f, 14.0f, 0.22f, Ui::withAlpha(starClr, 60));
+                    drawCenteredText(textBuf, 37.0f, 44.0f, 0.32f, starClr, starBadge);
+
+                    drawText(textBuf, 64.0f, 37.5f, 0.36f, starClr, truncateString(d.version, 13).c_str(), 0.30f);
+
+                    char specsStr[64];
+                    std::snprintf(specsStr, sizeof(specsStr), "CS %.1f  AR %.1f  OD %.1f  HP %.1f", dispCS, dispAR, dispOD, dispHP);
+                    Ui::pill(152.0f, 36.0f, 154.0f, 16.0f, 0.22f, Ui::rgba(28, 22, 44, 235));
+                    drawCenteredTextWithShadow(textBuf, 229.0f, 44.0f, 0.32f, Ui::rgba(235, 230, 255), specsStr, 0.30f);
+
+                    // =========================================================================
+                    // 2. PESTAÑAS: RESUMEN / RANKING LOCAL (y: 56..70)
+                    // =========================================================================
+                    std::vector<ScoreRecord> mapRecords = scoreMgr.getTopRecords(d.osuPath, 10, curDiffMode);
+                    int numRecs = static_cast<int>(mapRecords.size());
+                    if (rankingScroll >= numRecs && numRecs > 0) rankingScroll = numRecs - 1;
+                    if (rankingScroll < 0) rankingScroll = 0;
+
+                    // Tab 0: [ 📊 RESUMEN ] (x: 8..118)
+                    bool tab0Active = (songSelectTab == 0);
+                    u32 tab0Bg = tab0Active ? Ui::rgba(55, 30, 75, 245) : Ui::rgba(22, 18, 32, 220);
+                    u32 tab0Border = tab0Active ? clrPrimary : Ui::rgba(45, 38, 62);
+                    Ui::panel(8.0f, 56.0f, 110.0f, 15.0f, 0.22f, tab0Bg, tab0Border);
+                    drawCenteredTextWithShadow(textBuf, 63.0f, 62.5f, 0.30f, tab0Active ? clrWhite : Ui::rgba(210, 205, 230), "RESUMEN");
+
+                    // Tab 1: [ 🏆 RANKING LOCAL (N) ] (x: 122..244)
+                    bool tab1Active = (songSelectTab == 1);
+                    u32 tab1Bg = tab1Active ? Ui::rgba(65, 35, 80, 245) : Ui::rgba(22, 18, 32, 220);
+                    u32 tab1Border = tab1Active ? clrCursor : Ui::rgba(45, 38, 62);
+                    Ui::panel(122.0f, 56.0f, 122.0f, 15.0f, 0.22f, tab1Bg, tab1Border);
+                    char rnkTabStr[32];
+                    std::snprintf(rnkTabStr, sizeof(rnkTabStr), "RANKING (%d)", numRecs);
+                    drawCenteredTextWithShadow(textBuf, 183.0f, 62.5f, 0.30f, tab1Active ? clrCursor : Ui::rgba(210, 205, 230), rnkTabStr);
+
+                    // Botón de acción lateral (x: 248..312)
+                    if (songSelectTab == 1) {
+                        u32 btnBg = rankingExpanded ? Ui::rgba(180, 40, 60, 230) : Ui::rgba(45, 75, 135, 230);
+                        Ui::pill(248.0f, 56.0f, 64.0f, 15.0f, 0.23f, btnBg);
+                        drawCenteredTextWithShadow(textBuf, 280.0f, 62.5f, 0.28f, clrWhite, rankingExpanded ? "✕ REDUCIR" : "⛶ VER MAS");
+                    } else {
+                        Ui::pill(248.0f, 56.0f, 64.0f, 15.0f, 0.22f, Ui::rgba(45, 32, 60, 220));
+                        drawCenteredTextWithShadow(textBuf, 280.0f, 62.5f, 0.28f, Ui::rgba(255, 175, 215), "Ver Top >");
+                    }
+
+                    if (songSelectTab == 0) {
+                        // =====================================================================
+                        // 2A. PERSONAL BEST CARD ESTILO OSU!LAZER (y: 74..112)
+                        // =====================================================================
+                        Ui::gradH(8.0f, 74.0f, 304.0f, 38.0f, 0.20f, Ui::rgba(46, 22, 60, 235), Ui::rgba(24, 18, 38, 245));
+                        drawRectOutline(8.0f, 74.0f, 304.0f, 38.0f, 1.0f, Ui::rgba(255, 102, 171, 95), 0.25f);
+
+                        // Chip "MEJOR RECORD"
+                        Ui::pill(14.0f, 77.0f, 68.0f, 12.0f, 0.25f, Ui::rgba(75, 32, 95, 235));
+                        drawCenteredTextWithShadow(textBuf, 48.0f, 83.0f, 0.28f, Ui::rgba(255, 140, 205), "MEJOR RECORD");
+
+                        if (rec) {
+                            // Puntuación numérica con formato
+                            drawTextWithShadow(textBuf, 86.0f, 75.0f, 0.44f, clrWhite, formatScoreThousands(rec->bestScore).c_str(), 0.30f);
+
+                            // Precisión y combo máximo
+                            char accCombo[64];
+                            std::snprintf(accCombo, sizeof(accCombo), "ACC: %.1f%%  COMBO: %dx", rec->bestAcc, rec->bestCombo);
+                            drawTextWithShadow(textBuf, 14.0f, 95.0f, 0.30f, Ui::rgba(110, 235, 180), accCombo, 0.30f);
+
+                            // Pill de PP ganado
+                            char ppStr[32];
+                            std::snprintf(ppStr, sizeof(ppStr), "%.1f pp", rec->bestPP);
+                            Ui::pill(152.0f, 93.0f, 48.0f, 14.0f, 0.25f, Ui::rgba(45, 38, 80, 220));
+                            drawCenteredTextWithShadow(textBuf, 176.0f, 99.5f, 0.29f, Ui::rgba(215, 205, 255), ppStr);
+
+                            // Pill de Mods jugados (si los hubo)
+                            if (rec->bestMods != MOD_NONE) {
+                                std::string mStr = "+" + formatModsString(rec->bestMods);
+                                Ui::pill(204.0f, 93.0f, 40.0f, 14.0f, 0.25f, Ui::rgba(85, 40, 105, 220));
+                                drawCenteredTextWithShadow(textBuf, 224.0f, 99.5f, 0.28f, clrCursor, mStr.c_str());
+                            }
+
+                            // Insignia de Rango estilo Lazer (SS, S, A, etc.)
+                            u32 gClr = getScoreGradeColor(rec->bestGrade, clrCursor);
+                            Ui::panel(248.0f, 76.0f, 58.0f, 33.0f, 0.25f, Ui::rgba(35, 18, 48, 235), gClr);
+                            drawCenteredTextWithShadow(textBuf, 277.0f, 89.0f, 0.46f, gClr, rec->bestGrade.c_str(), 0.32f);
+                            drawCenteredTextWithShadow(textBuf, 277.0f, 102.0f, 0.22f, Ui::rgba(255, 180, 225), "GRADE");
+                        } else {
+                            drawCenteredTextWithShadow(textBuf, 160.0f, 85.0f, 0.38f, clrWhite, "¡SIN RECORD REGISTRADO!");
+                            char ssMaxStr[64];
+                            std::snprintf(ssMaxStr, sizeof(ssMaxStr), "Max SS: %.0f pp  •  %d Objetos  •  ¡Juegala ahora!", maxSSPP, d.totalObjects());
+                            drawCenteredTextWithShadow(textBuf, 160.0f, 99.0f, 0.30f, Ui::rgba(255, 225, 95), ssMaxStr);
+                        }
+
+                        // =====================================================================
+                        // 2B. CURVA DE ESFUERZO / STRAIN GRAPH ESTILO OSU!LAZER (y: 114..142)
+                        // =====================================================================
+                        Ui::panel(8.0f, 114.0f, 304.0f, 28.0f, 0.18f, Ui::rgba(20, 16, 32, 240), starClr);
+                        drawTextWithShadow(textBuf, 14.0f, 115.5f, 0.29f, clrWhite, "DIFICULTAD / DENSIDAD", 0.28f);
+                        char objCntStr[32];
+                        std::snprintf(objCntStr, sizeof(objCntStr), "%d objetos", d.totalObjects());
+                        drawTextWithShadow(textBuf, 232.0f, 115.5f, 0.29f, Ui::rgba(225, 220, 245), objCntStr, 0.28f);
+
+                        float playhead = -1.0f;
+                        if (audio.getIsPlaying() && d.lastObjectTime > d.firstObjectTime) {
+                            int curMs = audio.getTimeMs();
+                            if (curMs >= d.firstObjectTime && curMs <= d.lastObjectTime) {
+                                playhead = static_cast<float>(curMs - d.firstObjectTime) / static_cast<float>(d.lastObjectTime - d.firstObjectTime);
+                            }
+                        }
+                        Ui::strainGraph(12.0f, 122.5f, 296.0f, 18.0f, 0.22f, d.strainGraph, starClr, playhead);
+                    } else {
+                        // =====================================================================
+                        // 2C. RANKING LOCAL: TABLA DE MEJORES PUNTUACIONES
+                        // =====================================================================
+                        if (numRecs == 0) {
+                            float emptyH = rankingExpanded ? 150.0f : 68.0f;
+                            Ui::panel(8.0f, 74.0f, 304.0f, emptyH, 0.20f, Ui::rgba(24, 18, 38, 240), Ui::rgba(65, 40, 85));
+                            drawCenteredText(textBuf, 160.0f, 74.0f + emptyH * 0.40f, 0.38f, clrWhite, "¡SIN RECORDS REGISTRADOS!");
+                            drawCenteredText(textBuf, 160.0f, 74.0f + emptyH * 0.65f, 0.28f, clrCursor, "Juega este mapa para registrar tu puntuacion.");
+                        } else if (!rankingExpanded) {
+                            // Modo compacto: 3 filas en y: 74..142
+                            int displayCount = std::min(numRecs, 3);
+                            for (int i = 0; i < displayCount; ++i) {
+                                const auto& r = mapRecords[i];
+                                float ry = 74.0f + i * 23.0f;
+                                u32 gClr = getScoreGradeColor(r.bestGrade, clrCursor);
+
+                                u32 rankClr = (i == 0) ? Ui::rgba(255, 215, 0)
+                                            : ((i == 1) ? Ui::rgba(210, 220, 235)
+                                            : ((i == 2) ? Ui::rgba(220, 145, 75)
+                                                        : Ui::rgba(135, 125, 155)));
+
+                                Ui::gradH(8.0f, ry, 304.0f, 21.0f, 0.20f, Ui::rgba(28, 20, 42, 245), Ui::rgba(18, 14, 28, 245));
+                                drawRectOutline(8.0f, ry, 304.0f, 21.0f, 1.0f, (i == 0) ? Ui::withAlpha(rankClr, 140) : Ui::rgba(45, 38, 65, 180), 0.22f);
+                                C2D_DrawRectSolid(8.0f, ry, 0.24f, 2.5f, 21.0f, rankClr);
+
+                                // 1. Rango
+                                char rnkStr[8];
+                                std::snprintf(rnkStr, sizeof(rnkStr), "#%d", i + 1);
+                                Ui::pill(12.0f, ry + 3.0f, 22.0f, 15.0f, 0.23f, (i == 0) ? rankClr : Ui::rgba(35, 28, 52, 220));
+                                drawCenteredText(textBuf, 23.0f, ry + 10.5f, 0.28f, (i == 0) ? Ui::rgba(20, 16, 28) : rankClr, rnkStr);
+
+                                // 2. Grado
+                                Ui::pill(36.0f, ry + 3.0f, 22.0f, 15.0f, 0.23f, Ui::rgba(24, 18, 36, 230));
+                                drawRectOutline(36.0f, ry + 3.0f, 22.0f, 15.0f, 1.0f, gClr, 0.24f);
+                                drawCenteredText(textBuf, 47.0f, ry + 10.5f, 0.30f, gClr, r.bestGrade.c_str());
+
+                                // 3. Score
+                                drawText(textBuf, 62.0f, ry + 3.5f, 0.38f, clrWhite, formatScoreThousands(r.bestScore).c_str(), 0.26f);
+
+                                // 4. Acc & Combo
+                                char acBuf[32];
+                                std::snprintf(acBuf, sizeof(acBuf), "%.1f%% %dx", r.bestAcc, r.bestCombo);
+                                drawText(textBuf, 140.0f, ry + 4.5f, 0.27f, Ui::rgba(130, 240, 190), acBuf, 0.26f);
+
+                                // 5. Mods
+                                if (r.bestMods != MOD_NONE) {
+                                    std::string mStr = "+" + formatModsString(r.bestMods);
+                                    Ui::pill(210.0f, ry + 3.0f, 48.0f, 15.0f, 0.23f, Ui::rgba(75, 30, 95, 220));
+                                    drawCenteredText(textBuf, 234.0f, ry + 10.5f, 0.27f, clrCursor, mStr.c_str());
+                                } else {
+                                    Ui::pill(210.0f, ry + 3.0f, 48.0f, 15.0f, 0.23f, Ui::rgba(34, 28, 48, 200));
+                                    drawCenteredText(textBuf, 234.0f, ry + 10.5f, 0.26f, clrMuted, "None");
+                                }
+
+                                // 6. PP
+                                Ui::pill(262.0f, ry + 3.0f, 46.0f, 15.0f, 0.23f, Ui::rgba(42, 34, 75, 220));
+                                char ppBuf[16];
+                                std::snprintf(ppBuf, sizeof(ppBuf), "%.0f pp", r.bestPP);
+                                drawCenteredText(textBuf, 285.0f, ry + 10.5f, 0.28f, Ui::rgba(205, 190, 255), ppBuf);
+                            }
+                        } else {
+                            // Modo expandido: hasta 6 filas en y: 74..224
+                            int maxVisible = 6;
+                            int startIdx = std::max(0, std::min(rankingScroll, std::max(0, numRecs - maxVisible)));
+                            int endIdx = std::min(numRecs, startIdx + maxVisible);
+
+                            for (int idx = startIdx; idx < endIdx; ++idx) {
+                                const auto& r = mapRecords[idx];
+                                float ry = 74.0f + (idx - startIdx) * 25.0f;
+                                u32 gClr = getScoreGradeColor(r.bestGrade, clrCursor);
+
+                                u32 rankClr = (idx == 0) ? Ui::rgba(255, 215, 0)
+                                            : ((idx == 1) ? Ui::rgba(210, 220, 235)
+                                            : ((idx == 2) ? Ui::rgba(220, 145, 75)
+                                                          : Ui::rgba(135, 125, 155)));
+
+                                Ui::gradH(8.0f, ry, 304.0f, 23.0f, 0.20f, Ui::rgba(28, 20, 42, 245), Ui::rgba(18, 14, 28, 245));
+                                drawRectOutline(8.0f, ry, 304.0f, 23.0f, 1.0f, (idx == 0) ? Ui::withAlpha(rankClr, 150) : Ui::rgba(45, 38, 65, 180), 0.22f);
+                                C2D_DrawRectSolid(8.0f, ry, 0.24f, 3.0f, 23.0f, rankClr);
+
+                                // 1. Rango
+                                char rnkStr[8];
+                                std::snprintf(rnkStr, sizeof(rnkStr), "#%d", idx + 1);
+                                Ui::pill(12.0f, ry + 3.5f, 24.0f, 16.0f, 0.23f, (idx == 0) ? rankClr : Ui::rgba(35, 28, 52, 220));
+                                drawCenteredText(textBuf, 24.0f, ry + 11.5f, 0.30f, (idx == 0) ? Ui::rgba(20, 16, 28) : rankClr, rnkStr);
+
+                                // 2. Grado
+                                Ui::pill(38.0f, ry + 3.5f, 24.0f, 16.0f, 0.23f, Ui::rgba(24, 18, 36, 230));
+                                drawRectOutline(38.0f, ry + 3.5f, 24.0f, 16.0f, 1.0f, gClr, 0.24f);
+                                drawCenteredText(textBuf, 50.0f, ry + 11.5f, 0.32f, gClr, r.bestGrade.c_str());
+
+                                // 3. Score
+                                drawText(textBuf, 66.0f, ry + 4.5f, 0.40f, clrWhite, formatScoreThousands(r.bestScore).c_str(), 0.26f);
+
+                                // 4. Acc & Combo
+                                char acBuf[32];
+                                std::snprintf(acBuf, sizeof(acBuf), "%.1f%%  %dx", r.bestAcc, r.bestCombo);
+                                drawText(textBuf, 144.0f, ry + 5.5f, 0.28f, Ui::rgba(130, 240, 190), acBuf, 0.26f);
+
+                                // 5. Mods
+                                if (r.bestMods != MOD_NONE) {
+                                    std::string mStr = "+" + formatModsString(r.bestMods);
+                                    Ui::pill(210.0f, ry + 3.5f, 48.0f, 16.0f, 0.23f, Ui::rgba(75, 30, 95, 220));
+                                    drawCenteredText(textBuf, 234.0f, ry + 11.5f, 0.28f, clrCursor, mStr.c_str());
+                                } else {
+                                    Ui::pill(210.0f, ry + 3.5f, 48.0f, 16.0f, 0.23f, Ui::rgba(34, 28, 48, 200));
+                                    drawCenteredText(textBuf, 234.0f, ry + 11.5f, 0.27f, clrMuted, "None");
+                                }
+
+                                // 6. PP
+                                Ui::pill(262.0f, ry + 3.5f, 46.0f, 16.0f, 0.23f, Ui::rgba(42, 34, 75, 220));
+                                char ppBuf[16];
+                                std::snprintf(ppBuf, sizeof(ppBuf), "%.0f pp", r.bestPP);
+                                drawCenteredText(textBuf, 285.0f, ry + 11.5f, 0.29f, Ui::rgba(205, 190, 255), ppBuf);
+                            }
+
+                            // Barra de estado inferior en modo expandido
+                            Ui::gradV(8.0f, 224.0f, 304.0f, 15.0f, 0.25f, Ui::rgba(18, 14, 28, 220), Ui::rgba(18, 14, 28, 250));
+                            drawText(textBuf, 12.0f, 225.5f, 0.26f, clrMuted, "B / Tocar para Cerrar  •  D-Pad: Subir/Bajar", 0.30f);
+                            if (startIdx > 0) {
+                                drawText(textBuf, 276.0f, 225.5f, 0.28f, clrCursor, "[^]", 0.30f);
+                            }
+                            if (endIdx < numRecs) {
+                                drawText(textBuf, 294.0f, 225.5f, 0.28f, clrCursor, "[v]", 0.30f);
+                            }
+                        }
+                    }
+                } else {
+                    Ui::panel(8.0f, 6.0f, 304.0f, 136.0f, 0.15f, Ui::rgba(20, 16, 32, 245), Ui::rgba(50, 42, 75));
+                    drawCenteredText(textBuf, 160.0f, 55.0f, 0.44f, clrCursor, "No hay canciones con este filtro");
+                    drawCenteredText(textBuf, 160.0f, 80.0f, 0.36f, clrWhite, "Toca BUSCAR abajo para limpiar");
+                }
+
+                // =========================================================================
+                // 4. BARRA HORIZONTAL DE TARJETAS ESTILO OSU!LAZER (y: 146..222)
+                // =========================================================================
+                if (!rankingExpanded) {
+                    const float cardW = 56.0f;
+                    const float cardH = 76.0f;
+                    const float baseCardY = 146.0f;
+
+                for (int k = 0; k < 5; ++k) {
+                    float lift = footerCardLift[k];
+                    float bx = 8.0f + k * 62.0f;
+                    float by = baseCardY - (lift * 9.0f);
+                    float cx = bx + (cardW * 0.5f);
+                    float cy = by + 23.0f; // Centro del icono grande
+                    float cz = 0.20f;
+
+                    // Colores temáticos y acentos por tarjeta
+                    u32 accentClr = clrWhite;
+                    u32 bgBase    = Ui::rgba(22, 18, 34, 245);
+                    const char* cardTitle = "";
+                    char cardSub[32] = "";
+                    u32 subClr = clrMuted;
+
+                    if (k == 0) { // MODO TACTIL / TABLET (TOGGLE UNIFICADO)
+                        bool bTactil = settings.playOnBottomScreen;
+                        accentClr = bTactil ? clr100 : clrPrimary;
+                        bgBase    = bTactil ? Ui::rgba(24, 52, 40, 245) : Ui::rgba(36, 26, 64, 245);
+                        cardTitle = bTactil ? "TACTIL" : "TABLET";
+                        std::snprintf(cardSub, sizeof(cardSub), "%s", bTactil ? "Abajo" : "Arriba");
+                        subClr = bTactil ? Ui::rgba(140, 245, 140) : Ui::rgba(195, 175, 255);
+                    } else if (k == 1) { // BUSCAR
+                        bool hasFilter = !songMgr.searchQuery.empty();
+                        accentClr = hasFilter ? clrCursor : Ui::rgba(0, 216, 240);
+                        bgBase    = hasFilter ? Ui::rgba(22, 45, 65, 245) : Ui::rgba(18, 26, 42, 245);
+                        cardTitle = "BUSCAR";
+                        if (hasFilter) {
+                            std::snprintf(cardSub, sizeof(cardSub), "%s", truncateString(songMgr.searchQuery, 7).c_str());
+                            subClr = clrCursor;
+                        } else {
+                            std::snprintf(cardSub, sizeof(cardSub), "Filtro");
+                            subClr = clrMuted;
+                        }
+                    } else if (k == 2) { // MODS
+                        bool hasMods = (settings.activeMods != MOD_NONE);
+                        accentClr = hasMods ? Ui::rgba(255, 102, 171) : Ui::rgba(240, 110, 185);
+                        bgBase    = (hasMods || modMenuOpen) ? Ui::rgba(54, 20, 50, 245) : Ui::rgba(26, 18, 36, 245);
+                        cardTitle = "MODS";
+                        if (hasMods) {
+                            std::string mStr = "+" + formatModsString(settings.activeMods);
+                            std::snprintf(cardSub, sizeof(cardSub), "%s", mStr.c_str());
+                            subClr = clrCursor;
+                        } else {
+                            std::snprintf(cardSub, sizeof(cardSub), "SELECT");
+                            subClr = clrMuted;
+                        }
+                    } else if (k == 3) { // ORDEN
+                        accentClr = Ui::rgba(165, 120, 255);
+                        bgBase    = Ui::rgba(26, 22, 46, 245);
+                        cardTitle = "ORDEN";
+                        if (songMgr.sortMode == SORT_BY_TITLE)       std::snprintf(cardSub, sizeof(cardSub), "Titulo");
+                        else if (songMgr.sortMode == SORT_BY_ARTIST) std::snprintf(cardSub, sizeof(cardSub), "Artista");
+                        else if (songMgr.sortMode == SORT_BY_STARS)  std::snprintf(cardSub, sizeof(cardSub), "Dificult.");
+                        else                                         std::snprintf(cardSub, sizeof(cardSub), "Record");
+                        subClr = Ui::rgba(205, 185, 255);
+                    } else if (k == 4) { // MODOS DE JUEGO (STD / TAIKO / CATCH / MANIA)
+                        cardTitle = "MODO";
+                        int curM = settings.gameMode;
+                        if (curM == MODE_TAIKO) {
+                            accentClr = Ui::rgba(255, 75, 80);
+                            bgBase    = Ui::rgba(44, 18, 24, 245);
+                            std::snprintf(cardSub, sizeof(cardSub), "Taiko");
+                            subClr    = Ui::rgba(255, 150, 160);
+                        } else if (curM == MODE_CATCH) {
+                            accentClr = Ui::rgba(45, 215, 115);
+                            bgBase    = Ui::rgba(16, 42, 26, 245);
+                            std::snprintf(cardSub, sizeof(cardSub), "Catch");
+                            subClr    = Ui::rgba(130, 255, 180);
+                        } else if (curM == MODE_MANIA) {
+                            accentClr = Ui::rgba(70, 195, 255);
+                            bgBase    = Ui::rgba(18, 36, 52, 245);
+                            std::snprintf(cardSub, sizeof(cardSub), "Mania");
+                            subClr    = Ui::rgba(160, 230, 255);
+                        } else {
+                            accentClr = Ui::rgba(255, 102, 171);
+                            bgBase    = Ui::rgba(48, 18, 38, 245);
+                            std::snprintf(cardSub, sizeof(cardSub), "Standard");
+                            subClr    = Ui::rgba(255, 180, 215);
+                        }
+                    }
+
+                    // Sombra inferior cuando la tarjeta se eleva
+                    if (lift > 0.02f) {
+                        C2D_DrawRectSolid(bx + 2.0f, by + cardH, 0.17f, cardW - 4.0f, 2.0f + lift * 5.0f, Ui::rgba(0, 0, 0, static_cast<u8>(80 * lift)));
+                        Ui::glow(cx, by + (cardH * 0.5f), 0.18f, 32.0f, Ui::withAlpha(accentClr, static_cast<u8>(90 * lift)), 3);
+                    }
+
+                    // Fondo de la tarjeta con brillo según elevación
+                    u32 finalBg = (lift > 0.05f) ? Ui::brighten(bgBase, 1.0f + lift * 0.35f) : bgBase;
+                    Ui::panel(bx, by, cardW, cardH, cz, finalBg, (lift > 0.1f) ? accentClr : Ui::rgba(50, 42, 70));
+
+                    // Barra neón superior iluminada
+                    float barThick = 2.0f + lift * 1.5f;
+                    u32 neonClr = (lift > 0.05f) ? Ui::brighten(accentClr, 1.3f) : Ui::withAlpha(accentClr, 180);
+                    C2D_DrawRectSolid(bx + 1.0f, by, cz + 0.02f, cardW - 2.0f, barThick, neonClr);
+
+                    // =====================================================================
+                    // DIBUJADO DE ICONOS VECTORIALES PROCEDURALES (GRANDES Y CENTRADOS)
+                    // =====================================================================
+                    float iz = cz + 0.03f;
+                    u32 iconClr = (lift > 0.05f) ? clrWhite : accentClr;
+
+                    if (k == 0) {
+                        // Icono 0: Modo Táctil / Tablet (Consola 3DS con pantalla activa y stylus)
+                        bool bTactil = settings.playOnBottomScreen;
+                        if (bTactil) {
+                            // Pantalla Superior (contorno sutil)
+                            drawRectOutline(cx - 13.0f, cy - 13.0f, 26.0f, 11.0f, 1.2f, Ui::rgba(110, 105, 135, 180), iz);
+                            // Pantalla Inferior (activa, brillante, táctil)
+                            Ui::panel(cx - 11.0f, cy + 1.0f, 22.0f, 11.0f, iz, Ui::rgba(25, 95, 55, 245), clr100);
+                            // Stylus tocando la pantalla táctil
+                            C2D_DrawLine(cx + 14.0f, cy - 4.0f, clrWhite, cx + 3.0f, cy + 6.0f, clr100, 2.2f, iz + 0.01f);
+                            C2D_DrawCircleSolid(cx + 3.0f, cy + 6.0f, iz + 0.02f, 1.8f, clrWhite);
+                        } else {
+                            // Pantalla Superior (activa, brillante, juego en 3D)
+                            Ui::panel(cx - 13.0f, cy - 13.0f, 26.0f, 12.0f, iz, Ui::rgba(65, 45, 120, 245), clrPrimary);
+                            // Pantalla Inferior (touchpad / tablet)
+                            drawRectOutline(cx - 11.0f, cy + 2.0f, 22.0f, 10.0f, 1.2f, Ui::rgba(110, 105, 135, 180), iz);
+                            // Stylus apuntando a la pantalla superior
+                            C2D_DrawLine(cx - 4.0f, cy + 9.0f, clrWhite, cx + 5.0f, cy - 6.0f, clrPrimary, 2.2f, iz + 0.01f);
+                            C2D_DrawCircleSolid(cx + 5.0f, cy - 6.0f, iz + 0.02f, 1.8f, clrWhite);
+                        }
+                    } else if (k == 1) {
+                        // Icono 1: Buscar (Lupa estilizada grande)
+                        float lcx = cx - 3.5f;
+                        float lcy = cy - 3.5f;
+                        float lRadius = 8.5f;
+                        // Relleno de cristal
+                        C2D_DrawCircleSolid(lcx, lcy, iz, lRadius, Ui::rgba(0, 180, 230, 45));
+                        // Borde metálico de la lente
+                        drawRing(lcx, lcy, lRadius, 2.2f, iconClr, 22, iz + 0.01f);
+                        // Brillo especular
+                        C2D_DrawCircleSolid(lcx - 3.5f, lcy - 3.5f, iz + 0.02f, 1.8f, clrWhite);
+                        // Mango diagonal de la lupa
+                        C2D_DrawLine(lcx + 6.0f, lcy + 6.0f, iconClr, lcx + 14.0f, lcy + 14.0f, iconClr, 3.2f, iz + 0.01f);
+                        C2D_DrawCircleSolid(lcx + 14.0f, lcy + 14.0f, iz + 0.02f, 2.0f, iconClr);
+                    } else if (k == 2) {
+                        // Icono 2: Mods (Flechas dinámicas de intercambio estilo osu! Lazer)
+                        // Flecha superior hacia la derecha
+                        float aY1 = cy - 5.5f;
+                        C2D_DrawLine(cx - 12.0f, aY1, iconClr, cx + 5.0f, aY1, iconClr, 2.4f, iz);
+                        C2D_DrawTriangle(cx + 5.0f, aY1 - 5.0f, iconClr, cx + 12.0f, aY1, iconClr, cx + 5.0f, aY1 + 5.0f, iconClr, iz + 0.01f);
+                        // Flecha inferior hacia la izquierda
+                        float aY2 = cy + 5.5f;
+                        C2D_DrawLine(cx + 12.0f, aY2, iconClr, cx - 5.0f, aY2, iconClr, 2.4f, iz);
+                        C2D_DrawTriangle(cx - 5.0f, aY2 - 5.0f, iconClr, cx - 12.0f, aY2, iconClr, cx - 5.0f, aY2 + 5.0f, iconClr, iz + 0.01f);
+                    } else if (k == 3) {
+                        // Icono 3: Orden (Barras ascendentes de estadísticas + Flecha)
+                        Ui::panel(cx - 12.0f, cy + 2.0f, 6.0f, 10.0f, iz, iconClr);
+                        Ui::panel(cx - 3.0f,  cy - 4.0f, 6.0f, 16.0f, iz, iconClr);
+                        Ui::panel(cx + 6.0f,  cy - 10.0f, 6.0f, 22.0f, iz, iconClr);
+                        // Triángulo apuntando hacia arriba
+                        C2D_DrawTriangle(cx + 5.0f, cy - 12.0f, clrWhite, cx + 13.0f, cy - 12.0f, clrWhite, cx + 9.0f, cy - 17.0f, clrWhite, iz + 0.01f);
+                    } else if (k == 4) {
+                        // Icono 4: Modos de juego con icono dinámico según el modo activo
+                        int curM = settings.gameMode;
+                        if (curM == MODE_TAIKO) {
+                            // Icono TAIKO: Tambor Wadaiko estilizado con cara roja, aro azul y bachi
+                            drawRing(cx, cy, 11.5f, 2.4f, Ui::rgba(55, 140, 255), 24, iz); // Aro Katsu (azul)
+                            C2D_DrawCircleSolid(cx, cy, iz + 0.01f, 8.5f, Ui::rgba(255, 60, 65)); // Centro Don (rojo)
+                            drawRing(cx, cy, 8.5f, 1.4f, clrWhite, 20, iz + 0.015f);
+                            // Palillos de tambor (bachi) cruzados sutiles
+                            C2D_DrawLine(cx - 7.0f, cy + 8.5f, clrWhite, cx + 2.5f, cy - 2.5f, clrWhite, 2.0f, iz + 0.02f);
+                            C2D_DrawLine(cx + 7.0f, cy + 8.5f, clrWhite, cx - 2.5f, cy - 2.5f, clrWhite, 2.0f, iz + 0.02f);
+                        } else if (curM == MODE_CATCH) {
+                            // Icono CATCH: Bandeja receptora y fruta jugosa con hoja
+                            // Bandeja de Catcher
+                            C2D_DrawLine(cx - 11.0f, cy + 9.0f, clrWhite, cx + 11.0f, cy + 9.0f, clrWhite, 2.4f, iz);
+                            C2D_DrawLine(cx - 11.0f, cy + 9.0f, clrWhite, cx - 13.0f, cy + 5.5f, clrWhite, 2.0f, iz);
+                            C2D_DrawLine(cx + 11.0f, cy + 9.0f, clrWhite, cx + 13.0f, cy + 5.5f, clrWhite, 2.0f, iz);
+                            // Manzana estilizada
+                            C2D_DrawCircleSolid(cx - 3.8f, cy - 0.5f, iz + 0.01f, 6.2f, Ui::rgba(255, 50, 70));
+                            C2D_DrawCircleSolid(cx + 3.8f, cy - 0.5f, iz + 0.01f, 6.2f, Ui::rgba(255, 50, 70));
+                            C2D_DrawCircleSolid(cx - 4.0f, cy - 3.0f, iz + 0.02f, 1.8f, Ui::rgba(255, 200, 200, 230)); // Brillo
+                            // Tallo y hoja verde
+                            C2D_DrawLine(cx, cy - 5.5f, Ui::rgba(140, 80, 45), cx + 2.0f, cy - 10.5f, Ui::rgba(140, 80, 45), 1.8f, iz + 0.02f);
+                            C2D_DrawTriangle(cx + 2.0f, cy - 8.5f, Ui::rgba(45, 215, 80), cx + 7.5f, cy - 11.5f, Ui::rgba(45, 215, 80), cx + 6.0f, cy - 7.0f, Ui::rgba(45, 215, 80), iz + 0.03f);
+                        } else if (curM == MODE_MANIA) {
+                            // Icono MANIA: Teclado de 4 columnas (4K) estilizado
+                            float colW = 4.2f;
+                            float colH = 20.0f;
+                            float startX = cx - 10.5f;
+                            float topY = cy - 10.0f;
+                            for (int col = 0; col < 4; ++col) {
+                                float kx = startX + col * 5.5f;
+                                u32 kColor = (col == 0 || col == 3) ? clrWhite : Ui::rgba(60, 205, 255);
+                                Ui::panel(kx, topY, colW, colH, iz, Ui::rgba(20, 26, 40, 240), kColor);
+                                // Destello de pulsación inferior
+                                C2D_DrawRectSolid(kx + 0.5f, topY + colH - 4.5f, iz + 0.01f, colW - 1.0f, 4.0f, kColor);
+                            }
+                        } else {
+                            // Icono STD: Círculo de golpe concéntrico con approach circle
+                            drawRing(cx, cy, 12.0f, 1.6f, iconClr, 24, iz); // Approach circle
+                            C2D_DrawCircleSolid(cx, cy, iz + 0.01f, 8.0f, Ui::rgba(255, 102, 171, 230)); // Hit circle
+                            drawRing(cx, cy, 8.0f, 1.8f, clrWhite, 20, iz + 0.02f); // Borde blanco
+                            C2D_DrawCircleSolid(cx, cy, iz + 0.03f, 2.5f, clrWhite); // Punto central "1"
+                        }
+                    }
+
+                    // Títulos limpios de la tarjeta (texto legible en ASCII sin emojis ni '?')
+                    drawCenteredTextWithShadow(textBuf, cx, by + 49.5f, 0.40f, clrWhite, cardTitle, cz + 0.05f);
+                    Ui::pill(bx + 4.0f, by + 59.5f, cardW - 8.0f, 13.5f, cz + 0.04f, Ui::rgba(14, 11, 22, 230));
+                    drawCenteredTextWithShadow(textBuf, cx, by + 66.0f, 0.31f, subClr, cardSub, cz + 0.06f);
+                }
+                }
             }
+
+            if (deleteConfirmOpen) {
+                C2D_DrawRectSolid(0.0f, 0.0f, 0.85f, 320.0f, 240.0f, Ui::rgba(8, 6, 14, 235));
+                Ui::panel(16.0f, 38.0f, 288.0f, 156.0f, 0.88f, Ui::rgba(26, 18, 34, 252), Ui::rgba(255, 64, 96));
+                Ui::pill(24.0f, 46.0f, 96.0f, 18.0f, 0.90f, Ui::rgba(180, 30, 55, 230));
+                drawCenteredText(textBuf, 72.0f, 55.0f, 0.36f, clrWhite, "CONFIRMAR", 0.95f);
+
+                std::string delTitle = (!songMgr.sets.empty() && selectedSet >= 0 && selectedSet < static_cast<int>(songMgr.sets.size()))
+                    ? songMgr.sets[selectedSet].title : "";
+                drawCenteredText(textBuf, 160.0f, 82.0f, 0.44f, clrWhite, truncateString(delTitle, 28).c_str(), 0.95f);
+                drawCenteredText(textBuf, 160.0f, 108.0f, 0.35f, Ui::rgba(255, 160, 175), "Se borrara la carpeta y records de la SD.", 0.95f);
+                drawCenteredText(textBuf, 160.0f, 126.0f, 0.32f, clrMuted, "Esta accion no se puede deshacer.", 0.95f);
+
+                // Boton Cancelar
+                Ui::panel(28.0f, 148.0f, 126.0f, 34.0f, 0.90f, Ui::rgba(42, 38, 56, 250), Ui::rgba(85, 75, 110));
+                drawCenteredText(textBuf, 91.0f, 165.0f, 0.39f, clrWhite, "CANCELAR (B)", 0.95f);
+
+                // Boton Borrar
+                Ui::panel(166.0f, 148.0f, 126.0f, 34.0f, 0.90f, Ui::rgba(185, 35, 55, 250), Ui::rgba(255, 80, 110));
+                drawCenteredText(textBuf, 229.0f, 165.0f, 0.40f, clrWhite, "BORRAR (A)", 0.95f);
+            }
+            Ui::drawTransition(320.0f, 240.0f, screenFade, clrPrimary);
 
             C3D_FrameEnd(0);
             continue;
@@ -1215,10 +4007,27 @@ int main(int argc, char* argv[]) {
             }
             if (kDown & (KEY_B | KEY_START | KEY_SELECT)) {
                 audio.playHitSound(0);
+                applyActiveSkinAudio();
                 appState = STATE_SONG_SELECT;
                 updateSongPreview();
                 continue;
             }
+
+            static int resultsBottomTab = 0;
+            if (kDown & (KEY_X | KEY_Y)) {
+                resultsBottomTab = 1 - resultsBottomTab;
+                audio.playHitSound(0);
+            }
+            if (touchJustDown && touch.py >= 46 && touch.py <= 68) {
+                if (touch.px < 160) resultsBottomTab = 0;
+                else resultsBottomTab = 1;
+                audio.playHitSound(0);
+            }
+
+            bool isTaikoPlay = (settings.gameMode == MODE_TAIKO || beatmap.mode == 1);
+            bool isCatchPlay = (settings.gameMode == MODE_CATCH || beatmap.mode == 2);
+            bool isManiaPlay = (settings.gameMode == MODE_MANIA || beatmap.mode == 3);
+            int currentPlayMode = isTaikoPlay ? 1 : (isCatchPlay ? 2 : (isManiaPlay ? 3 : 0));
 
             int totalJudged = count300 + count100 + count50 + countMiss;
             float acc = (totalJudged > 0)
@@ -1249,81 +4058,337 @@ int main(int argc, char* argv[]) {
 
             C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
 
-            C2D_TargetClear(topScreen, clrBgDark);
-            C2D_SceneBegin(topScreen);
-
-            if (bgTex.loaded) {
-                bgTex.drawRect(0.0f, 0.0f, 400.0f, 240.0f, 0.02f, 255);
-                C2D_DrawRectSolid(0.0f, 0.0f, 0.04f, 400.0f, 240.0f, Ui::rgba(14, 12, 22, 190));
-            } else {
-                Ui::backdrop(400.0f, 240.0f, static_cast<float>(animTick), Ui::rgba(30, 18, 54), Ui::rgba(10, 8, 22), gradeClr, 0.02f);
-            }
-
-            Ui::gradV(0.0f, 0.0f, 400.0f, 30.0f, 0.3f, Ui::rgba(18, 15, 32, 245), Ui::rgba(18, 15, 32, 150));
-            C2D_DrawRectSolid(0.0f, 29.0f, 0.31f, 400.0f, 1.5f, Ui::withAlpha(gradeClr, 220));
-            drawText(textBuf, 12.0f, 6.0f, 0.55f, clrWhite,
-                stageFailed ? "PARTIDA FALLIDA" : (newRecordAchieved ? "RESULTADOS - NUEVO RECORD!" : "RESULTADOS"));
-
-            // Rango gigante con resplandor pulsante
-            float gPulse = 1.0f + std::sin(animTick * 0.08f) * 0.03f;
-            Ui::glow(88.0f, 124.0f, 0.15f, 78.0f * gPulse, Ui::withAlpha(gradeClr, 120), 6);
-            C2D_DrawCircleSolid(90.0f, 128.0f, 0.18f, 52.0f, Ui::rgba(0, 0, 0, 110));
-            C2D_DrawCircleSolid(88.0f, 124.0f, 0.2f, 52.0f, Ui::rgba(24, 20, 40, 245));
-            Ui::ring(88.0f, 124.0f, 0.25f, 52.0f * gPulse, 4.0f, gradeClr, 40);
-            drawCenteredText(textBuf, 88.0f, 120.0f, 1.55f, gradeClr, grade);
-
-            // Panel de resultados
             char buf[96];
-            Ui::panel(158.0f, 38.0f, 234.0f, 62.0f, 0.3f, Ui::rgba(24, 21, 40, 230), gradeClr);
-            drawText(textBuf, 168.0f, 42.0f, 0.36f, clrMuted, "PUNTUACION");
-            std::snprintf(buf, sizeof(buf), "%07d", score);
-            drawText(textBuf, 168.0f, 54.0f, 0.78f, clrWhite, buf);
-            float modStars = getModAdjustedStars(beatmap.starRating, settings.activeMods);
-            std::snprintf(buf, sizeof(buf), "%.1f pp", lastEarnedPP);
-            Ui::pill(318.0f, 46.0f, 66.0f, 18.0f, 0.5f, Ui::rgba(70, 55, 110, 240));
-            drawCenteredText(textBuf, 351.0f, 55.0f, 0.42f, clr300, buf, 0.9f);
-            std::snprintf(buf, sizeof(buf), "*%.2f", modStars);
-            Ui::pill(318.0f, 70.0f, 66.0f, 16.0f, 0.5f, getStarRatingColor(modStars));
-            drawCenteredText(textBuf, 351.0f, 78.0f, 0.36f, Ui::rgba(20, 16, 30), buf, 0.9f);
+            for (int eye = 0; eye < (stereoActive ? 2 : 1); ++eye) {
+                C3D_RenderTarget* curTop = (eye == 0) ? topScreen : topScreenRight;
+                float eyeSign = stereoActive ? ((eye == 0) ? 1.0f : -1.0f) : 0.0f;
+                auto depthShift = [&](float px) { return eyeSign * slider3D * px; };
 
-            // Precision con barra
-            Ui::panel(158.0f, 106.0f, 234.0f, 34.0f, 0.3f, Ui::rgba(24, 21, 40, 230));
-            std::snprintf(buf, sizeof(buf), "Precision %.2f%%", acc);
-            drawText(textBuf, 168.0f, 109.0f, 0.40f, clr300, buf);
-            std::snprintf(buf, sizeof(buf), "Combo %dx", maxCombo);
-            drawText(textBuf, 320.0f, 109.0f, 0.40f, clrCursor, buf);
-            Ui::statBar(168.0f, 128.0f, 214.0f, 6.0f, 0.4f, acc / 100.0f, clr300);
+                C2D_TargetClear(curTop, clrBgDark);
+                C2D_SceneBegin(curTop);
 
-            // Contadores 300 / 100 / 50 / Miss
-            const char* hitLbl[4] = { "300", "100", "50", "X" };
-            int hitCnt[4] = { count300, count100, count50, countMiss };
-            u32 hitClr[4] = { clr300, clr100, clr50, clrMiss };
-            for (int i = 0; i < 4; ++i) {
-                float hx = 158.0f + i * 59.5f;
-                Ui::panel(hx, 146.0f, 55.0f, 44.0f, 0.3f, Ui::rgba(24, 21, 40, 230));
-                C2D_DrawRectSolid(hx, 146.0f, 0.4f, 55.0f, 3.0f, hitClr[i]);
-                drawCenteredText(textBuf, hx + 27.5f, 160.0f, 0.42f, hitClr[i], hitLbl[i], 0.9f);
-                std::snprintf(buf, sizeof(buf), "%d", hitCnt[i]);
-                drawCenteredText(textBuf, hx + 27.5f, 177.0f, 0.50f, clrWhite, buf, 0.9f);
+                float dBg    = depthShift(-3.5f);
+                float dGrade = depthShift(4.2f);
+                float dPanel = depthShift(2.0f);
+
+                if (bgTex.loaded) {
+                    bgTex.drawRect(dBg, 0.0f, 400.0f, 240.0f, 0.02f, 255);
+                    C2D_DrawRectSolid(0.0f, 0.0f, 0.04f, 400.0f, 240.0f, Ui::rgba(14, 12, 22, 190));
+                } else {
+                    Ui::backdrop(400.0f, 240.0f, static_cast<float>(animTick), Ui::rgba(30, 18, 54), Ui::rgba(10, 8, 22), gradeClr, 0.02f);
+                }
+
+                Ui::gradV(0.0f, 0.0f, 400.0f, 30.0f, 0.3f, Ui::rgba(18, 15, 32, 245), Ui::rgba(18, 15, 32, 150));
+                C2D_DrawRectSolid(0.0f, 29.0f, 0.31f, 400.0f, 1.5f, Ui::withAlpha(gradeClr, 220));
+                const char* resTitle = stageFailed ? "PARTIDA FALLIDA" : (newRecordAchieved ? "RESULTADOS - NUEVO RECORD!" : "RESULTADOS");
+                if (isTaikoPlay) {
+                    if (stageFailed || hp < 0.70f) resTitle = "FALLIDA... (ざんねん...)";
+                    else if (countMiss == 0) resTitle = "DON-DERFUL! FULL COMBO! (フルコンボ!)";
+                    else resTitle = "CLEAR! (クリア!)";
+                }
+                drawText(textBuf, 12.0f, 6.0f, 0.55f, clrWhite, resTitle);
+
+                // Rango gigante animado o Corona oficial estilo Taiko
+                float gPulse = 1.0f + std::sin(animTick * 0.08f) * 0.03f;
+                float gIntro = std::min(1.0f, static_cast<float>(animTick) / 20.0f);
+                float gScale = (gIntro < 1.0f) ? (1.0f + 0.35f * std::sin(gIntro * static_cast<float>(M_PI))) : 1.0f;
+
+                if (!isTaikoPlay) {
+                    // Rayos de sol rotativos dorados para SS y S
+                    if (std::string(grade) == "SS" || std::string(grade) == "S") {
+                        for (int ray = 0; ray < 8; ++ray) {
+                            float rAng = ray * (static_cast<float>(M_PI) / 4.0f) + animTick * 0.025f;
+                            float rLen = 58.0f * gPulse;
+                            C2D_DrawLine(88.0f + dGrade, 124.0f, Ui::rgba(255, 220, 60, 65),
+                                         88.0f + dGrade + std::cos(rAng) * rLen, 124.0f + std::sin(rAng) * rLen,
+                                         Ui::rgba(255, 220, 60, 0), 2.2f, 0.16f);
+                        }
+                    }
+
+                    Ui::glow(88.0f + dGrade, 124.0f, 0.15f, 78.0f * gPulse * gScale, Ui::withAlpha(gradeClr, 120), 6);
+                    C2D_DrawCircleSolid(90.0f + dGrade, 128.0f, 0.18f, 52.0f * gScale, Ui::rgba(0, 0, 0, 110));
+                    C2D_DrawCircleSolid(88.0f + dGrade, 124.0f, 0.2f, 52.0f * gScale, Ui::rgba(24, 20, 40, 245));
+                    Ui::ring(88.0f + dGrade, 124.0f, 0.25f, 52.0f * gPulse * gScale, 4.0f, gradeClr, 40);
+                    drawCenteredText(textBuf, 88.0f + dGrade, 120.0f, 1.55f * gScale, gradeClr, grade);
+
+                    // Badge de FULL COMBO debajo de la medalla de grado
+                    if (countMiss == 0 && !stageFailed) {
+                        Ui::pill(48.0f + dGrade, 182.0f, 80.0f, 15.0f, 0.28f, Ui::rgba(255, 215, 60, 230));
+                        drawCenteredText(textBuf, 88.0f + dGrade, 189.5f, 0.30f, Ui::rgba(20, 16, 28), "FULL COMBO", 0.30f);
+                    }
+                } else {
+                    // Corona o Medalla oficial estilo Taiko no Tatsujin
+                    bool isFC = (countMiss == 0 && !stageFailed);
+                    bool isClear = (hp >= 0.70f && !stageFailed);
+                    u32 crownClr = isFC ? Ui::rgba(255, 218, 55) : (isClear ? Ui::rgba(215, 235, 255) : Ui::rgba(110, 30, 75));
+                    Ui::glow(88.0f + dGrade, 112.0f, 0.15f, 76.0f * gPulse, Ui::withAlpha(crownClr, 150), 6);
+
+                    // Base de la Corona
+                    float crownX = 88.0f + dGrade;
+                    float crownY = 108.0f;
+                    C2D_DrawRectSolid(crownX - 32.0f, crownY + 8.0f, 0.20f, 64.0f, 12.0f, crownClr);
+                    C2D_DrawRectSolid(crownX - 30.0f, crownY + 16.0f, 0.21f, 60.0f, 4.0f, Ui::rgba(255, 255, 255, 200));
+
+                    // 5 Picos dorados de la corona
+                    for (int p = 0; p < 5; ++p) {
+                        float px = crownX - 28.0f + p * 14.0f;
+                        float peakH = (p == 2) ? 24.0f : ((p == 1 || p == 3) ? 17.0f : 13.0f);
+                        C2D_DrawTriangle(px - 6.0f, crownY + 8.0f, crownClr, px + 6.0f, crownY + 8.0f, crownClr, px, crownY + 8.0f - peakH, crownClr, 0.21f);
+                        // Joya en la punta
+                        u32 gemClr = isFC ? Ui::rgba(255, 45, 60) : (isClear ? Ui::rgba(45, 175, 255) : Ui::rgba(140, 45, 120));
+                        C2D_DrawCircleSolid(px, crownY + 8.0f - peakH, 0.22f, 2.8f, gemClr);
+                    }
+
+                    // Cinta con título
+                    const char* crownTxt = isFC ? "フルコンボ!" : (isClear ? "クリア!" : "ざんねん...");
+                    Ui::pill(crownX - 40.0f, crownY + 24.0f, 80.0f, 17.0f, 0.24f, crownClr);
+                    drawCenteredText(textBuf, crownX, crownY + 32.0f, 0.32f, Ui::rgba(20, 14, 26), crownTxt, 0.26f);
+
+                    // Mini Don-chan de celebración animado bajo la corona
+                    int donResEmotion = isFC ? 1 : (isClear ? 0 : 2);
+                    float dMascotY = 175.0f;
+                    C2D_DrawCircleSolid(crownX, dMascotY, 0.22f, 16.0f, Ui::rgba(255, 55, 65));
+                    ModeTaiko::drawTaikoFace(crownX, dMascotY, 13.0f, false, true, 0.24f, donResEmotion);
+                }
+
+                // Panel de resultados
+                Ui::panel(158.0f + dPanel, 38.0f, 234.0f, 62.0f, 0.3f, Ui::rgba(24, 21, 40, 230), gradeClr);
+                drawText(textBuf, 168.0f + dPanel, 42.0f, 0.36f, clrMuted, "PUNTUACION");
+
+                float rollProgress = std::min(1.0f, static_cast<float>(animTick) / 30.0f);
+                int displayScore = static_cast<int>(score * rollProgress);
+                std::snprintf(buf, sizeof(buf), "%07d", displayScore);
+                drawText(textBuf, 168.0f + dPanel, 54.0f, 0.78f, clrWhite, buf);
+                float modStars = getModAdjustedStars(beatmap.starRating, settings.activeMods);
+                std::snprintf(buf, sizeof(buf), "%.1f pp", lastEarnedPP);
+                Ui::pill(318.0f + dPanel, 46.0f, 66.0f, 18.0f, 0.5f, Ui::rgba(70, 55, 110, 240));
+                drawCenteredText(textBuf, 351.0f + dPanel, 55.0f, 0.42f, clr300, buf, 0.9f);
+                std::snprintf(buf, sizeof(buf), "*%.2f", modStars);
+                Ui::pill(318.0f + dPanel, 70.0f, 66.0f, 16.0f, 0.5f, getStarRatingColor(modStars));
+                drawCenteredText(textBuf, 351.0f + dPanel, 78.0f, 0.36f, Ui::rgba(20, 16, 30), buf, 0.9f);
+
+                // Precision con barra
+                Ui::panel(158.0f + dPanel, 106.0f, 234.0f, 34.0f, 0.3f, Ui::rgba(24, 21, 40, 230));
+                std::snprintf(buf, sizeof(buf), "Precision %.2f%%", acc);
+                drawText(textBuf, 168.0f + dPanel, 109.0f, 0.40f, clr300, buf);
+                std::snprintf(buf, sizeof(buf), "Combo %dx", maxCombo);
+                drawText(textBuf, 320.0f + dPanel, 109.0f, 0.40f, clrCursor, buf);
+                Ui::statBar(168.0f + dPanel, 128.0f, 214.0f, 6.0f, 0.4f, (acc / 100.0f) * rollProgress, clr300);
+
+                // Contadores de golpes adaptados a cada modo de juego
+                const char* hitLbl[4] = { "300", "100", "50", "X" };
+                const char* taikoHitLbl[4] = { "良 GOOD", "可 OK", "不可 MISS", "連打 ROLLS" };
+                const char* catchHitLbl[4] = { "FRUTAS", "GOTAS", "GOTITAS", "MISS" };
+                const char* maniaHitLbl[4] = { "MAX 300", "100", "50", "MISS" };
+
+                int hitCnt[4] = { count300, count100, count50, countMiss };
+                u32 hitClr[4] = { clr300, clr100, clr50, clrMiss };
+                u32 taikoHitClr[4] = { Ui::rgba(240, 50, 55), Ui::rgba(45, 160, 230), Ui::rgba(180, 50, 140), Ui::rgba(255, 215, 55) };
+                u32 catchHitClr[4] = { ModeCatch::CLR_APPLE, ModeCatch::CLR_DROPLET, Ui::rgba(180, 220, 255), clrMiss };
+                u32 maniaHitClr[4] = { ModeMania::CLR_COL_INNER, ModeMania::CLR_COL_OUTER, clr50, clrMiss };
+
+                if (isTaikoPlay) {
+                    hitCnt[0] = count300;
+                    hitCnt[1] = count100;
+                    hitCnt[2] = countMiss;
+                    hitCnt[3] = taikoEngine.totalDrumrollHits;
+                } else if (isCatchPlay) {
+                    hitCnt[0] = count300;
+                    hitCnt[1] = count100;
+                    hitCnt[2] = count50;
+                    hitCnt[3] = countMiss;
+                }
+
+                for (int i = 0; i < 4; ++i) {
+                    float hx = 158.0f + i * 59.5f + dPanel;
+                    const char* curLbl = isTaikoPlay ? taikoHitLbl[i] : (isCatchPlay ? catchHitLbl[i] : (isManiaPlay ? maniaHitLbl[i] : hitLbl[i]));
+                    u32 curClr = isTaikoPlay ? taikoHitClr[i] : (isCatchPlay ? catchHitClr[i] : (isManiaPlay ? maniaHitClr[i] : hitClr[i]));
+
+                    Ui::panel(hx, 146.0f, 55.0f, 44.0f, 0.3f, Ui::rgba(24, 21, 40, 230));
+                    C2D_DrawRectSolid(hx, 146.0f, 0.4f, 55.0f, 3.0f, curClr);
+                    drawCenteredText(textBuf, hx + 27.5f, 160.0f, (isTaikoPlay || isCatchPlay || isManiaPlay) ? 0.26f : 0.42f, curClr, curLbl, 0.9f);
+                    int rollCnt = static_cast<int>(hitCnt[i] * rollProgress);
+                    std::snprintf(buf, sizeof(buf), "%d", rollCnt);
+                    drawCenteredText(textBuf, hx + 27.5f, 177.0f, 0.50f, clrWhite, buf, 0.9f);
+                }
+                char urLine[96];
+                std::snprintf(urLine, sizeof(urLine), "Mods: %s  |  UR: %.1f (%+.0f ms)",
+                    formatModsString(settings.activeMods).c_str(), lastUnstableRate, lastMeanHitError);
+                drawText(textBuf, 160.0f + dPanel, 196.0f, 0.35f, clrMuted, urLine);
+
+                Ui::gradV(0.0f, 212.0f, 400.0f, 28.0f, 0.3f, Ui::rgba(18, 15, 32, 170), Ui::rgba(18, 15, 32, 250));
+                drawCenteredText(textBuf, 200.0f, 227.0f, 0.42f, clr300, "A: Reintentar | B: Volver a Canciones");
+                Ui::drawTransition(400.0f, 240.0f, screenFade, gradeClr);
             }
-            std::string modStr = "Mods: " + formatModsString(settings.activeMods);
-            drawText(textBuf, 160.0f, 196.0f, 0.36f, clrMuted, modStr.c_str());
-
-            Ui::gradV(0.0f, 212.0f, 400.0f, 28.0f, 0.3f, Ui::rgba(18, 15, 32, 170), Ui::rgba(18, 15, 32, 250));
-            drawCenteredText(textBuf, 200.0f, 227.0f, 0.42f, clr300, "A: Reintentar | B: Volver a Canciones");
 
             C2D_TargetClear(bottomScreen, clrTabletBg);
             C2D_SceneBegin(bottomScreen);
             Ui::backdrop(320.0f, 240.0f, static_cast<float>(animTick), Ui::rgba(26, 20, 44), Ui::rgba(12, 10, 22), gradeClr, 0.02f);
-            Ui::panel(20.0f, 70.0f, 280.0f, 80.0f, 0.2f, Ui::rgba(30, 27, 44, 240), gradeClr);
-            drawCenteredText(textBuf, 160.0f, 95.0f, 0.52f, clrWhite, truncateString(beatmap.title, 32).c_str());
-            std::snprintf(buf, sizeof(buf), "[%s]  %.1f pp", truncateString(beatmap.version, 22).c_str(), lastEarnedPP);
-            drawCenteredText(textBuf, 160.0f, 122.0f, 0.44f, clr300, buf);
-            if (newRecordAchieved) {
-                float flash = 0.65f + 0.35f * std::sin(animTick * 0.2f);
-                Ui::pill(40.0f, 168.0f, 240.0f, 24.0f, 0.3f, Ui::withAlpha(clrCursor, static_cast<u8>(255.0f * flash)));
-                drawCenteredText(textBuf, 160.0f, 180.0f, 0.46f, Ui::rgba(20, 16, 30), "NUEVO RECORD PERSONAL!", 0.9f);
+
+            // 1. Cabecera con metadatos del mapa y PP ganado
+            Ui::panel(8.0f, 6.0f, 304.0f, 38.0f, 0.15f, Ui::rgba(20, 16, 32, 245), gradeClr);
+            drawText(textBuf, 16.0f, 8.0f, 0.42f, clrWhite, truncateString(beatmap.title, 26).c_str(), 0.22f);
+            char subMeta[64];
+            std::snprintf(subMeta, sizeof(subMeta), "[%s]  //  Por %s",
+                          truncateString(beatmap.version, 16).c_str(), truncateString(beatmap.creator, 14).c_str());
+            drawText(textBuf, 16.0f, 24.5f, 0.28f, clrMuted, subMeta, 0.22f);
+
+            float modStars = getModAdjustedStars(beatmap.starRating, settings.activeMods);
+            u32 stClr = getStarRatingColor(modStars);
+            char stBadge[24];
+            std::snprintf(stBadge, sizeof(stBadge), "* %.2f", modStars);
+            Ui::pill(248.0f, 8.0f, 56.0f, 15.0f, 0.20f, stClr);
+            drawCenteredText(textBuf, 276.0f, 15.5f, 0.33f, Ui::rgba(20, 16, 30), stBadge, 0.25f);
+
+            std::snprintf(buf, sizeof(buf), "%.1f pp", lastEarnedPP);
+            Ui::pill(248.0f, 25.0f, 56.0f, 15.0f, 0.20f, Ui::rgba(50, 40, 80, 230));
+            drawCenteredText(textBuf, 276.0f, 32.5f, 0.33f, clr300, buf, 0.25f);
+
+            // 2. Pestañas interactivas de Selección (Curva de Esfuerzo vs Ranking Local)
+            float tabW = 148.0f;
+            u32 tab0Bg = (resultsBottomTab == 0) ? Ui::rgba(52, 42, 88, 245) : Ui::rgba(20, 16, 32, 210);
+            u32 tab1Bg = (resultsBottomTab == 1) ? Ui::rgba(52, 42, 88, 245) : Ui::rgba(20, 16, 32, 210);
+            u32 tab0Brd = (resultsBottomTab == 0) ? clrCursor : Ui::rgba(55, 45, 80);
+            u32 tab1Brd = (resultsBottomTab == 1) ? clrCursor : Ui::rgba(55, 45, 80);
+
+            Ui::panel(8.0f, 48.0f, tabW, 19.0f, 0.18f, tab0Bg, tab0Brd);
+            drawCenteredText(textBuf, 8.0f + tabW * 0.5f, 57.5f, 0.30f, (resultsBottomTab == 0) ? clrWhite : clrMuted, "1. CURVA ESFUERZO", 0.22f);
+
+            Ui::panel(164.0f, 48.0f, tabW, 19.0f, 0.18f, tab1Bg, tab1Brd);
+            drawCenteredText(textBuf, 164.0f + tabW * 0.5f, 57.5f, 0.30f, (resultsBottomTab == 1) ? clrWhite : clrMuted, "2. RANKING LOCAL (SD)", 0.22f);
+
+            if (resultsBottomTab == 0) {
+                // VISTA 1: CURVA DE ESFUERZO (Strain Graph) + Historial de Fallos
+                Ui::panel(8.0f, 70.0f, 304.0f, 96.0f, 0.18f, Ui::rgba(18, 14, 28, 250), clrPrimary);
+
+                // Leyenda de marcas
+                if (isTaikoPlay) {
+                    drawText(textBuf, 184.0f, 73.0f, 0.26f, Ui::rgba(45, 160, 230), "o 可", 0.22f);
+                    drawText(textBuf, 240.0f, 73.0f, 0.26f, clrMiss, "x 不可", 0.22f);
+                } else {
+                    drawText(textBuf, 184.0f, 73.0f, 0.26f, clr100, "o 100", 0.22f);
+                    drawText(textBuf, 224.0f, 73.0f, 0.26f, clr50,  "o 50", 0.22f);
+                    drawText(textBuf, 260.0f, 73.0f, 0.26f, clrMiss,"x Miss", 0.22f);
+                }
+
+                float graphX = 12.0f, graphY = 82.0f, graphW = 296.0f, graphH = 68.0f;
+                int firstT = beatmap.firstObjectTime;
+                int lastT  = beatmap.lastObjectTime;
+                if (lastT <= firstT) lastT = firstT + 1000;
+                float totalSpan = static_cast<float>(lastT - firstT);
+
+                // Tramos de descanso sombreados en el gráfico
+                for (const auto& brk : beatmap.breaks) {
+                    if (brk.endTime > brk.startTime && brk.startTime >= firstT && brk.startTime <= lastT) {
+                        float bx0 = graphX + (std::max(0.0f, static_cast<float>(brk.startTime - firstT)) / totalSpan) * graphW;
+                        float bx1 = graphX + (std::min(totalSpan, static_cast<float>(brk.endTime - firstT)) / totalSpan) * graphW;
+                        if (bx1 > bx0) {
+                            C2D_DrawRectSolid(bx0, graphY, 0.19f, bx1 - bx0, graphH, Ui::rgba(40, 32, 65, 140));
+                            drawCenteredText(textBuf, (bx0 + bx1) * 0.5f, graphY + graphH * 0.5f, 0.24f, Ui::rgba(160, 150, 190), "BREAK", 0.20f);
+                        }
+                    }
+                }
+
+                // Gráfico Strain Graph relleno
+                Ui::strainGraph(graphX, graphY, graphW, graphH, 0.20f, beatmap.strainGraph, gradeClr, -1.0f);
+
+                // Dibujar marcas de fallos e imperfecciones sobre la línea temporal
+                for (const auto& ev : judgementHistory) {
+                    if (ev.state == HIT_300) continue;
+                    float rx = graphX + (std::max(0.0f, std::min(totalSpan, static_cast<float>(ev.time - firstT))) / totalSpan) * (graphW - 2.0f);
+                    if (ev.state == HIT_MISS) {
+                        float my = graphY + graphH - 4.0f;
+                        C2D_DrawLine(rx, graphY + 1.0f, Ui::rgba(240, 70, 70, 50), rx, my, Ui::rgba(240, 70, 70, 100), 1.0f, 0.23f);
+                        C2D_DrawLine(rx - 2.5f, my - 2.5f, clrMiss, rx + 2.5f, my + 2.5f, clrMiss, 1.8f, 0.26f);
+                        C2D_DrawLine(rx - 2.5f, my + 2.5f, clrMiss, rx + 2.5f, my - 2.5f, clrMiss, 1.8f, 0.26f);
+                    } else if (ev.state == HIT_50) {
+                        C2D_DrawCircleSolid(rx, graphY + graphH - 6.0f, 0.25f, 1.8f, clr50);
+                    } else if (ev.state == HIT_100) {
+                        C2D_DrawCircleSolid(rx, graphY + graphH - 10.0f, 0.24f, 1.4f, clr100);
+                    }
+                }
+
+                // Marcas de tiempo al pie del gráfico (0:00 y duración final)
+                drawText(textBuf, graphX + 2.0f, graphY + graphH - 8.0f, 0.22f, Ui::rgba(180, 175, 205), "0:00", 0.27f);
+                char durStr[16];
+                int totalSec = std::max(0, lastT / 1000);
+                std::snprintf(durStr, sizeof(durStr), "%d:%02d", totalSec / 60, totalSec % 60);
+                drawText(textBuf, graphX + graphW - 26.0f, graphY + graphH - 8.0f, 0.22f, Ui::rgba(180, 175, 205), durStr, 0.27f);
+            } else {
+                // VISTA 2: RANKING LOCAL (Top 5 en tarjeta SD)
+                Ui::panel(8.0f, 70.0f, 304.0f, 96.0f, 0.18f, Ui::rgba(18, 14, 28, 250), clrPrimary);
+                auto topScores = scoreMgr.getTopRecords(beatmap.filePath, 5, currentPlayMode);
+
+                if (topScores.empty()) {
+                    drawCenteredText(textBuf, 160.0f, 118.0f, 0.36f, clrMuted, "¡Aun no hay puntuaciones guardadas en la SD!", 0.25f);
+                } else {
+                    for (size_t s = 0; s < topScores.size() && s < 5; ++s) {
+                        const auto& r = topScores[s];
+                        float ry = 73.0f + s * 18.2f;
+                        bool isCur = (r.bestScore == score && r.bestCombo == maxCombo && std::abs(r.bestAcc - acc) < 0.05f);
+                        u32 rowBg = isCur ? Ui::rgba(65, 45, 95, 230) : ((s % 2 == 0) ? Ui::rgba(24, 20, 36, 200) : Ui::rgba(18, 15, 28, 200));
+                        u32 rkClr = (s == 0) ? Ui::rgba(255, 215, 60) : ((s == 1) ? Ui::rgba(220, 230, 245) : ((s == 2) ? Ui::rgba(215, 145, 80) : clrMuted));
+
+                        Ui::pill(12.0f, ry, 296.0f, 16.5f, 0.20f, rowBg);
+                        if (isCur) {
+                            drawRectOutline(12.0f, ry, 296.0f, 16.5f, 1.0f, Ui::rgba(255, 215, 60, 220), 0.22f);
+                        }
+
+                        char rkStr[8];
+                        std::snprintf(rkStr, sizeof(rkStr), "#%d", static_cast<int>(s + 1));
+                        drawText(textBuf, 16.0f, ry + 2.0f, 0.28f, rkClr, rkStr, 0.25f);
+
+                        char scStr[32];
+                        std::snprintf(scStr, sizeof(scStr), "%07d", r.bestScore);
+                        drawText(textBuf, 44.0f, ry + 2.0f, 0.30f, clrWhite, scStr, 0.25f);
+
+                        char cmbStr[24];
+                        std::snprintf(cmbStr, sizeof(cmbStr), "%dx", r.bestCombo);
+                        drawText(textBuf, 114.0f, ry + 2.0f, 0.27f, clrCursor, cmbStr, 0.25f);
+
+                        char accStr[24];
+                        std::snprintf(accStr, sizeof(accStr), "%.1f%%", r.bestAcc);
+                        drawText(textBuf, 166.0f, ry + 2.0f, 0.27f, clr300, accStr, 0.25f);
+
+                        if (r.bestMods != MOD_NONE) {
+                            std::string mStr = formatModsString(r.bestMods);
+                            drawText(textBuf, 218.0f, ry + 2.0f, 0.24f, clrMuted, mStr.c_str(), 0.25f);
+                        }
+
+                        Ui::pill(282.0f, ry + 1.5f, 20.0f, 13.5f, 0.22f, Ui::rgba(35, 28, 52));
+                        drawCenteredText(textBuf, 292.0f, ry + 8.0f, 0.28f, clrWhite, r.bestGrade.c_str(), 0.26f);
+                    }
+                }
             }
+
+            // 3. Tarjeta inferior de Logro / Estado
+            if (newRecordAchieved) {
+                float flash = 0.70f + 0.30f * std::sin(animTick * 0.18f);
+                Ui::gradH(8.0f, 172.0f, 304.0f, 44.0f, 0.20f,
+                          Ui::rgba(90, 32, 110, static_cast<u8>(240.0f * flash)),
+                          Ui::rgba(30, 18, 55, 245));
+                drawRectOutline(8.0f, 172.0f, 304.0f, 44.0f, 1.2f, Ui::withAlpha(clrCursor, static_cast<u8>(255.0f * flash)), 0.25f);
+                Ui::pill(16.0f, 177.0f, 140.0f, 16.0f, 0.26f, Ui::rgba(255, 102, 171, 230));
+                drawCenteredText(textBuf, 86.0f, 185.0f, 0.34f, clrWhite, "¡NUEVO RECORD PERSONAL!", 0.28f);
+
+                char recSub[64];
+                std::snprintf(recSub, sizeof(recSub), "Guardado en leaderboard local  •  %d combo max", maxCombo);
+                drawText(textBuf, 16.0f, 199.0f, 0.28f, clr100, recSub, 0.28f);
+            } else {
+                Ui::panel(8.0f, 172.0f, 304.0f, 44.0f, 0.20f, Ui::rgba(22, 18, 34, 240));
+                char statSummary[96];
+                std::snprintf(statSummary, sizeof(statSummary), "Combo Maximo: %d / %d   •   UR: %.1f",
+                              maxCombo, beatmap.maxPossibleCombo, lastUnstableRate);
+                drawText(textBuf, 16.0f, 179.0f, 0.34f, clrWhite, statSummary, 0.25f);
+                drawText(textBuf, 16.0f, 198.0f, 0.28f, clrMuted,
+                         stageFailed ? "Partida no completada. ¡Vuelve a intentarlo!" : "Partida completada con exito.", 0.25f);
+            }
+
+            // Atajos
+            Ui::gradV(0.0f, 220.0f, 320.0f, 20.0f, 0.22f, Ui::rgba(14, 11, 24, 0), Ui::rgba(14, 11, 24, 240));
+            drawCenteredText(textBuf, 160.0f, 230.0f, 0.30f, clr300, "X: Cambiar Vista  |  A: Reintentar  |  B: Canciones", 0.28f);
+
+            Ui::drawTransition(320.0f, 240.0f, screenFade, gradeClr);
             C3D_FrameEnd(0);
             continue;
         }
@@ -1331,7 +4396,9 @@ int main(int argc, char* argv[]) {
         // =========================================================
         // 5. JUEGO ACTIVO + MENÚ DE PAUSA CORREGIDO
         // =========================================================
-        if (kDown & (KEY_START | KEY_SELECT)) {
+        bool isTaikoPlay = (settings.gameMode == MODE_TAIKO || beatmap.mode == 1);
+
+        if (kDown & KEY_START) {
             if (!isPaused) {
                 isPaused = true;
                 pauseOption = 0;
@@ -1352,6 +4419,14 @@ int main(int argc, char* argv[]) {
             if (kDown & KEY_DDOWN) {
                 pauseOption = (pauseOption + 1) % 3;
                 audio.playHitSound(0);
+            }
+            if (isTaikoPlay) {
+                bool touchBgToggle = touchJustDown && (touch.px >= 40 && touch.px <= 280 && touch.py >= 204 && touch.py <= 238);
+                if ((kDown & KEY_X) || touchBgToggle) {
+                    settings.taikoBgMode = (settings.taikoBgMode + 1) % 3;
+                    settings.save();
+                    audio.playHitSound(2);
+                }
             }
 
             bool triggerPauseAction = (kDown & KEY_A) != 0;
@@ -1380,6 +4455,8 @@ int main(int argc, char* argv[]) {
                     continue;
                 } else if (pauseOption == 2) {
                     audio.stopMusic();
+                    videoPlayer.closeVideo();
+                    applyActiveSkinAudio();
                     appState = STATE_SONG_SELECT;
                     updateSongPreview();
                     continue;
@@ -1390,17 +4467,203 @@ int main(int argc, char* argv[]) {
         }
 
         int songTime = audio.getTimeMs() - settings.audioOffsetMs;
-        bool isAutoplay = (settings.activeMods & MOD_AUTO) != 0;
-        bool isHidden   = (settings.activeMods & MOD_HD) != 0;
-        bool isNoFail   = (settings.activeMods & MOD_NF) != 0;
-        float scoreMult = getModsScoreMultiplier(settings.activeMods);
+        if (settings.enableVideo) {
+            videoPlayer.update(songTime, isPaused);
+        }
+        bool isAutoplay    = (settings.activeMods & MOD_AUTO) != 0;
+        bool isHidden      = (settings.activeMods & MOD_HD) != 0;
+        bool isNoFail      = (settings.activeMods & MOD_NF) != 0;
+        bool isSuddenDeath = (settings.activeMods & MOD_SD) != 0;
+        bool isPerfect     = (settings.activeMods & MOD_PF) != 0;
+        bool isFlashlight  = (settings.activeMods & MOD_FL) != 0;
+        bool isRelax       = (settings.activeMods & MOD_RX) != 0;
+        bool isAutoPilot   = (settings.activeMods & MOD_AP) != 0;
+        bool isSpunOut     = (settings.activeMods & MOD_SO) != 0;
+        float scoreMult    = getModsScoreMultiplier(settings.activeMods);
+        float speedRate    = getModsSpeedMultiplier(settings.activeMods);
+        isTaikoPlay        = (settings.gameMode == MODE_TAIKO || beatmap.mode == 1);
+        bool isCatchPlay   = (settings.gameMode == MODE_CATCH || beatmap.mode == 2);
+        bool isManiaPlay   = (settings.gameMode == MODE_MANIA || beatmap.mode == 3);
 
-        u32 btnGroup1 = KEY_L | KEY_DLEFT | KEY_A | KEY_X | (settings.tapWithStylus ? KEY_TOUCH : 0);
-        u32 btnGroup2 = KEY_R | KEY_ZL | KEY_ZR | KEY_DDOWN | KEY_DUP | KEY_DRIGHT | KEY_B | KEY_Y;
+        // 1. Evaluar si estamos en período de Descanso (Break Time)
+        inBreakPeriod = false;
+        breakRemainingMs = 0;
+        breakTotalMs = 0;
+        for (const auto& brk : beatmap.breaks) {
+            if (songTime >= brk.startTime && songTime <= brk.endTime) {
+                inBreakPeriod = true;
+                breakRemainingMs = brk.endTime - songTime;
+                breakTotalMs = std::max(1, brk.endTime - brk.startTime);
+                break;
+            }
+        }
+
+        // Buscar coordenadas del siguiente objeto para el indicador de advertencia
+        for (const auto& obj : beatmap.circles) {
+            if (obj.time > songTime) {
+                breakNextObjPos = {obj.x, obj.y};
+                break;
+            }
+        }
+
+        // 2. Evaluar disponibilidad de SKIP (Intro o Descanso largo)
+        skipAvailable = false;
+        skipTargetMs = 0;
+        if (!beatmap.circles.empty()) {
+            int firstNoteTime = beatmap.circles.front().time;
+            int introWait = firstNoteTime - static_cast<int>(beatmap.diff.preempt) - 1000;
+            if (introWait > songTime + 2200) {
+                skipAvailable = true;
+                skipTargetMs = introWait;
+            }
+        }
+        if (!skipAvailable && inBreakPeriod && breakRemainingMs > 2600) {
+            skipAvailable = true;
+            skipTargetMs = songTime + breakRemainingMs - 1200;
+        }
+
+        // 3. Procesar activación de SKIP (Toque táctil o botones ZL / ZR / START)
+        bool touchOnSkip = (touchJustDown || isTouching) && (touch.px >= 195 && touch.px <= 318 && touch.py >= 185 && touch.py <= 240);
+        bool btnSkip = (kDown & (KEY_ZL | KEY_ZR | KEY_START)) != 0;
+        if (skipAvailable && !isPaused && (touchOnSkip || btnSkip)) {
+            audio.playHitSound(2);
+            audio.seekToMs(skipTargetMs);
+            songTime = audio.getTimeMs() - settings.audioOffsetMs;
+            lastNcStep = -999999;
+            if (settings.enableVideo) {
+                videoPlayer.update(songTime, isPaused);
+            }
+            skipAvailable = false;
+            kDown &= ~(KEY_ZL | KEY_ZR | KEY_START | KEY_TOUCH);
+            touchJustDown = false;
+            isTouching = false;
+            cursorTrail.clear();
+        }
+
+        // 3b. Procesar activación de REINICIO RÁPIDO (Solo botón físico asignado como SELECT)
+        bool btnRetry = (kDown & settings.keyQuickRetry) != 0;
+        if (!isPaused && btnRetry) {
+            audio.playHitSound(2);
+            startSelectedBeatmap();
+            continue;
+        }
+
+        // 4. Animación y detección de superación de récord en vivo (In-Game Leaderboard)
+        if (!localRecords.empty() && !hasOvertakenBest) {
+            if (score > localRecords[0].bestScore) {
+                hasOvertakenBest = true;
+                overtakeFlashAnim = 1.0f;
+                audio.playHitSound(2);
+                spawnParticles(256.0f, 192.0f, clr100, 16, 1.2f, 3.6f, 2.6f, 22);
+            }
+        }
+        if (overtakeFlashAnim > 0.01f) {
+            overtakeFlashAnim = Ui::approach(overtakeFlashAnim, 0.0f, 0.035f);
+        }
+
+        if (taikoGuideTimer > 0.0f && !isPaused) {
+            taikoGuideTimer -= 1.0f;
+        }
+        float taikoGuideAlpha = (taikoGuideTimer > 60.0f) ? 1.0f : (taikoGuideTimer / 60.0f);
+        if (taikoGuideAlpha < 0.0f) taikoGuideAlpha = 0.0f;
+
+        // 5. Gestion del Efecto Kiai Time (Climax de la cancion con particulas luminosas y resplandor ritmico)
+        bool nowKiai = beatmap.isKiaiAt(songTime);
+        if (nowKiai && !prevInKiai) {
+            kiaiBurstFlash = 1.0f;
+            // Estallido inicial de estrellas y chispas al entrar en Kiai Time
+            for (int i = 0; i < 20; ++i) {
+                float sx = 30.0f + static_cast<float>(std::rand() % 452);
+                float sy = 370.0f;
+                float spd = 2.2f + static_cast<float>(std::rand() % 100) / 35.0f;
+                float ang = -static_cast<float>(M_PI) * (0.28f + 0.44f * (static_cast<float>(std::rand() % 100) / 100.0f));
+                u32 pClr = (i % 2 == 0) ? Ui::rgba(255, 215, 60) : Ui::rgba(255, 110, 185);
+                particles.push_back({
+                    sx * SCALE_FACTOR, sy * SCALE_FACTOR,
+                    std::cos(ang) * spd, std::sin(ang) * spd,
+                    3.2f, pClr, 38, 38
+                });
+            }
+        }
+        prevInKiai = nowKiai;
+        inKiai = nowKiai;
+
+        float targetKiai = inKiai ? 1.0f : 0.0f;
+        kiaiGlow = Ui::approach(kiaiGlow, targetKiai, inKiai ? 0.08f : 0.035f);
+        if (kiaiBurstFlash > 0.01f) {
+            kiaiBurstFlash = Ui::approach(kiaiBurstFlash, 0.0f, 0.045f);
+        }
+
+        // 5b. Ritmo Nightcore (NC): Bombo (kick), caja (clap), charles (hat) y platillo sincronizados al compas
+        if ((settings.activeMods & MOD_NC) && !isPaused && !stageFailed && !inBreakPeriod && songTime >= 0 && !audio.isSongFinished()) {
+            double tpTime = 0.0;
+            float beatLen = 500.0f;
+            beatmap.getBeatInfoAt(songTime, tpTime, beatLen);
+            if (beatLen > 10.0f) {
+                double elapsed = static_cast<double>(songTime) - tpTime;
+                int step = static_cast<int>(std::floor(elapsed / (beatLen * 0.5f)));
+                if (step > lastNcStep) {
+                    if (lastNcStep == -999999 || (step - lastNcStep) > 8) {
+                        lastNcStep = step;
+                    } else {
+                        for (int s = lastNcStep + 1; s <= step; ++s) {
+                            if ((s % 2) == 0) {
+                                // Tiempo principal (compas 4/4)
+                                int beatInBar = ((s / 2) % 4 + 4) % 4;
+                                if (beatInBar == 0 || beatInBar == 2) {
+                                    audio.playNcKick();
+                                } else {
+                                    audio.playNcClap();
+                                }
+                                // Cada 4 compases remate de platillo dance
+                                if (((s / 2) % 16) == 0) {
+                                    audio.playNcCrash();
+                                }
+                            } else {
+                                // Contratiempo (corchea): charles rapido
+                                audio.playNcHat();
+                            }
+                        }
+                        lastNcStep = step;
+                    }
+                }
+            }
+        }
+
+        // Generar chispas / estrellas flotantes continuas durante Kiai
+        if (inKiai && !isPaused && (animTick % 5 == 0) && particles.size() < 48) {
+            float sx = 20.0f + static_cast<float>(std::rand() % 472);
+            float sy = 375.0f;
+            float spd = 1.4f + static_cast<float>(std::rand() % 100) / 55.0f;
+            float ang = -static_cast<float>(M_PI) * (0.32f + 0.36f * (static_cast<float>(std::rand() % 100) / 100.0f));
+            u32 pClr = ((animTick / 5) % 2 == 0) ? Ui::rgba(255, 225, 70) : Ui::rgba(255, 115, 190);
+            particles.push_back({
+                sx * SCALE_FACTOR, sy * SCALE_FACTOR,
+                std::cos(ang) * spd, std::sin(ang) * spd,
+                2.5f, pClr, 32, 32
+            });
+        }
+
+        auto triggerSuddenDeathFail = [&]() {
+            hp = 0.0f;
+            stageFailed = true;
+            lastEarnedPP = 0.0f;
+            audio.stopMusic();
+            videoPlayer.closeVideo();
+            appState = STATE_RESULTS;
+        };
+
+        bool tapWithTouch = settings.playOnBottomScreen || settings.tapWithStylus;
+        u32 btnGroup1 = settings.keyOsuK1 | (tapWithTouch ? KEY_TOUCH : 0);
+        u32 btnGroup2 = settings.keyOsuK2;
         bool k1Held = (kHeld & btnGroup1) != 0;
         bool k2Held = (kHeld & btnGroup2) != 0;
         bool anyHeld = (k1Held || k2Held);
         bool kActionDown = (kDown & (btnGroup1 | btnGroup2)) != 0;
+        if (!isPaused && !isAutoplay) {
+            if (kDown & btnGroup1) k1PressCount++;
+            if (kDown & btnGroup2) k2PressCount++;
+        }
 
         if (!isPaused) {
             if (isAutoplay) {
@@ -1443,18 +4706,67 @@ int main(int argc, char* argv[]) {
                         break;
                     }
                 }
+            } else if (isAutoPilot) {
+                // Mod AutoPilot: apuntado automático a las notas mientras el jugador pulsa las teclas
+                for (size_t i = 0; i < beatmap.circles.size(); ++i) {
+                    const auto& obj = beatmap.circles[i];
+                    bool done = obj.isSlider ? obj.sliderDone :
+                               (obj.isSpinner ? obj.sliderDone : (obj.state != NOT_HIT));
+                    if (done) continue;
+
+                    if (obj.isSpinner && songTime >= obj.time && songTime <= obj.endTime) {
+                        float spinAng = songTime * 0.035f;
+                        cursorOsuX = 256.0f + std::cos(spinAng) * 55.0f;
+                        cursorOsuY = 192.0f + std::sin(spinAng) * 55.0f;
+                        break;
+                    } else if (obj.isSlider && songTime >= obj.time && songTime <= obj.endTime) {
+                        Vec2 ball = obj.getSliderBallPos(songTime);
+                        cursorOsuX = ball.x;
+                        cursorOsuY = ball.y;
+                        break;
+                    } else {
+                        float dt = static_cast<float>(obj.time - songTime);
+                        if (dt <= 0.0f) {
+                            cursorOsuX = obj.x;
+                            cursorOsuY = obj.y;
+                        } else if (dt < beatmap.diff.preempt) {
+                            float lerpFactor = 0.35f;
+                            cursorOsuX += (obj.x - cursorOsuX) * lerpFactor;
+                            cursorOsuY += (obj.y - cursorOsuY) * lerpFactor;
+                        }
+                        break;
+                    }
+                }
             } else if (isTouching) {
-                settings.mapTouchToOsu(touch.px, touch.py, cursorOsuX, cursorOsuY);
+                bool touchingSkip = skipAvailable && (touch.px >= 195 && touch.px <= 318 && touch.py >= 185 && touch.py <= 240);
+                if (!touchingSkip) {
+                    settings.mapTouchToOsu(touch.px, touch.py, cursorOsuX, cursorOsuY);
+                }
             }
 
-            // Actualizar estela del cursor (Cursor Trail)
+            // Actualizar estela dinámica y fluida del cursor (Dynamic Cursor Trail con sub-interpolación)
+            float cdx = cursorOsuX - prevCursorOsuX;
+            float cdy = cursorOsuY - prevCursorOsuY;
+            float cdist = std::sqrt(cdx * cdx + cdy * cdy);
+
             if (activeSkin.cursorTrail) {
-                if (cursorTrail.empty() ||
-                    std::fabs(cursorTrail.back().x - cursorOsuX) > 1.5f ||
-                    std::fabs(cursorTrail.back().y - cursorOsuY) > 1.5f) {
-                    cursorTrail.push_back({cursorOsuX, cursorOsuY, 12});
-                    if (cursorTrail.size() > 14) cursorTrail.erase(cursorTrail.begin());
+                const int trailMaxLife = 18;
+                if (cdist > 1.2f) {
+                    int subSteps = std::max(1, std::min(8, static_cast<int>(cdist / 4.5f)));
+                    for (int s = 1; s <= subSteps; ++s) {
+                        float t = static_cast<float>(s) / static_cast<float>(subSteps);
+                        float ix = prevCursorOsuX + cdx * t;
+                        float iy = prevCursorOsuY + cdy * t;
+                        cursorTrail.push_back({ix, iy, trailMaxLife, trailMaxLife});
+                    }
+                    if (cursorTrail.size() > 42) {
+                        cursorTrail.erase(cursorTrail.begin(), cursorTrail.begin() + (cursorTrail.size() - 42));
+                    }
+                } else if (cursorTrail.empty() || std::fabs(cursorTrail.back().x - cursorOsuX) > 0.5f || std::fabs(cursorTrail.back().y - cursorOsuY) > 0.5f) {
+                    cursorTrail.push_back({cursorOsuX, cursorOsuY, trailMaxLife, trailMaxLife});
+                    if (cursorTrail.size() > 42) cursorTrail.erase(cursorTrail.begin());
                 }
+
                 for (size_t t = 0; t < cursorTrail.size(); ) {
                     cursorTrail[t].life--;
                     if (cursorTrail[t].life <= 0) cursorTrail.erase(cursorTrail.begin() + t);
@@ -1463,13 +4775,49 @@ int main(int argc, char* argv[]) {
             } else {
                 cursorTrail.clear();
             }
+            prevCursorOsuX = cursorOsuX;
+            prevCursorOsuY = cursorOsuY;
+
+            // Actualizar Humo (Smoke) estilo osu! 'C' (activado manteniendo el botón asignado en Ajustes)
+            bool smokeActive = (kHeld & settings.keyOsuSmoke) != 0;
+            if (smokeActive && !isPaused) {
+                if (smokeParticles.size() < 240) {
+                    for (int sm = 0; sm < 2; ++sm) {
+                        float rndX = ((std::rand() % 100) - 50) * 0.04f;
+                        float rndY = ((std::rand() % 100) - 50) * 0.04f;
+                        float driftX = ((std::rand() % 100) - 50) * 0.006f;
+                        float driftY = -0.045f - (static_cast<float>(std::rand() % 100) * 0.0004f);
+                        float initSize = 4.8f + (std::rand() % 20) * 0.12f;
+                        int sLife = 170 + (std::rand() % 50); // ~3.5 segundos
+                        smokeParticles.push_back({
+                            cursorOsuX + rndX, cursorOsuY + rndY,
+                            driftX, driftY,
+                            initSize, sLife, sLife
+                        });
+                    }
+                }
+            }
+
+            for (size_t sm = 0; sm < smokeParticles.size(); ) {
+                auto& sp = smokeParticles[sm];
+                sp.life--;
+                sp.x += sp.vx;
+                sp.y += sp.vy;
+                sp.vx *= 0.985f;
+                sp.size += 0.042f; // El humo se expande suavemente al disiparse
+                if (sp.life <= 0) {
+                    smokeParticles.erase(smokeParticles.begin() + sm);
+                } else {
+                    ++sm;
+                }
+            }
 
             float hitRadius = beatmap.diff.radiusOsu;
             float hit50     = beatmap.diff.hit50;
             float hit100    = beatmap.diff.hit100;
             float hit300    = beatmap.diff.hit300;
 
-            if (!beatmap.circles.empty() && songTime >= beatmap.circles.front().time &&
+            if (!inBreakPeriod && !beatmap.circles.empty() && songTime >= beatmap.circles.front().time &&
                 songTime <= beatmap.circles.back().endTime) {
                 hp -= (0.00018f * beatmap.diff.hp);
                 if (hp <= 0.0f) {
@@ -1480,6 +4828,7 @@ int main(int argc, char* argv[]) {
                         stageFailed = true;
                         lastEarnedPP = 0.0f;
                         audio.stopMusic();
+                        videoPlayer.closeVideo();
                         appState = STATE_RESULTS;
                         continue;
                     }
@@ -1487,8 +4836,422 @@ int main(int argc, char* argv[]) {
             }
 
             bool allObjectsDone = true;
+            bool anyActiveSpinner = false;
 
-            for (auto& obj : beatmap.circles) {
+            if (isTaikoPlay) {
+                float bpmPulse = getBpmPulse();
+                taikoEngine.update(bpmPulse);
+
+                // 1. Evaluar Misses de notas pasadas
+                int tMisses = taikoEngine.checkMisses(songTime, hit50, isAutoplay);
+                if (tMisses > 0) {
+                    countMiss += tMisses;
+                    combo = 0;
+                    hp = std::max(0.0f, hp - (0.10f * tMisses));
+                    triggerShake(3.0f, 10.0f);
+                    audio.playComboBreak();
+                    popups.push_back(HitPopup(ModeTaiko::TARGET_X, ModeTaiko::TRACK_Y, HIT_MISS, 24.0f, clrMiss, 24));
+                    if (isSuddenDeath || isPerfect) {
+                        triggerSuddenDeathFail();
+                    }
+                }
+
+                // 2. Procesar inputs de Don y Katsu
+                bool donDown = false;
+                bool katsuDown = false;
+
+                if (isAutoplay) {
+                    if (!taikoEngine.notes.empty()) {
+                        for (size_t i = taikoEngine.nextNoteIndex; i < taikoEngine.notes.size(); ++i) {
+                            auto& tn = taikoEngine.notes[i];
+                            if (tn.state != NOT_HIT) continue;
+                            if (tn.type == TAIKO_DRUMROLL || tn.type == TAIKO_DENDEN) {
+                                if (songTime >= tn.time && songTime <= tn.endTime) {
+                                    if (animTick % 4 == 0) {
+                                        donDown = true;
+                                        if ((animTick / 4) % 2 == 0) taikoEngine.drumHitDonLeft = 1.0f;
+                                        else taikoEngine.drumHitDonRight = 1.0f;
+                                    }
+                                    break;
+                                }
+                            } else {
+                                if (songTime >= tn.time - 8) {
+                                    bool isDon = (tn.type == TAIKO_DON || tn.type == TAIKO_BIG_DON);
+                                    if (isDon) {
+                                        donDown = true;
+                                        if (i % 2 == 0) taikoEngine.drumHitDonLeft = 1.0f;
+                                        else taikoEngine.drumHitDonRight = 1.0f;
+                                    } else {
+                                        katsuDown = true;
+                                        if (i % 2 == 0) taikoEngine.drumHitKatsuLeft = 1.0f;
+                                        else taikoEngine.drumHitKatsuRight = 1.0f;
+                                    }
+                                    break;
+                                } else {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    // Controles físicos asignados con animación del tambor según el botón pulsado
+                    if (kDown & settings.keyTaikoDonLeft) {
+                        donDown = true;
+                        taikoEngine.drumHitDonLeft = 1.0f;
+                    }
+                    if (kDown & settings.keyTaikoDonRight) {
+                        donDown = true;
+                        taikoEngine.drumHitDonRight = 1.0f;
+                    }
+                    if (kDown & settings.keyTaikoKatsuLeft) {
+                        katsuDown = true;
+                        taikoEngine.drumHitKatsuLeft = 1.0f;
+                    }
+                    if (kDown & settings.keyTaikoKatsuRight) {
+                        katsuDown = true;
+                        taikoEngine.drumHitKatsuRight = 1.0f;
+                    }
+                    if (!donDown && (kDown & settings.keyTaikoDon)) {
+                        donDown = true;
+                        taikoEngine.drumHitDonLeft = 1.0f;
+                    }
+                    if (!katsuDown && (kDown & settings.keyTaikoKatsu)) {
+                        katsuDown = true;
+                        taikoEngine.drumHitKatsuLeft = 1.0f;
+                    }
+
+                    // Entrada táctil en el tambor interactivo
+                    if (touchJustDown) {
+                        bool touchOnSkip = skipAvailable && (touch.px >= 195 && touch.px <= 318 && touch.py >= 185 && touch.py <= 240);
+                        if (!touchOnSkip) {
+                            int zone = taikoEngine.handleTouchDrum(touch.px, touch.py);
+                            if (zone == 1 || zone == 2) donDown = true;
+                            else if (zone == 3 || zone == 4) katsuDown = true;
+                        }
+                    }
+                }
+
+                if (donDown || katsuDown) {
+                    if (donDown) k1PressCount++;
+                    if (katsuDown) k2PressCount++;
+
+                    bool isBigNote = false;
+                    if (taikoEngine.nextNoteIndex > 0 && taikoEngine.nextNoteIndex <= taikoEngine.notes.size()) {
+                        const auto& lastN = taikoEngine.notes[taikoEngine.nextNoteIndex - 1];
+                        isBigNote = (lastN.type == TAIKO_BIG_DON || lastN.type == TAIKO_BIG_KATSU);
+                    }
+
+                    auto playTaikoSfx = [&]() {
+                        if (donDown) audio.playTaikoDon(isBigNote);
+                        else if (katsuDown) audio.playTaikoKatsu(isBigNote);
+                    };
+
+                    int hitRes = taikoEngine.processHit(donDown, false, songTime, hit300, hit100, hit50, isAutoplay);
+                    if (hitRes == ModeTaiko::TAIKO_HIT_300) {
+                        count300++;
+                        combo++;
+                        if (combo > maxCombo) maxCombo = combo;
+                        score += static_cast<int>((300 + 300 * combo * 0.05f) * scoreMult);
+                        hp = std::min(1.0f, hp + 0.05f);
+                        playTaikoSfx();
+                        if (combo > 0 && (combo % 50 == 0)) audio.playTaikoBalloonPop();
+                        popups.push_back(HitPopup(ModeTaiko::TARGET_X, ModeTaiko::TRACK_Y, HIT_300, 24.0f, clr300, 24));
+                        spawnParticles(ModeTaiko::TARGET_X, ModeTaiko::TRACK_Y, donDown ? ModeTaiko::CLR_DON_INNER : ModeTaiko::CLR_KATSU_INNER, 6, 0.8f, 2.4f, 2.2f, 15);
+                    } else if (hitRes == ModeTaiko::TAIKO_HIT_100) {
+                        count100++;
+                        combo++;
+                        if (combo > maxCombo) maxCombo = combo;
+                        score += static_cast<int>((100 + 100 * combo * 0.05f) * scoreMult);
+                        hp = std::min(1.0f, hp + 0.02f);
+                        playTaikoSfx();
+                        if (combo > 0 && (combo % 50 == 0)) audio.playTaikoBalloonPop();
+                        popups.push_back(HitPopup(ModeTaiko::TARGET_X, ModeTaiko::TRACK_Y, HIT_100, 20.0f, clr100, 24));
+                        spawnParticles(ModeTaiko::TARGET_X, ModeTaiko::TRACK_Y, clr100, 4, 0.6f, 1.8f, 2.0f, 12);
+                        if (isPerfect) triggerSuddenDeathFail();
+                    } else if (hitRes == ModeTaiko::TAIKO_HIT_TICK || hitRes == ModeTaiko::TAIKO_HIT_DENDEN) {
+                        // Tick de redoble o denden estilo oficial Taiko: otorga puntos y combo, SIN penalizar la precisión
+                        combo++;
+                        if (combo > maxCombo) maxCombo = combo;
+                        score += static_cast<int>(300 * scoreMult);
+                        hp = std::min(1.0f, hp + 0.015f);
+                        if (taikoEngine.balloonPopTimer > 0.95f) {
+                            audio.playTaikoBalloonPop();
+                        } else {
+                            playTaikoSfx();
+                        }
+                        spawnParticles(ModeTaiko::TARGET_X, ModeTaiko::TRACK_Y, Ui::rgba(255, 220, 60), 4, 0.8f, 2.4f, 2.2f, 12);
+                    } else if (hitRes == ModeTaiko::TAIKO_HIT_MISS) {
+                        countMiss++;
+                        combo = 0;
+                        hp = std::max(0.0f, hp - 0.12f);
+                        triggerShake(3.0f, 10.0f);
+                        audio.playComboBreak();
+                        popups.push_back(HitPopup(ModeTaiko::TARGET_X, ModeTaiko::TRACK_Y, HIT_MISS, 24.0f, clrMiss, 26));
+                        if (isSuddenDeath || isPerfect) triggerSuddenDeathFail();
+                    } else {
+                        playTaikoSfx();
+                    }
+                }
+
+                allObjectsDone = (taikoEngine.nextNoteIndex >= taikoEngine.notes.size());
+            } else if (isManiaPlay) {
+                maniaEngine.update(0.016f);
+
+                // 1. Evaluar Misses de notas pasadas
+                int mMisses = maniaEngine.checkMisses(songTime, hit50);
+                if (mMisses > 0) {
+                    countMiss += mMisses;
+                    combo = 0;
+                    hp = std::max(0.0f, hp - (0.08f * mMisses));
+                    triggerShake(3.0f, 10.0f);
+                    popups.push_back(HitPopup(ModeMania::TRACK_X + ModeMania::COL_WIDTH * 2.0f, ModeMania::HIT_Y - 20.0f, HIT_MISS, 24.0f, clrMiss, 24));
+                    if (isSuddenDeath || isPerfect) {
+                        triggerSuddenDeathFail();
+                    }
+                }
+
+                // 2. Procesar inputs en las 4 columnas
+                bool colDown[4] = { false, false, false, false };
+                bool colUp[4]   = { false, false, false, false };
+
+                if (isAutoplay) {
+                    for (size_t i = maniaEngine.nextNoteIndex; i < maniaEngine.notes.size(); ++i) {
+                        auto& mn = maniaEngine.notes[i];
+                        if (mn.fullyCompleted) continue;
+                        if (songTime >= mn.time && !mn.headJudged) {
+                            colDown[mn.column] = true;
+                        }
+                        if (mn.isHold && mn.isHolding) {
+                            maniaEngine.colPressed[mn.column] = true;
+                            if (songTime >= mn.endTime) {
+                                colUp[mn.column] = true;
+                            }
+                        }
+                    }
+                } else {
+                    // Controles físicos por columna
+                    if (kDown & settings.keyManiaCol1) colDown[0] = true;
+                    if (kDown & settings.keyManiaCol2) colDown[1] = true;
+                    if (kDown & settings.keyManiaCol3) colDown[2] = true;
+                    if (kDown & settings.keyManiaCol4) colDown[3] = true;
+
+                    if (kUp & settings.keyManiaCol1) colUp[0] = true;
+                    if (kUp & settings.keyManiaCol2) colUp[1] = true;
+                    if (kUp & settings.keyManiaCol3) colUp[2] = true;
+                    if (kUp & settings.keyManiaCol4) colUp[3] = true;
+
+                    // Ajuste de Scroll Speed al vuelo en Mania
+                    if (kDown & (KEY_ZL | KEY_CPAD_DOWN)) {
+                        maniaEngine.adjustScrollSpeed(-0.1f);
+                        audio.playHitSound(0);
+                    } else if (kDown & (KEY_ZR | KEY_CPAD_UP)) {
+                        maniaEngine.adjustScrollSpeed(+0.1f);
+                        audio.playHitSound(0);
+                    } else if (kHeld & KEY_SELECT) {
+                        if (kDown & KEY_DDOWN) {
+                            maniaEngine.adjustScrollSpeed(-0.1f);
+                            audio.playHitSound(0);
+                        } else if (kDown & KEY_DUP) {
+                            maniaEngine.adjustScrollSpeed(+0.1f);
+                            audio.playHitSound(0);
+                        }
+                    }
+
+                    // Entrada táctil en el teclado de la pantalla inferior
+                    if (isTouching) {
+                        int tCol = maniaEngine.handleTouch(touch.px, touch.py, true);
+                        if (tCol >= 0 && tCol <= 3) {
+                            if (touchJustDown || maniaEngine.lastTouchCol != tCol) {
+                                colDown[tCol] = true;
+                            }
+                        }
+                    }
+                    if (touchJustUp && maniaEngine.lastTouchCol >= 0) {
+                        colUp[maniaEngine.lastTouchCol] = true;
+                        maniaEngine.handleTouch(0.0f, 0.0f, false);
+                    }
+                }
+
+                // 3. Procesar liberaciones (Key Releases) para colas de Hold Notes
+                for (int c = 0; c < 4; ++c) {
+                    if (colUp[c]) {
+                        int relRes = maniaEngine.processKeyRelease(c, songTime, hit300, hit100, hit50);
+                        float popX = ModeMania::TRACK_X + (c + 0.5f) * ModeMania::COL_WIDTH;
+                        if (relRes == 300) {
+                            count300++;
+                            combo++;
+                            if (combo > maxCombo) maxCombo = combo;
+                            score += static_cast<int>((300 + 300 * combo * 0.05f) * scoreMult);
+                            hp = std::min(1.0f, hp + 0.04f);
+                            audio.playHitSound(c % 2);
+                            popups.push_back(HitPopup(popX, ModeMania::HIT_Y - 20.0f, HIT_300, 22.0f, clr300, 22));
+                        } else if (relRes == 100) {
+                            count100++;
+                            combo++;
+                            if (combo > maxCombo) maxCombo = combo;
+                            score += static_cast<int>((100 + 100 * combo * 0.05f) * scoreMult);
+                            hp = std::min(1.0f, hp + 0.02f);
+                            audio.playHitSound(c % 2);
+                            popups.push_back(HitPopup(popX, ModeMania::HIT_Y - 20.0f, HIT_100, 20.0f, clr100, 22));
+                            if (isPerfect) triggerSuddenDeathFail();
+                        } else if (relRes == -1) {
+                            countMiss++;
+                            combo = 0;
+                            hp = std::max(0.0f, hp - 0.08f);
+                            triggerShake(3.0f, 10.0f);
+                            audio.playHitSound(c % 2);
+                            popups.push_back(HitPopup(popX, ModeMania::HIT_Y - 20.0f, HIT_MISS, 22.0f, clrMiss, 24));
+                            if (isSuddenDeath || isPerfect) triggerSuddenDeathFail();
+                        }
+                    }
+                }
+
+                // 4. Procesar pulsaciones (Key Presses)
+                for (int c = 0; c < 4; ++c) {
+                    if (colDown[c]) {
+                        k1PressCount++;
+                        int hitRes = maniaEngine.processKeyPress(c, songTime, hit300, hit100, hit50);
+                        float popX = ModeMania::TRACK_X + (c + 0.5f) * ModeMania::COL_WIDTH;
+                        u32 pClr = (c == 0 || c == 3) ? ModeMania::CLR_COL_OUTER : ModeMania::CLR_COL_INNER;
+
+                        if (hitRes == 300) {
+                            count300++;
+                            combo++;
+                            if (combo > maxCombo) maxCombo = combo;
+                            score += static_cast<int>((300 + 300 * combo * 0.05f) * scoreMult);
+                            hp = std::min(1.0f, hp + 0.04f);
+                            audio.playHitSound(c % 2);
+                            popups.push_back(HitPopup(popX, ModeMania::HIT_Y - 20.0f, HIT_300, 24.0f, clr300, 24));
+                            spawnParticles(popX, ModeMania::HIT_Y, pClr, 6, 0.8f, 2.2f, 2.0f, 15);
+                        } else if (hitRes == 100) {
+                            count100++;
+                            combo++;
+                            if (combo > maxCombo) maxCombo = combo;
+                            score += static_cast<int>((100 + 100 * combo * 0.05f) * scoreMult);
+                            hp = std::min(1.0f, hp + 0.02f);
+                            audio.playHitSound(c % 2);
+                            popups.push_back(HitPopup(popX, ModeMania::HIT_Y - 20.0f, HIT_100, 20.0f, clr100, 24));
+                            spawnParticles(popX, ModeMania::HIT_Y, clr100, 4, 0.6f, 1.8f, 1.8f, 12);
+                            if (isPerfect) triggerSuddenDeathFail();
+                        } else if (hitRes == 50) {
+                            count50++;
+                            combo++;
+                            if (combo > maxCombo) maxCombo = combo;
+                            score += static_cast<int>((50 + 50 * combo * 0.05f) * scoreMult);
+                            hp = std::min(1.0f, hp + 0.01f);
+                            audio.playHitSound(c % 2);
+                            popups.push_back(HitPopup(popX, ModeMania::HIT_Y - 20.0f, HIT_50, 18.0f, clr50, 22));
+                            if (isPerfect) triggerSuddenDeathFail();
+                        } else {
+                            audio.playHitSound(c % 2);
+                        }
+                    }
+                }
+
+                // 5. Actualizar notas largas sostenidas y ticks
+                int holdTicks = 0;
+                int completeLN = maniaEngine.updateActiveHolds(songTime, holdTicks);
+                if (holdTicks > 0) {
+                    combo += holdTicks;
+                    if (combo > maxCombo) maxCombo = combo;
+                    score += static_cast<int>(10 * holdTicks * scoreMult);
+                    hp = std::min(1.0f, hp + 0.005f * holdTicks);
+                }
+                if (completeLN == 300) {
+                    count300++;
+                    combo++;
+                    if (combo > maxCombo) maxCombo = combo;
+                    score += static_cast<int>((300 + 300 * combo * 0.05f) * scoreMult);
+                    hp = std::min(1.0f, hp + 0.04f);
+                    popups.push_back(HitPopup(ModeMania::TRACK_X + ModeMania::COL_WIDTH * 2.0f, ModeMania::HIT_Y - 20.0f, HIT_300, 24.0f, clr300, 24));
+                }
+
+                allObjectsDone = (maniaEngine.nextNoteIndex >= maniaEngine.notes.size());
+            } else if (isCatchPlay) {
+                // 1. Controles y Movimiento del Catcher
+                float moveInput = 0.0f;
+                bool dashInput = false;
+                float analogX = 0.0f;
+
+                if (isAutoplay) {
+                    // Autoplay de Catch: se desplaza automáticamente hacia la próxima fruta activa
+                    for (size_t i = catchEngine.nextFruitIndex; i < catchEngine.fruits.size(); ++i) {
+                        const auto& f = catchEngine.fruits[i];
+                        if (f.state != NOT_HIT) continue;
+                        float diff = f.x - catchEngine.catcherX;
+                        if (std::abs(diff) > 2.0f) {
+                            moveInput = (diff > 0.0f) ? 1.0f : -1.0f;
+                            if (std::abs(diff) > 40.0f) dashInput = true;
+                        } else {
+                            catchEngine.catcherX = f.x;
+                        }
+                        break;
+                    }
+                    catchEngine.update(16.0f, moveInput, dashInput, 0.0f, songTime, speedRate);
+                } else {
+                    if (kHeld & settings.keyCatchLeft)  moveInput -= 1.0f;
+                    if (kHeld & settings.keyCatchRight) moveInput += 1.0f;
+                    if (kHeld & settings.keyCatchDash)  dashInput = true;
+
+                    // Soporte de palanca analógica Circle Pad para desplazamiento suave
+                    if (std::abs(cpad.dx) > 20) {
+                        analogX = static_cast<float>(cpad.dx) / 150.0f;
+                        if (std::abs(cpad.dx) > 130) dashInput = true;
+                    }
+
+                    // Soporte táctil en pantalla inferior
+                    if (isTouching) {
+                        catchEngine.handleTouch(touch.px, touch.py, true);
+                    } else if (touchJustUp) {
+                        catchEngine.handleTouch(0.0f, 0.0f, false);
+                    }
+
+                    catchEngine.update(16.0f, moveInput, dashInput, analogX, songTime, speedRate);
+                }
+
+                // 2. Comprobar capturas y fallos de frutas
+                int scoreAdd = 0;
+                int comboAdd = 0;
+                float hpAdd = 0.0f;
+                int hitResult = catchEngine.checkCatches(songTime, hit50, scoreAdd, comboAdd, hpAdd);
+
+                if (hitResult > 0) {
+                    if (hitResult == 300 || hitResult == 1100) count300++;
+                    else if (hitResult == 100) count100++;
+                    else if (hitResult == 10) count50++;
+
+                    combo += comboAdd;
+                    if (combo > maxCombo) maxCombo = combo;
+                    score += static_cast<int>((scoreAdd + (scoreAdd * combo * 0.035f)) * scoreMult);
+                    hp = std::max(0.0f, std::min(1.0f, hp + hpAdd));
+
+                    // Sonido y feedback de captura
+                    audio.playHitSound((hitResult == 1100) ? 2 : (hitResult == 100 ? 1 : 0));
+                    float fruitScrX = catchEngine.toScreenX(catchEngine.catcherX);
+                    if (hitResult == 300) {
+                        spawnParticles(fruitScrX, ModeCatch::PLATE_Y, Ui::rgba(255, 100, 140), 5, 0.8f, 2.2f, 2.0f, 14);
+                    } else if (hitResult == 1100) {
+                        spawnParticles(fruitScrX, ModeCatch::PLATE_Y, ModeCatch::CLR_BANANA, 8, 1.0f, 2.8f, 2.2f, 18);
+                        popups.push_back(HitPopup(fruitScrX, ModeCatch::PLATE_Y - 25.0f, HIT_300, 24.0f, ModeCatch::CLR_BANANA, 24));
+                    }
+                } else if (hitResult == -1) {
+                    // ¡MISS de fruta grande!
+                    countMiss++;
+                    combo = 0;
+                    hp = std::max(0.0f, hp + hpAdd);
+                    triggerShake(3.5f, 12.0f);
+                    float fruitScrX = catchEngine.toScreenX(catchEngine.catcherX);
+                    popups.push_back(HitPopup(fruitScrX, ModeCatch::PLATE_Y - 20.0f, HIT_MISS, 24.0f, clrMiss, 24));
+                    if (isSuddenDeath || isPerfect) {
+                        triggerSuddenDeathFail();
+                    }
+                } else if (hpAdd != 0.0f) {
+                    hp = std::max(0.0f, std::min(1.0f, hp + hpAdd));
+                }
+
+                allObjectsDone = (catchEngine.nextFruitIndex >= catchEngine.fruits.size());
+            } else {
+                for (auto& obj : beatmap.circles) {
                 bool thisObjDone = obj.isSlider ? obj.sliderDone :
                                   (obj.isSpinner ? obj.sliderDone : (obj.state != NOT_HIT));
                 if (!thisObjDone) allObjectsDone = false;
@@ -1500,25 +5263,82 @@ int main(int argc, char* argv[]) {
                     200
                 );
 
-                // 1. Evaluar Spinners activos
+                // 1. Evaluar Spinners activos (con RPM, Bonus +1000, CLEAR! y soporte Stylus / Circle Pad / C-Stick / SpunOut)
                 if (obj.isSpinner && !obj.sliderDone && songTime >= obj.time) {
-                    if (((anyHeld || !settings.tapWithStylus) && isTouching) || isAutoplay) {
-                        float ang = std::atan2(cursorOsuY - 192.0f, cursorOsuX - 256.0f);
+                    anyActiveSpinner = true;
+                    float instantRPM = 0.0f;
+                    bool stickSpin = (!isTouching && (std::abs(cpad.dx) > 28 || std::abs(cpad.dy) > 28 ||
+                                                      std::abs(cstick.dx) > 25 || std::abs(cstick.dy) > 25));
+                    if (isSpunOut && !isAutoplay) {
+                        float dAng = 0.092f;
+                        obj.spinnerProgress += dAng;
+                        obj.spinnerRotAngle += dAng;
+                        instantRPM = 286.0f;
+                        cursorOsuX = 256.0f + std::cos(obj.spinnerRotAngle) * 52.0f;
+                        cursorOsuY = 192.0f + std::sin(obj.spinnerRotAngle) * 52.0f;
+                        if (animTick % 2 == 0) {
+                            float spkR = 56.0f;
+                            float sx = 256.0f + std::cos(obj.spinnerRotAngle) * spkR;
+                            float sy = 192.0f + std::sin(obj.spinnerRotAngle) * spkR;
+                            spawnParticles(sx, sy, obj.spinnerCleared ? clrCursor : clr300, 1, 0.6f, 1.8f, 2.1f, 12);
+                        }
+                    } else if (((anyHeld || !settings.tapWithStylus) && isTouching) || stickSpin || isAutoplay) {
+                        float ang = 0.0f;
+                        if (stickSpin && !isAutoplay) {
+                            float sx = (std::abs(cstick.dx) > 25 || std::abs(cstick.dy) > 25) ? static_cast<float>(cstick.dx) : static_cast<float>(cpad.dx);
+                            float sy = (std::abs(cstick.dx) > 25 || std::abs(cstick.dy) > 25) ? static_cast<float>(-cstick.dy) : static_cast<float>(-cpad.dy);
+                            ang = std::atan2(sy, sx);
+                            cursorOsuX = 256.0f + std::cos(ang) * 52.0f;
+                            cursorOsuY = 192.0f + std::sin(ang) * 52.0f;
+                        } else {
+                            ang = std::atan2(cursorOsuY - 192.0f, cursorOsuX - 256.0f);
+                        }
                         if (obj.spinnerAngleInit) {
                             float dAng = ang - obj.lastSpinnerAngle;
                             while (dAng >  static_cast<float>(M_PI)) dAng -= 2.0f * static_cast<float>(M_PI);
                             while (dAng < -static_cast<float>(M_PI)) dAng += 2.0f * static_cast<float>(M_PI);
-                            obj.spinnerProgress += std::fabs(dAng);
+                            float absDAng = std::fabs(dAng);
+                            obj.spinnerProgress += absDAng;
+                            obj.spinnerRotAngle += dAng;
+                            instantRPM = std::min(480.0f, (absDAng / (2.0f * static_cast<float>(M_PI))) * 3600.0f);
+
+                            if (absDAng > 0.05f && (animTick % 2 == 0)) {
+                                float spkR = 56.0f;
+                                float sx = 256.0f + std::cos(obj.spinnerRotAngle) * spkR;
+                                float sy = 192.0f + std::sin(obj.spinnerRotAngle) * spkR;
+                                spawnParticles(sx, sy, obj.spinnerCleared ? clrCursor : clr300, 1, 0.6f, 1.8f, 2.1f, 12);
+                            }
                         }
                         obj.lastSpinnerAngle = ang;
                         obj.spinnerAngleInit = true;
                     } else {
                         obj.spinnerAngleInit = false;
                     }
+                    spinnerRPM = spinnerRPM * 0.84f + instantRPM * 0.16f;
+
+                    float clearTarget = std::max(3.14f, obj.spinnerRequiredRads * 0.65f);
+                    if (obj.spinnerProgress >= clearTarget || isAutoplay) {
+                        if (!obj.spinnerCleared) {
+                            obj.spinnerCleared = true;
+                            spinnerClearAnim = 1.0f;
+                            audio.playHitSound(2);
+                            spawnParticles(256.0f, 192.0f, clrCursor, 12, 1.2f, 3.2f, 2.6f, 18);
+                        }
+                        int extraSpins = static_cast<int>((obj.spinnerProgress - clearTarget) / static_cast<float>(M_PI));
+                        while (obj.spinnerBonusCount < extraSpins) {
+                            obj.spinnerBonusCount++;
+                            score += static_cast<int>(1000 * scoreMult);
+                            hp = std::min(1.0f, hp + 0.02f);
+                            lastSpinnerBonus = obj.spinnerBonusCount * 1000;
+                            spinnerBonusAnim = 1.0f;
+                            audio.playHitSound(2);
+                            spawnParticles(256.0f, 192.0f, clr300, 6, 1.0f, 2.6f, 2.2f, 14);
+                        }
+                    }
 
                     if (songTime >= obj.endTime) {
                         obj.sliderDone = true;
-                        if (obj.spinnerProgress >= obj.spinnerRequiredRads * 0.65f || isAutoplay) {
+                        if (obj.spinnerProgress >= clearTarget || isAutoplay) {
                             obj.state = HIT_300;
                             audio.playHitSound(obj.hitSound);
                             combo++;
@@ -1526,6 +5346,7 @@ int main(int argc, char* argv[]) {
                             score += static_cast<int>((300 + 300 * combo * 0.05f) * scoreMult);
                             count300++;
                             hp = std::min(1.0f, hp + 0.08f);
+                            judgementHistory.push_back({obj.endTime, HIT_300, 0.0f});
                         } else if (obj.spinnerProgress >= obj.spinnerRequiredRads * 0.35f) {
                             obj.state = HIT_100;
                             audio.playHitSound(obj.hitSound);
@@ -1534,11 +5355,22 @@ int main(int argc, char* argv[]) {
                             score += static_cast<int>(100 * scoreMult);
                             count100++;
                             hp = std::min(1.0f, hp + 0.04f);
+                            judgementHistory.push_back({obj.endTime, HIT_100, 0.0f});
+                            if (isPerfect) {
+                                triggerSuddenDeathFail();
+                                break;
+                            }
                         } else {
                             obj.state = HIT_MISS;
                             combo = 0;
                             countMiss++;
                             hp = std::max(0.0f, hp - 0.12f);
+                            triggerShake(3.2f, 11.0f);
+                            judgementHistory.push_back({obj.endTime, HIT_MISS, 0.0f});
+                            if (isSuddenDeath || isPerfect) {
+                                triggerSuddenDeathFail();
+                                break;
+                            }
                         }
                         popups.push_back(HitPopup(256.0f, 192.0f, obj.state, hitRadius * SCALE_FACTOR, objBurstClr, 20));
                     }
@@ -1552,7 +5384,12 @@ int main(int argc, char* argv[]) {
                     float dy = cursorOsuY - ballPos.y;
                     float dist = std::sqrt(dx * dx + dy * dy);
 
-                    obj.sliderTracking = isAutoplay || (anyHeld && dist <= hitRadius * 2.4f);
+                    obj.sliderTracking = isAutoplay || (anyHeld && dist <= hitRadius * 2.4f) || (isRelax && dist <= hitRadius * 2.4f);
+
+                    if (obj.sliderTracking && (animTick % 2 == 0)) {
+                        u32 spkClr = (animTick % 4 == 0) ? clrCursor : objBurstClr;
+                        spawnParticles(ballPos.x, ballPos.y, spkClr, 1, 0.4f, 1.5f, 2.0f, 12);
+                    }
 
                     // Evaluar Slider Ticks intermedios
                     for (auto& tk : obj.sliderTicks) {
@@ -1563,6 +5400,7 @@ int main(int argc, char* argv[]) {
                                 if (combo > maxCombo) maxCombo = combo;
                                 score += static_cast<int>(10 * scoreMult);
                                 hp = std::min(1.0f, hp + 0.015f);
+                                spawnParticles(tk.x, tk.y, clr300, 5, 0.7f, 2.0f, 2.2f, 13);
                             }
                         }
                     }
@@ -1579,6 +5417,7 @@ int main(int argc, char* argv[]) {
                                 if (combo > maxCombo) maxCombo = combo;
                                 score += static_cast<int>(30 * scoreMult);
                                 hp = std::min(1.0f, hp + 0.02f);
+                                spawnParticles(ballPos.x, ballPos.y, clrCursor, 7, 0.8f, 2.3f, 2.3f, 14);
                             }
                         }
                     }
@@ -1592,13 +5431,21 @@ int main(int argc, char* argv[]) {
                             score += static_cast<int>((300 + 300 * combo * 0.05f) * scoreMult);
                             count300++;
                             hp = std::min(1.0f, hp + 0.05f);
+                            judgementHistory.push_back({obj.endTime, HIT_300, 0.0f});
                             popups.push_back(HitPopup(ballPos.x, ballPos.y, HIT_300, hitRadius * SCALE_FACTOR, objBurstClr, 18));
+                            spawnParticles(ballPos.x, ballPos.y, objBurstClr, 7, 0.8f, 2.3f, 2.3f, 15);
                         } else if (obj.state == NOT_HIT) {
                             obj.state = HIT_MISS;
                             combo = 0;
                             countMiss++;
                             hp = std::max(0.0f, hp - 0.10f);
+                            judgementHistory.push_back({obj.endTime, HIT_MISS, 0.0f});
                             popups.push_back(HitPopup(ballPos.x, ballPos.y, HIT_MISS, hitRadius * SCALE_FACTOR, clrMiss, 22));
+                            triggerShake(2.8f, 9.0f);
+                            if (isSuddenDeath || isPerfect) {
+                                triggerSuddenDeathFail();
+                                break;
+                            }
                         }
                     }
                 }
@@ -1611,12 +5458,29 @@ int main(int argc, char* argv[]) {
                     combo = 0;
                     countMiss++;
                     hp = std::max(0.0f, hp - 0.12f);
+                    judgementHistory.push_back({obj.time, HIT_MISS, 0.0f});
                     popups.push_back(HitPopup(obj.x, obj.y, HIT_MISS, hitRadius * SCALE_FACTOR, clrMiss, 22));
+                    triggerShake(2.8f, 9.0f);
+                    if (isSuddenDeath || isPerfect) {
+                        triggerSuddenDeathFail();
+                        break;
+                    }
                     continue;
                 }
 
-                // 4. Evaluar golpe (Tap) en la nota
+                // 4. Evaluar golpe (Tap) en la nota (con soporte para Mod Relax)
+                if (isRelax && !isAutoplay && !kActionDown) {
+                    float dx = cursorOsuX - obj.x;
+                    float dy = cursorOsuY - obj.y;
+                    float dist = std::sqrt(dx * dx + dy * dy);
+                    int timeDelta = std::abs(songTime - obj.time);
+                    if (dist <= hitRadius * 1.15f && timeDelta <= hit100) {
+                        kActionDown = true;
+                    }
+                }
+
                 if (kActionDown) {
+                    float signedErrMs = isAutoplay ? 0.0f : static_cast<float>(songTime - obj.time);
                     int timeDelta = isAutoplay ? 0 : std::abs(songTime - obj.time);
                     if (timeDelta <= hit50) {
                         float dx = cursorOsuX - obj.x;
@@ -1634,28 +5498,114 @@ int main(int argc, char* argv[]) {
                                 score += static_cast<int>((100 + 100 * combo * 0.05f) * scoreMult);
                                 count100++;
                                 hp = std::min(1.0f, hp + 0.025f);
+                                if (isPerfect) {
+                                    triggerSuddenDeathFail();
+                                    break;
+                                }
                             } else {
                                 obj.state = HIT_50;
                                 score += static_cast<int>((50 + 50 * combo * 0.05f) * scoreMult);
                                 count50++;
+                                if (isPerfect) {
+                                    triggerSuddenDeathFail();
+                                    break;
+                                }
                             }
                             int headSound = obj.isSlider ? obj.getEdgeHitSound(0) : obj.hitSound;
                             audio.playHitSound(headSound);
                             combo++;
                             if (combo > maxCombo) maxCombo = combo;
                             if (obj.isSlider) obj.sliderTracking = true;
+                            judgementHistory.push_back({obj.time, obj.state, signedErrMs});
                             popups.push_back(HitPopup(obj.x, obj.y, obj.state, hitRadius * SCALE_FACTOR, objBurstClr, 18));
+                            spawnParticles(obj.x, obj.y, (obj.state == HIT_300) ? objBurstClr : clr100,
+                                           (obj.state == HIT_300) ? 7 : 4, 0.8f, 2.4f, 2.3f, 15);
+
+                            // Registrar marca en el Hit Error Meter y estadisticas de UR
+                            hitErrorTicks.push_back({signedErrMs, obj.state, 210});
+                            if (hitErrorTicks.size() > 28) hitErrorTicks.erase(hitErrorTicks.begin());
+                            allHitErrors.push_back(signedErrMs);
+                            hitErrorNeedle = hitErrorNeedle * 0.78f + signedErrMs * 0.22f;
+
+                            if (isAutoplay) k1PressCount++;
                             kActionDown = false;
                             break;
                         }
                     }
                 }
             }
+        }
 
-            if ((allObjectsDone && !beatmap.circles.empty() &&
-                 songTime > beatmap.circles.back().endTime + 1000) ||
+            if (appState == STATE_RESULTS) continue;
+
+            if (!anyActiveSpinner) {
+                spinnerRPM = Ui::approach(spinnerRPM, 0.0f, 0.25f);
+                lastSpinnerBonus = 0;
+            }
+            spinnerClearAnim = Ui::approach(spinnerClearAnim, 0.0f, 0.08f);
+            spinnerBonusAnim = Ui::approach(spinnerBonusAnim, 0.0f, 0.07f);
+
+            // Actualizar particulas de Sliders / Hits
+            for (size_t p = 0; p < particles.size(); ) {
+                particles[p].x += particles[p].vx;
+                particles[p].y += particles[p].vy;
+                particles[p].vy += 0.035f;
+                particles[p].life--;
+                if (particles[p].life <= 0) particles.erase(particles.begin() + p);
+                else ++p;
+            }
+
+            // Envejecer marcas del Hit Error Meter
+            for (size_t t = 0; t < hitErrorTicks.size(); ) {
+                hitErrorTicks[t].life--;
+                if (hitErrorTicks[t].life <= 0) hitErrorTicks.erase(hitErrorTicks.begin() + t);
+                else ++t;
+            }
+
+            // Envejecer popups de calificacion (300 / 100 / 50 / X) una vez por frame logico
+            for (size_t i = 0; i < popups.size(); ) {
+                popups[i].timer--;
+                if (popups[i].timer <= 0) popups.erase(popups.begin() + i);
+                else ++i;
+            }
+
+            // Animaciones y sonido de Combo Pop, Combo Break, Combo Burst y Screen Shake
+            if (combo > prevCombo) {
+                comboScale = 1.45f;
+                checkComboBurst(combo);
+            } else if (combo < prevCombo) {
+                lastComboBurstMilestone = 0;
+                if (prevCombo >= 5) {
+                    comboBreakAnim = 1.0f;
+                    lastBrokenCombo = prevCombo;
+                    audio.playComboBreak();
+                    triggerShake(4.2f, 14.0f);
+                }
+            }
+            prevCombo = combo;
+            comboScale = Ui::approach(comboScale, 1.0f, 0.18f);
+            comboBreakAnim = Ui::approach(comboBreakAnim, 0.0f, 0.06f);
+            if (comboBurstTimer > 0) comboBurstTimer--;
+
+            if (shakeTimer > 0.0f) {
+                shakeTimer = std::max(0.0f, shakeTimer - 1.0f);
+                float damp = shakeTimer / 14.0f;
+                shakeX = std::sin(animTick * 2.3f) * shakeIntensity * damp;
+                shakeY = std::cos(animTick * 2.9f) * shakeIntensity * damp;
+            } else {
+                shakeX = 0.0f;
+                shakeY = 0.0f;
+                shakeIntensity = 0.0f;
+            }
+
+            int songEndTime = isTaikoPlay ? (!taikoEngine.notes.empty() ? taikoEngine.notes.back().endTime : 0)
+                            : isCatchPlay ? (!catchEngine.fruits.empty() ? catchEngine.fruits.back().time : 0)
+                            : isManiaPlay ? (!maniaEngine.notes.empty() ? maniaEngine.notes.back().endTime : 0)
+                            : (!beatmap.circles.empty() ? beatmap.circles.back().endTime : 0);
+            if ((allObjectsDone && songEndTime > 0 && songTime > songEndTime + 1000) ||
                 audio.isSongFinished()) {
                 audio.stopMusic();
+                videoPlayer.closeVideo();
 
                 int totalJudged = count300 + count100 + count50 + countMiss;
                 float acc = (totalJudged > 0)
@@ -1668,6 +5618,21 @@ int main(int argc, char* argv[]) {
                 else if (acc >= 75.0f) grade = "B";
                 else if (acc >= 65.0f) grade = "C";
 
+                if (!allHitErrors.empty()) {
+                    float sum = 0.0f;
+                    for (float e : allHitErrors) sum += e;
+                    lastMeanHitError = sum / static_cast<float>(allHitErrors.size());
+                    float varSum = 0.0f;
+                    for (float e : allHitErrors) {
+                        float d = e - lastMeanHitError;
+                        varSum += d * d;
+                    }
+                    lastUnstableRate = std::sqrt(varSum / static_cast<float>(allHitErrors.size())) * 10.0f;
+                } else {
+                    lastMeanHitError = 0.0f;
+                    lastUnstableRate = 0.0f;
+                }
+
                 lastEarnedPP = calculatePP(
                     beatmap.starRating,
                     beatmap.diff.ar,
@@ -1678,30 +5643,22 @@ int main(int argc, char* argv[]) {
                     settings.activeMods
                 );
 
+                int currentPlayMode = isTaikoPlay ? 1 : isCatchPlay ? 2 : isManiaPlay ? 3 : 0;
                 newRecordAchieved = scoreMgr.submitScore(
-                    beatmap.filePath, score, maxCombo, acc, grade, settings.activeMods, lastEarnedPP
+                    beatmap.filePath, score, maxCombo, acc, grade, settings.activeMods, lastEarnedPP, currentPlayMode
                 );
+                if (newRecordAchieved && songMgr.sortMode == SORT_BY_RECORD) {
+                    songMgr.applySortAndFilter(&scoreMgr);
+                }
                 appState = STATE_RESULTS;
                 continue;
             }
         }
 
         // =========================================================
-        // RENDERIZADO DE LA PARTIDA
+        // RENDERIZADO DE LA PARTIDA (SOPORTA 3D EN PANTALLA SUPERIOR Y JUEGO TÁCTIL 1:1 EN PANTALLA INFERIOR)
         // =========================================================
         C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
-
-        // --- PANTALLA SUPERIOR ---
-        C2D_TargetClear(topScreen, clrBgDark);
-        C2D_SceneBegin(topScreen);
-
-        if (bgTex.loaded) {
-            bgTex.drawRect(TOP_OFFSET_X, 0.0f, 320.0f, 240.0f, 0.01f, 255);
-            u8 dimAlpha = static_cast<u8>((settings.bgDim * 255) / 100);
-            C2D_DrawRectSolid(TOP_OFFSET_X, 0.0f, 0.02f, 320.0f, 240.0f, C2D_Color32(14, 12, 22, dimAlpha));
-        } else {
-            C2D_DrawRectSolid(TOP_OFFSET_X, 0.0f, 0.0f, 320.0f, 240.0f, clrPlayfield);
-        }
 
         float hitRadius = beatmap.diff.radiusOsu;
         float preempt   = beatmap.diff.preempt;
@@ -1712,341 +5669,1135 @@ int main(int argc, char* argv[]) {
         const std::vector<RGBColor>& activePalette =
             !beatmap.customComboColors.empty() ? beatmap.customComboColors : activeSkin.comboColors;
 
-        // 0. Follow Points entre notas consecutivas del mismo combo
-        for (size_t i = 0; i + 1 < beatmap.circles.size(); ++i) {
-            const auto& a = beatmap.circles[i];
-            const auto& b = beatmap.circles[i + 1];
-            if (a.isSpinner || b.isSpinner || b.comboNumber == 1) continue;
-            if (songTime < b.time - preempt || songTime > b.time) continue;
+        auto renderPlayfield = [&](float screenW, float baseOffsetX, float baseOffsetY, float eyeSign, float slider3DVal, bool drawFullHud) {
+            auto depthShift = [&](float px) { return eyeSign * slider3DVal * px; };
 
-            Vec2 startPos = a.getEndPosition();
-            float x0 = osuToTopX(startPos.x);
-            float y0 = osuToTopY(startPos.y);
-            float x1 = osuToTopX(b.x);
-            float y1 = osuToTopY(b.y);
-            float dx = x1 - x0;
-            float dy = y1 - y0;
-            float dist = std::sqrt(dx * dx + dy * dy);
-            if (dist > rScreen * 2.4f) {
-                u32 fpColor = C2D_Color32(255, 255, 255, 70);
-                float tStart = (rScreen * 0.9f) / dist;
-                float tEnd   = 1.0f - (rScreen * 0.9f) / dist;
-                C2D_DrawLine(
-                    x0 + dx * tStart, y0 + dy * tStart, fpColor,
-                    x0 + dx * tEnd,   y0 + dy * tEnd,   fpColor,
-                    1.0f, 0.05f
-                );
+            float dBg        = depthShift(-4.0f);
+            float dPlayfield = depthShift(0.4f);
+            float dSlider    = depthShift(2.6f);
+            float dCircle    = depthShift(2.6f);
+            float dFrontHud  = depthShift(3.6f);
+            float dCursor    = depthShift(4.6f);
+
+            auto playX = [&](float osuX, float dOffset = 0.0f) { return baseOffsetX + (osuX * SCALE_FACTOR) + shakeX + dOffset; };
+            auto playY = [&](float osuY) { return baseOffsetY + (osuY * SCALE_FACTOR) + shakeY; };
+
+            bool renderVideoNow = settings.enableVideo && videoPlayer.shouldRender();
+            if (isTaikoPlay && settings.taikoBgMode == 1) {
+                renderVideoNow = false; // Forzar imagen en vez de video
             }
-        }
 
-        for (int i = static_cast<int>(beatmap.circles.size()) - 1; i >= 0; --i) {
-            const auto& obj = beatmap.circles[i];
-
-            bool visible = false;
-            if (obj.isSpinner) {
-                visible = (songTime >= (obj.time - 400) && !obj.sliderDone);
-            } else if (obj.isSlider) {
-                visible = (songTime >= (obj.time - preempt) && !obj.sliderDone);
+            if (renderVideoNow) {
+                videoPlayer.drawRect(shakeX * 0.5f + dBg, shakeY * 0.5f, screenW, 240.0f, 0.01f);
+                u8 dimAlpha = static_cast<u8>((settings.bgDim * 255) / 100);
+                C2D_DrawRectSolid(0.0f, 0.0f, 0.02f, screenW, 240.0f, C2D_Color32(10, 8, 18, dimAlpha));
+            } else if (bgTex.loaded) {
+                bgTex.drawRect(shakeX * 0.5f + dBg, shakeY * 0.5f, screenW, 240.0f, 0.01f, 255);
+                u8 dimAlpha = static_cast<u8>((settings.bgDim * 255) / 100);
+                C2D_DrawRectSolid(0.0f, 0.0f, 0.02f, screenW, 240.0f, C2D_Color32(10, 8, 18, dimAlpha));
             } else {
-                visible = (songTime >= (obj.time - preempt) && obj.state == NOT_HIT);
+                Ui::backdrop(screenW, 240.0f, static_cast<float>(animTick), Ui::rgba(24, 16, 42), Ui::rgba(10, 8, 18), clrPrimary, 0.01f);
+                C2D_DrawRectSolid(baseOffsetX + shakeX + dPlayfield, baseOffsetY + shakeY, 0.02f, PLAYFIELD_W, PLAYFIELD_H, Ui::withAlpha(clrPlayfield, 210));
             }
-            if (!visible) continue;
-
-            // Calcular opacidad (Fade-In normal y Fade-Out en modo Hidden HD)
-            float alphaMult = 1.0f;
-            float timeSinceAppear = static_cast<float>(songTime - (obj.time - preempt));
-            if (timeSinceAppear < fadeIn && fadeIn > 1.0f) {
-                alphaMult = std::max(0.0f, std::min(1.0f, timeSinceAppear / fadeIn));
+            // Marco sutil del playfield 4:3 en zona segura (Safe Area - solo en modo Standard)
+            if (settings.showPlayfieldBorder && !isTaikoPlay && !isManiaPlay && !isCatchPlay) {
+                drawRectOutline(baseOffsetX + shakeX + dPlayfield, baseOffsetY + shakeY, PLAYFIELD_W, PLAYFIELD_H, 1.0f, Ui::rgba(255, 255, 255, 38), 0.03f);
             }
-            if (isHidden && !obj.isSpinner) {
-                float fadeOutStart = preempt * 0.4f;
-                float fadeOutEnd   = preempt * 0.72f;
-                if (timeSinceAppear > fadeOutStart) {
-                    float t = (timeSinceAppear - fadeOutStart) / std::max(1.0f, fadeOutEnd - fadeOutStart);
-                    alphaMult = std::max(0.0f, 1.0f - t);
-                }
+            if (comboBreakAnim > 0.01f) {
+                u8 cbAlpha = static_cast<u8>(comboBreakAnim * 110.0f);
+                drawRectOutline(0.0f, 0.0f, screenW, 240.0f, 4.0f, Ui::rgba(255, 60, 75, cbAlpha), 0.85f);
             }
 
-            const auto& rgb = activePalette[obj.colorIndex % activePalette.size()];
-            u8 cAlpha = static_cast<u8>(235.0f * alphaMult);
-            u8 sAlpha = static_cast<u8>(165.0f * (isHidden ? std::max(0.25f, alphaMult) : 1.0f));
-            u32 cColor = C2D_Color32(rgb.r, rgb.g, rgb.b, cAlpha);
-            u32 sColor = activeSkin.hasSliderTrackOverride
-                ? C2D_Color32(activeSkin.sliderTrackColor.r, activeSkin.sliderTrackColor.g, activeSkin.sliderTrackColor.b, sAlpha)
-                : C2D_Color32(static_cast<u8>(rgb.r * 0.62f), static_cast<u8>(rgb.g * 0.62f), static_cast<u8>(rgb.b * 0.62f), sAlpha);
-            u32 ringClr = C2D_Color32(activeSkin.sliderBorderColor.r, activeSkin.sliderBorderColor.g, activeSkin.sliderBorderColor.b, cAlpha);
+            // Efectos de Kiai Time: Resplandor rítmico, viñetas de energía y destello inicial
+            float bpmPulse = getBpmPulse();
+            if (kiaiGlow > 0.01f) {
+                u8 glowAlpha = static_cast<u8>(kiaiGlow * (45.0f + 110.0f * bpmPulse));
+                if (!isTaikoPlay && !isManiaPlay && !isCatchPlay) {
+                    u32 kiaiBorderClr = Ui::rgba(255, 195, 75, glowAlpha);
+                    drawRectOutline(baseOffsetX + shakeX + dPlayfield - 1.0f, baseOffsetY + shakeY - 1.0f, PLAYFIELD_W + 2.0f, PLAYFIELD_H + 2.0f, 2.5f, kiaiBorderClr, 0.04f);
+                }
 
-            if (obj.isSpinner) {
-                float spX = osuToTopX(256.0f);
-                float spY = osuToTopY(192.0f);
-                float ratio = std::min(1.0f, obj.spinnerProgress / obj.spinnerRequiredRads);
-                drawRing(spX, spY, 75.0f * (1.0f - ratio * 0.7f), 2.5f, clr300, 28);
-                C2D_DrawCircleSolid(spX, spY, 0.25f, 6.0f, clrWhite);
-                continue;
+                float edgeH = (6.0f + 6.0f * bpmPulse) * kiaiGlow;
+                u8 vAlpha = static_cast<u8>(kiaiGlow * (35.0f + 45.0f * bpmPulse));
+                Ui::gradV(0.0f, 0.0f, screenW, edgeH, 0.04f, Ui::rgba(255, 120, 180, vAlpha), Ui::rgba(255, 120, 180, 0));
+                Ui::gradV(0.0f, 240.0f - edgeH, screenW, edgeH, 0.04f, Ui::rgba(255, 120, 180, 0), Ui::rgba(255, 120, 180, vAlpha));
+            }
+            if (kiaiBurstFlash > 0.01f) {
+                u8 fAlpha = static_cast<u8>(kiaiBurstFlash * 65.0f);
+                C2D_DrawRectSolid(0.0f, 0.0f, 0.82f, screenW, 240.0f, Ui::rgba(255, 240, 200, fAlpha));
             }
 
-            // 1. Cuerpo del Slider, Ticks, Flechas de Rebote y Bola
-            if (obj.isSlider && obj.sliderPath.size() >= 2) {
-                for (size_t p = 0; p + 1 < obj.sliderPath.size(); ++p) {
-                    float x0 = osuToTopX(obj.sliderPath[p].x);
-                    float y0 = osuToTopY(obj.sliderPath[p].y);
-                    float x1 = osuToTopX(obj.sliderPath[p + 1].x);
-                    float y1 = osuToTopY(obj.sliderPath[p + 1].y);
-                    C2D_DrawLine(x0, y0, sColor, x1, y1, sColor, rScreen * 1.7f, 0.1f);
-                    C2D_DrawCircleSolid(x1, y1, 0.1f, rScreen * 0.85f, sColor);
-                }
+            if (isTaikoPlay) {
+                int tJudged = count300 + count100 + count50 + countMiss;
+                float liveAcc = (tJudged > 0)
+                    ? ((count300 * 300.0f + count100 * 100.0f + count50 * 50.0f) / (tJudged * 300.0f)) * 100.0f
+                    : 100.0f;
+                taikoEngine.renderTopScreen(textBuf, songTime, speedRate, eyeSign, slider3DVal, inKiai, bpmPulse, combo, score, hp, liveAcc, beatmap.title.c_str(), beatmap.version.c_str(), settings.taikoBgMode);
+            } else if (isCatchPlay) {
+                catchEngine.renderTopScreen(textBuf, songTime, speedRate, eyeSign, slider3DVal, inKiai);
+            } else if (isManiaPlay) {
+                maniaEngine.renderTopScreen(textBuf, songTime, speedRate, eyeSign, slider3DVal, inKiai, bpmPulse);
+            } else {
+                // 0. Follow Points entre notas consecutivas del mismo combo
+                for (size_t i = 0; i + 1 < beatmap.circles.size(); ++i) {
+                const auto& a = beatmap.circles[i];
+                const auto& b = beatmap.circles[i + 1];
+                if (a.isSpinner || b.isSpinner || b.comboNumber == 1) continue;
+                if (songTime < b.time - preempt || songTime > b.time) continue;
 
-                float tailX = osuToTopX(obj.sliderPath.back().x);
-                float tailY = osuToTopY(obj.sliderPath.back().y);
-                drawRing(tailX, tailY, rScreen * 0.85f, 1.5f, ringClr, 16);
-
-                // Dibujar Slider Ticks pendientes
-                int curSpan = 0;
-                if (songTime > obj.time && obj.endTime > obj.time) {
-                    float slideDur = static_cast<float>(obj.endTime - obj.time) / obj.repeats;
-                    curSpan = static_cast<int>((songTime - obj.time) / slideDur);
-                }
-                for (const auto& tk : obj.sliderTicks) {
-                    if (!tk.hit && tk.time >= songTime - 50) {
-                        C2D_DrawCircleSolid(osuToTopX(tk.x), osuToTopY(tk.y), 0.18f, 2.2f, clrWhite);
-                    }
-                }
-
-                // Flecha de rebote (Reverse Arrow) si quedan repeticiones
-                if (obj.repeats > 1 && curSpan + 1 < obj.repeats) {
-                    bool arrowAtTail = (curSpan % 2 == 0);
-                    if (arrowAtTail) {
-                        const Vec2& pTip = obj.sliderPath.back();
-                        const Vec2& pPrev = obj.sliderPath[obj.sliderPath.size() - 2];
-                        drawReverseArrow(
-                            osuToTopX(pTip.x), osuToTopY(pTip.y),
-                            osuToTopX(pPrev.x), osuToTopY(pPrev.y),
-                            rScreen * 0.65f, clrWhite
-                        );
-                    } else {
-                        const Vec2& pTip = obj.sliderPath.front();
-                        const Vec2& pNext = obj.sliderPath[1];
-                        drawReverseArrow(
-                            osuToTopX(pTip.x), osuToTopY(pTip.y),
-                            osuToTopX(pNext.x), osuToTopY(pNext.y),
-                            rScreen * 0.65f, clrWhite
-                        );
-                    }
-                }
-
-                if (songTime >= obj.time && songTime <= obj.endTime) {
-                    Vec2 ballOsu = obj.getSliderBallPos(songTime);
-                    float bx = osuToTopX(ballOsu.x);
-                    float by = osuToTopY(ballOsu.y);
-                    C2D_DrawCircleSolid(bx, by, 0.35f, rScreen * 0.88f, C2D_Color32(rgb.r, rgb.g, rgb.b, 240));
-                    float followR = obj.sliderTracking ? (rScreen * 1.9f) : (rScreen * 1.3f);
-                    u32 followClr = obj.sliderTracking ? clrCursor : clrWhite;
-                    drawRing(bx, by, followR, 1.5f, followClr, 20);
+                Vec2 startPos = a.getEndPosition();
+                float x0 = playX(startPos.x, dPlayfield);
+                float y0 = playY(startPos.y);
+                float x1 = playX(b.x, dPlayfield);
+                float y1 = playY(b.y);
+                float dx = x1 - x0;
+                float dy = y1 - y0;
+                float dist = std::sqrt(dx * dx + dy * dy);
+                if (dist > rScreen * 2.4f) {
+                    u32 fpColor = C2D_Color32(255, 255, 255, 70);
+                    float tStart = (rScreen * 0.9f) / dist;
+                    float tEnd   = 1.0f - (rScreen * 0.9f) / dist;
+                    C2D_DrawLine(
+                        x0 + dx * tStart, y0 + dy * tStart, fpColor,
+                        x0 + dx * tEnd,   y0 + dy * tEnd,   fpColor,
+                        1.0f, 0.05f
+                    );
                 }
             }
 
-            // 2. Cabeza del círculo y número (con soporte para Sprites PNG de Skin o Vectorial 60 FPS)
-            if (obj.state == NOT_HIT && songTime <= obj.time + hit50 && cAlpha > 8) {
-                float cx = osuToTopX(obj.x);
-                float cy = osuToTopY(obj.y);
-
-                if (texSkinCircle.loaded) {
-                    texSkinCircle.drawCenteredSprite(cx, cy, rScreen * 1.05f, 0.20f, cColor);
-                    if (texSkinOverlay.loaded) {
-                        texSkinOverlay.drawCenteredSprite(cx, cy, rScreen * 1.05f, 0.22f, C2D_Color32(255, 255, 255, cAlpha));
-                    }
-                } else if (activeSkin.darkCircleCenter) {
-                    C2D_DrawCircleSolid(cx, cy, 0.2f, rScreen, C2D_Color32(20, 18, 30, static_cast<u8>(220 * alphaMult)));
-                    drawRing(cx, cy, rScreen, activeSkin.ringThickness, cColor, 22);
+            std::vector<int> visibleIndices;
+            visibleIndices.reserve(24);
+            for (int i = 0; i < static_cast<int>(beatmap.circles.size()); ++i) {
+                const auto& obj = beatmap.circles[i];
+                bool visible = false;
+                if (obj.isSpinner) {
+                    visible = (songTime >= (obj.time - 400) && !obj.sliderDone);
+                } else if (obj.isSlider) {
+                    visible = (songTime >= (obj.time - preempt) && !obj.sliderDone);
                 } else {
-                    C2D_DrawCircleSolid(cx, cy, 0.2f, rScreen, cColor);
-                    drawRing(cx, cy, rScreen, activeSkin.ringThickness, ringClr, 22);
+                    visible = (songTime >= (obj.time - preempt) && obj.state == NOT_HIT);
+                }
+                if (visible) {
+                    visibleIndices.push_back(i);
+                }
+            }
+
+            int numVisible = static_cast<int>(visibleIndices.size());
+            float stepZ = 0.20f / static_cast<float>(std::max(1, numVisible));
+            float subStep = stepZ * 0.095f;
+
+            for (int v = numVisible - 1; v >= 0; --v) {
+                int i = visibleIndices[v];
+                const auto& obj = beatmap.circles[i];
+                float objBaseZ = 0.065f + static_cast<float>(numVisible - 1 - v) * stepZ;
+
+                // Calcular opacidad (Fade-In normal y Fade-Out en modo Hidden HD)
+                float alphaMult = 1.0f;
+                float timeSinceAppear = static_cast<float>(songTime - (obj.time - preempt));
+                if (timeSinceAppear < fadeIn && fadeIn > 1.0f) {
+                    alphaMult = std::max(0.0f, std::min(1.0f, timeSinceAppear / fadeIn));
+                }
+                if (isHidden && !obj.isSpinner) {
+                    float fadeOutStart = preempt * 0.4f;
+                    float fadeOutEnd   = preempt * 0.72f;
+                    if (timeSinceAppear > fadeOutStart) {
+                        float t = (timeSinceAppear - fadeOutStart) / std::max(1.0f, fadeOutEnd - fadeOutStart);
+                        alphaMult = std::max(0.0f, 1.0f - t);
+                    }
                 }
 
-                char numStr[16];
-                std::snprintf(numStr, sizeof(numStr), "%d", obj.comboNumber);
-                drawCenteredText(textBuf, cx, cy, 0.55f, C2D_Color32(255, 255, 255, cAlpha), numStr, 0.30f);
+                const auto& rgb = activePalette[obj.colorIndex % activePalette.size()];
+                u8 cAlpha = static_cast<u8>(235.0f * alphaMult);
+                u8 sAlpha = static_cast<u8>(165.0f * (isHidden ? std::max(0.25f, alphaMult) : 1.0f));
+                u32 cColor = C2D_Color32(rgb.r, rgb.g, rgb.b, cAlpha);
+                u32 sColor = activeSkin.hasSliderTrackOverride
+                    ? C2D_Color32(activeSkin.sliderTrackColor.r, activeSkin.sliderTrackColor.g, activeSkin.sliderTrackColor.b, sAlpha)
+                    : C2D_Color32(static_cast<u8>(rgb.r * 0.62f), static_cast<u8>(rgb.g * 0.62f), static_cast<u8>(rgb.b * 0.62f), sAlpha);
+                u32 ringClr = C2D_Color32(activeSkin.sliderBorderColor.r, activeSkin.sliderBorderColor.g, activeSkin.sliderBorderColor.b, cAlpha);
 
-                // Anillo de aproximación (oculto en modo Hidden HD)
-                if (!isHidden) {
-                    float timeLeft = static_cast<float>(obj.time - songTime);
-                    if (timeLeft > 0.0f) {
-                        float progress = timeLeft / preempt;
-                        float approachRadius = rScreen * (1.0f + 2.5f * progress);
-                        if (texSkinApproach.loaded) {
-                            texSkinApproach.drawCenteredSprite(cx, cy, approachRadius, 0.24f, cColor);
+                if (obj.isSpinner) {
+                    float spX = playX(256.0f, dCircle);
+                    float spY = playY(192.0f);
+                    float clearTarget = std::max(3.14f, obj.spinnerRequiredRads * 0.65f);
+                    float fillRatio = std::min(1.0f, obj.spinnerProgress / clearTarget);
+                    float spDur = std::max(1.0f, static_cast<float>(obj.endTime - obj.time));
+                    float timeRatio = std::max(0.0f, std::min(1.0f, static_cast<float>(songTime - obj.time) / spDur));
+
+                    // Atenuacion suave del fondo para destacar el Spinner
+                    C2D_DrawRectSolid(baseOffsetX + shakeX + dPlayfield, baseOffsetY + shakeY, 0.14f, PLAYFIELD_W, PLAYFIELD_H, Ui::rgba(8, 6, 18, 95));
+
+                    u32 spinClr = obj.spinnerCleared ? clrCursor : ((fillRatio > 0.6f) ? clr100 : clr300);
+
+                    // Anillo exterior de tiempo en 3D (converge desde el frente hacia el disco al cerrarse)
+                    float approachR = 14.0f + 74.0f * (1.0f - timeRatio);
+                    float dSpApp = depthShift(2.6f + (1.0f - timeRatio) * 3.0f);
+                    drawRingZ(playX(256.0f, dSpApp), spY, 0.22f, approachR, 2.2f, Ui::withAlpha(clrWhite, 190), 32);
+
+                    // Disco de turbina central con aspas giratorias
+                    const float discR = 46.0f;
+                    Ui::glow(spX, spY, 0.18f, discR * (1.25f + fillRatio * 0.45f), Ui::withAlpha(spinClr, static_cast<u8>(70 + fillRatio * 90)), 5);
+                    C2D_DrawCircleSolid(spX, spY, 0.19f, discR, Ui::rgba(16, 14, 28, 220));
+                    drawRingZ(spX, spY, 0.23f, discR, 3.0f, spinClr, 32);
+                    drawRingZ(spX, spY, 0.23f, discR * 0.68f, 1.2f, Ui::withAlpha(spinClr, 130), 24);
+
+                    for (int b = 0; b < 6; ++b) {
+                        float bAng = obj.spinnerRotAngle + b * (static_cast<float>(M_PI) / 3.0f);
+                        float xIn  = spX + std::cos(bAng) * 10.0f;
+                        float yIn  = spY + std::sin(bAng) * 10.0f;
+                        float xOut = spX + std::cos(bAng) * (discR - 3.0f);
+                        float yOut = spY + std::sin(bAng) * (discR - 3.0f);
+                        C2D_DrawLine(xIn, yIn, clrWhite, xOut, yOut, spinClr, 2.2f, 0.24f);
+                    }
+                    C2D_DrawCircleSolid(spX, spY, 0.25f, 9.0f + (spinnerRPM / 480.0f) * 4.0f, spinClr);
+                    C2D_DrawCircleSolid(spX, spY, 0.26f, 4.5f, clrWhite);
+
+                    // Barras laterales simetricas de energia (Progreso del Spinner 0% -> 100%)
+                    const float barH = 112.0f;
+                    const float barW = 9.0f;
+                    const float barTopY = spY - barH * 0.5f;
+                    float fillH = barH * fillRatio;
+                    for (int side = -1; side <= 1; side += 2) {
+                        float bx = spX + side * 98.0f - barW * 0.5f;
+                        Ui::panel(bx - 2.0f, barTopY - 2.0f, barW + 4.0f, barH + 4.0f, 0.21f, Ui::rgba(14, 12, 24, 230), spinClr);
+                        if (fillH > 1.0f) {
+                            Ui::gradV(bx, barTopY + (barH - fillH), barW, fillH, 0.24f, Ui::brighten(spinClr, 0.6f), spinClr);
+                        }
+                        for (int seg = 1; seg < 5; ++seg) {
+                            float sy = barTopY + seg * (barH / 5.0f);
+                            C2D_DrawLine(bx, sy, Ui::rgba(10, 8, 18, 180), bx + barW, sy, Ui::rgba(10, 8, 18, 180), 1.0f, 0.25f);
+                        }
+                    }
+
+                    // Texto superior: "GIRA!" o "CLEAR!" con efecto pop en primer plano 3D, y Bonus "+1000"
+                    if (obj.spinnerCleared) {
+                        float cScale = 0.62f + spinnerClearAnim * 0.25f;
+                        drawCenteredText(textBuf, playX(256.0f, dFrontHud), spY - 68.0f, cScale, clrCursor, "CLEAR!", 0.32f);
+                    } else if (songTime >= obj.time) {
+                        drawCenteredText(textBuf, playX(256.0f, dFrontHud), spY - 66.0f, 0.48f, clrWhite, "GIRA!", 0.32f);
+                    }
+
+                    if (lastSpinnerBonus > 0 && spinnerBonusAnim > 0.01f) {
+                        char bonStr[32];
+                        std::snprintf(bonStr, sizeof(bonStr), "+%d", lastSpinnerBonus);
+                        float bScale = 0.52f + spinnerBonusAnim * 0.20f;
+                        drawCenteredText(textBuf, playX(256.0f, dFrontHud), spY + 56.0f - (1.0f - spinnerBonusAnim) * 8.0f, bScale, clr300, bonStr, 0.33f);
+                    }
+
+                    // Medidor digital de RPM abajo del Spinner
+                    char rpmStr[32];
+                    std::snprintf(rpmStr, sizeof(rpmStr), "%.0f RPM", spinnerRPM);
+                    Ui::pill(spX - 36.0f, spY + 68.0f, 72.0f, 16.0f, 0.28f, Ui::rgba(20, 16, 34, 230));
+                    drawCenteredText(textBuf, spX, spY + 76.0f, 0.38f, spinClr, rpmStr, 0.32f);
+                    continue;
+                }
+
+                // 1. Cuerpo del Slider, Ticks, Flechas de Rebote y Bola
+                if (obj.isSlider && obj.sliderPath.size() >= 2) {
+                    size_t fullPtsCount = obj.sliderPath.size();
+                    float sRadius = rScreen * 0.85f;
+                    float sBorder = 2.0f;
+                    float rOuter = sRadius + sBorder;
+                    float rInner = sRadius;
+
+                    // Cálculo de Snaking In (la curva se va dibujando suavemente como una serpiente al aparecer)
+                    float snakeInFrac = 1.0f;
+                    if (settings.snakingSliders && songTime < obj.time) {
+                        float timeSinceAppear = static_cast<float>(songTime - (obj.time - preempt));
+                        float snakeDuration = std::max(100.0f, preempt * 0.66f);
+                        float t = std::max(0.0f, std::min(1.0f, timeSinceAppear / snakeDuration));
+                        snakeInFrac = std::sin(t * (static_cast<float>(M_PI) * 0.5f));
+                        snakeInFrac = std::max(0.04f, snakeInFrac);
+                    }
+
+                    // Construir la lista de puntos visibles recortada según snakeInFrac
+                    std::vector<Vec2> visiblePath;
+                    if (snakeInFrac >= 0.999f || fullPtsCount < 2) {
+                        visiblePath = obj.sliderPath;
+                    } else {
+                        visiblePath.reserve(fullPtsCount + 1);
+                        float targetIdx = snakeInFrac * static_cast<float>(fullPtsCount - 1);
+                        int count = static_cast<int>(targetIdx);
+                        if (count < 1) count = 1;
+                        for (int p = 0; p <= count && p < static_cast<int>(fullPtsCount); ++p) {
+                            visiblePath.push_back(obj.sliderPath[p]);
+                        }
+                        float frac = targetIdx - static_cast<float>(count);
+                        if (frac > 0.005f && count + 1 < static_cast<int>(fullPtsCount)) {
+                            const Vec2& pA = obj.sliderPath[count];
+                            const Vec2& pB = obj.sliderPath[count + 1];
+                            visiblePath.push_back(Vec2(pA.x + (pB.x - pA.x) * frac, pA.y + (pB.y - pA.y) * frac));
+                        }
+                        if (visiblePath.size() < 2 && fullPtsCount >= 2) {
+                            visiblePath.push_back(obj.sliderPath[1]);
+                        }
+                    }
+
+                    size_t nPts = visiblePath.size();
+                    std::vector<Vec2> pts(nPts);
+                    std::vector<Vec2> nrm(nPts);
+                    for (size_t p = 0; p < nPts; ++p) {
+                        pts[p] = Vec2(playX(visiblePath[p].x, dSlider), playY(visiblePath[p].y));
+                    }
+                    for (size_t p = 0; p < nPts; ++p) {
+                        Vec2 dir;
+                        if (p == 0) {
+                            dir = Vec2(pts[1].x - pts[0].x, pts[1].y - pts[0].y);
+                        } else if (p == nPts - 1) {
+                            dir = Vec2(pts[nPts - 1].x - pts[nPts - 2].x, pts[nPts - 1].y - pts[nPts - 2].y);
                         } else {
-                            drawRing(cx, cy, approachRadius, 1.5f, cColor, 20);
+                            dir = Vec2(pts[p + 1].x - pts[p - 1].x, pts[p + 1].y - pts[p - 1].y);
+                        }
+                        float len = std::sqrt(dir.x * dir.x + dir.y * dir.y);
+                        if (len > 1e-4f) {
+                            nrm[p] = Vec2(-dir.y / len, dir.x / len);
+                        } else {
+                            nrm[p] = (p > 0) ? nrm[p - 1] : Vec2(0.0f, 1.0f);
+                        }
+                    }
+
+                    float zBorder = objBaseZ + subStep * 1.0f;
+                    float zBody   = objBaseZ + subStep * 2.0f;
+
+                    // Pase 1: Malla continua de triángulos para el borde exterior (ringClr)
+                    for (size_t p = 0; p + 1 < nPts; ++p) {
+                        float l0x = pts[p].x + nrm[p].x * rOuter,     l0y = pts[p].y + nrm[p].y * rOuter;
+                        float r0x = pts[p].x - nrm[p].x * rOuter,     r0y = pts[p].y - nrm[p].y * rOuter;
+                        float l1x = pts[p + 1].x + nrm[p + 1].x * rOuter, l1y = pts[p + 1].y + nrm[p + 1].y * rOuter;
+                        float r1x = pts[p + 1].x - nrm[p + 1].x * rOuter, r1y = pts[p + 1].y - nrm[p + 1].y * rOuter;
+                        C2D_DrawTriangle(l0x, l0y, ringClr, r0x, r0y, ringClr, l1x, l1y, ringClr, zBorder);
+                        C2D_DrawTriangle(r0x, r0y, ringClr, r1x, r1y, ringClr, l1x, l1y, ringClr, zBorder);
+                    }
+
+                    // Pase 2: Malla continua de triángulos para el relleno interior (sColor)
+                    for (size_t p = 0; p + 1 < nPts; ++p) {
+                        float l0x = pts[p].x + nrm[p].x * rInner,     l0y = pts[p].y + nrm[p].y * rInner;
+                        float r0x = pts[p].x - nrm[p].x * rInner,     r0y = pts[p].y - nrm[p].y * rInner;
+                        float l1x = pts[p + 1].x + nrm[p + 1].x * rInner, l1y = pts[p + 1].y + nrm[p + 1].y * rInner;
+                        float r1x = pts[p + 1].x - nrm[p + 1].x * rInner, r1y = pts[p + 1].y - nrm[p + 1].y * rInner;
+                        C2D_DrawTriangle(l0x, l0y, sColor, r0x, r0y, sColor, l1x, l1y, sColor, zBody);
+                        C2D_DrawTriangle(r0x, r0y, sColor, r1x, r1y, sColor, l1x, l1y, sColor, zBody);
+                    }
+
+                    // Extremos redondeados (Caps) en cabeza y en la punta visible de la serpiente
+                    C2D_DrawCircleSolid(pts[0].x, pts[0].y, zBorder, rOuter, ringClr);
+                    C2D_DrawCircleSolid(pts.back().x, pts.back().y, zBorder, rOuter, ringClr);
+                    C2D_DrawCircleSolid(pts[0].x, pts[0].y, zBody, rInner, sColor);
+                    C2D_DrawCircleSolid(pts.back().x, pts.back().y, zBody, rInner, sColor);
+
+                    // Anillo de la cola: en el destino final se desvanece suavemente a medida que la serpiente se acerca
+                    Vec2 finalTail = obj.sliderPath.back();
+                    float tailX = playX(finalTail.x, dSlider);
+                    float tailY = playY(finalTail.y);
+                    u8 tailAlpha = static_cast<u8>(cAlpha * (snakeInFrac >= 0.95f ? 1.0f : (snakeInFrac * 0.85f)));
+                    if (tailAlpha > 5) {
+                        drawRing(tailX, tailY, sRadius, 1.5f, Ui::withAlpha(ringClr, tailAlpha), 20, objBaseZ + subStep * 3.0f);
+                    }
+
+                    // Dibujar Slider Ticks pendientes (solo aquellos alcanzados por la serpiente)
+                    int curSpan = 0;
+                    float slideDur = static_cast<float>(std::max(1, obj.endTime - obj.time)) / std::max(1, obj.repeats);
+                    if (songTime > obj.time && obj.endTime > obj.time) {
+                        curSpan = static_cast<int>((songTime - obj.time) / slideDur);
+                    }
+                    for (const auto& tk : obj.sliderTicks) {
+                        if (!tk.hit && tk.time >= songTime - 50) {
+                            float tkProgress = static_cast<float>(tk.time - obj.time) / std::max(1.0f, slideDur);
+                            if (songTime >= obj.time || snakeInFrac >= tkProgress) {
+                                C2D_DrawCircleSolid(playX(tk.x, dSlider), playY(tk.y), objBaseZ + subStep * 3.0f, 2.2f, clrWhite);
+                            }
+                        }
+                    }
+
+                    // Flecha de rebote (Reverse Arrow) si quedan repeticiones y la serpiente ya llegó al final
+                    if (obj.repeats > 1 && curSpan + 1 < obj.repeats && snakeInFrac >= 0.92f) {
+                        bool arrowAtTail = (curSpan % 2 == 0);
+                        if (arrowAtTail) {
+                            const Vec2& pTip = obj.sliderPath.back();
+                            const Vec2& pPrev = obj.sliderPath[obj.sliderPath.size() - 2];
+                            drawReverseArrow(
+                                playX(pTip.x, dSlider), playY(pTip.y),
+                                playX(pPrev.x, dSlider), playY(pPrev.y),
+                                rScreen * 0.65f, clrWhite, objBaseZ + subStep * 4.0f
+                            );
+                        } else {
+                            const Vec2& pTip = obj.sliderPath.front();
+                            const Vec2& pNext = obj.sliderPath[1];
+                            drawReverseArrow(
+                                playX(pTip.x, dSlider), playY(pTip.y),
+                                playX(pNext.x, dSlider), playY(pNext.y),
+                                rScreen * 0.65f, clrWhite, objBaseZ + subStep * 4.0f
+                            );
+                        }
+                    }
+
+                    if (songTime >= obj.time && songTime <= obj.endTime) {
+                        Vec2 ballOsu = obj.getSliderBallPos(songTime);
+                        float bx = playX(ballOsu.x, dCircle);
+                        float by = playY(ballOsu.y);
+                        Ui::glow(bx, by, objBaseZ + subStep * 8.5f, rScreen * 1.45f, C2D_Color32(rgb.r, rgb.g, rgb.b, 120), 3);
+                        C2D_DrawCircleSolid(bx, by, objBaseZ + subStep * 9.0f, rScreen * 0.88f, C2D_Color32(rgb.r, rgb.g, rgb.b, 240));
+                        C2D_DrawCircleSolid(bx, by, objBaseZ + subStep * 9.5f, rScreen * 0.35f, clrWhite);
+                        float followR = obj.sliderTracking ? (rScreen * 1.9f) : (rScreen * 1.3f);
+                        u32 followClr = obj.sliderTracking ? clrCursor : clrWhite;
+                        drawRing(bx, by, followR, 1.5f, followClr, 20, objBaseZ + subStep * 9.8f);
+                    }
+                }
+
+                // 2. Cabeza del círculo y número (con soporte para Sprites PNG de Skin o Vectorial 60 FPS + Profundidad 3D)
+                if (obj.state == NOT_HIT && songTime <= obj.time + hit50 && cAlpha > 8) {
+                    float cx = playX(obj.x, dCircle);
+                    float cy = playY(obj.y);
+
+                    // Resplandor radial suave alrededor de la nota (con boost durante Kiai Time)
+                    float kiaiGlowBoost = (kiaiGlow > 0.01f) ? (0.24f * kiaiGlow * bpmPulse) : 0.0f;
+                    u8 glowA = static_cast<u8>(std::min(255.0f, (85.0f + 50.0f * kiaiGlow * bpmPulse) * alphaMult));
+                    Ui::glow(cx, cy, objBaseZ + subStep * 4.5f, rScreen * (1.42f + kiaiGlowBoost), C2D_Color32(rgb.r, rgb.g, rgb.b, glowA), 3);
+
+                    if (texSkinCircle.loaded) {
+                        texSkinCircle.drawCenteredSprite(cx, cy, rScreen * 1.05f, objBaseZ + subStep * 5.0f, cColor);
+                        if (texSkinOverlay.loaded) {
+                            texSkinOverlay.drawCenteredSprite(cx, cy, rScreen * 1.05f, objBaseZ + subStep * 6.0f, C2D_Color32(255, 255, 255, cAlpha));
+                        }
+                    } else if (activeSkin.darkCircleCenter) {
+                        C2D_DrawCircleSolid(cx, cy, objBaseZ + subStep * 5.0f, rScreen, C2D_Color32(20, 18, 30, static_cast<u8>(255 * alphaMult)));
+                        drawRing(cx, cy, rScreen, activeSkin.ringThickness, cColor, 24, objBaseZ + subStep * 6.0f);
+                        drawRing(cx, cy, rScreen * 0.78f, 1.0f, C2D_Color32(255, 255, 255, static_cast<u8>(80 * alphaMult)), 20, objBaseZ + subStep * 5.5f);
+                    } else {
+                        C2D_DrawCircleSolid(cx, cy, objBaseZ + subStep * 5.0f, rScreen, cColor);
+                        C2D_DrawCircleSolid(cx, cy, objBaseZ + subStep * 5.5f, rScreen * 0.72f, C2D_Color32(static_cast<u8>(rgb.r * 0.78f), static_cast<u8>(rgb.g * 0.78f), static_cast<u8>(rgb.b * 0.78f), cAlpha));
+                        drawRing(cx, cy, rScreen, activeSkin.ringThickness, ringClr, 24, objBaseZ + subStep * 6.0f);
+                    }
+
+                    char numStr[16];
+                    std::snprintf(numStr, sizeof(numStr), "%d", obj.comboNumber);
+                    drawCenteredText(textBuf, cx, cy, 0.55f, C2D_Color32(255, 255, 255, cAlpha), numStr, objBaseZ + subStep * 7.0f);
+
+                    // Anillo de aproximación 3D: nace más cerca del jugador y aterriza en el plano del círculo al llegar a 0 ms
+                    if (!isHidden) {
+                        float timeLeft = static_cast<float>(obj.time - songTime);
+                        if (timeLeft > 0.0f) {
+                            float progress = timeLeft / preempt;
+                            float approachRadius = rScreen * (1.0f + 2.5f * progress);
+                            float dApproach = depthShift(2.6f + progress * 3.4f);
+                            float ax = playX(obj.x, dApproach);
+                            if (texSkinApproach.loaded) {
+                                texSkinApproach.drawCenteredSprite(ax, cy, approachRadius, objBaseZ + subStep * 8.0f, cColor);
+                            } else {
+                                drawRing(ax, cy, approachRadius, 1.5f, cColor, 20, objBaseZ + subStep * 8.0f);
+                            }
                         }
                     }
                 }
             }
-        }
 
-        // 3. Efecto Hit Burst y calificaciones flotantes (300 / 100 / 50 / X)
-        for (size_t i = 0; i < popups.size(); ) {
-            float px = osuToTopX(popups[i].x);
-            float py = osuToTopY(popups[i].y);
-            float age = static_cast<float>(18 - popups[i].timer);
+            // Mod Flashlight (FL): oscurece la pantalla de juego dejando un haz de luz focal centrado en el cursor
+            if (isFlashlight) {
+                float flX = baseOffsetX + cursorOsuX * SCALE_FACTOR + dCursor;
+                float flY = baseOffsetY + cursorOsuY * SCALE_FACTOR;
+                float flR = (combo >= 200) ? 46.0f : ((combo >= 100) ? 60.0f : 78.0f);
+                float flRInner = flR * 0.70f;
+                float flROuter = 420.0f;
+                u32 clrDarkSolid = Ui::rgba(6, 4, 12, 252);
+                u32 clrDarkTrans = Ui::rgba(6, 4, 12, 0);
 
-            if (popups[i].state != HIT_MISS && popups[i].timer > 6) {
-                float burstR = popups[i].burstRadius * (1.0f + age * 0.045f);
-                u8 bAlpha = static_cast<u8>(std::max(0, popups[i].timer * 10));
-                u32 bClr = (popups[i].burstColor & 0x00FFFFFF) | (static_cast<u32>(bAlpha) << 24);
-                drawRing(px, py, burstR, 1.8f, bClr, 18);
-            }
+                const int SEGMENTS = 24;
+                for (int s = 0; s < SEGMENTS; ++s) {
+                    float a0 = (s * 2.0f * static_cast<float>(M_PI)) / SEGMENTS;
+                    float a1 = ((s + 1) * 2.0f * static_cast<float>(M_PI)) / SEGMENTS;
+                    float cos0 = std::cos(a0), sin0 = std::sin(a0);
+                    float cos1 = std::cos(a1), sin1 = std::sin(a1);
 
-            const char* txt = "300";
-            u32 clr = clr300;
-            if (popups[i].state == HIT_100)      { txt = "100"; clr = clr100; }
-            else if (popups[i].state == HIT_50)  { txt = "50";  clr = clr50; }
-            else if (popups[i].state == HIT_MISS){ txt = "X";   clr = clrMiss; }
+                    // Anillo de desvanecimiento suave (borde difuso del foco)
+                    C2D_DrawTriangle(
+                        flX + cos0 * flRInner, flY + sin0 * flRInner, clrDarkTrans,
+                        flX + cos1 * flRInner, flY + sin1 * flRInner, clrDarkTrans,
+                        flX + cos0 * flR,      flY + sin0 * flR,      clrDarkSolid,
+                        0.71f
+                    );
+                    C2D_DrawTriangle(
+                        flX + cos1 * flRInner, flY + sin1 * flRInner, clrDarkTrans,
+                        flX + cos1 * flR,      flY + sin1 * flR,      clrDarkSolid,
+                        flX + cos0 * flR,      flY + sin0 * flR,      clrDarkSolid,
+                        0.71f
+                    );
 
-            drawCenteredText(textBuf, px, py - age * 0.6f, 0.5f, clr, txt, 0.80f);
-
-            if (!isPaused) popups[i].timer--;
-            if (popups[i].timer <= 0) {
-                popups.erase(popups.begin() + i);
-            } else {
-                ++i;
-            }
-        }
-
-        // Barra de Vida (HP Bar) con degradado y borde
-        u32 hpClr = (hp > 0.5f) ? clr100 : ((hp > 0.25f) ? clr50 : clrMiss);
-        C2D_DrawRectSolid(5.0f, 5.0f, 0.29f, 148.0f, 11.0f, Ui::rgba(0, 0, 0, 170));
-        C2D_DrawRectSolid(7.0f, 7.0f, 0.3f, 144.0f, 7.0f, clrKeyIdle);
-        if (hp > 0.0f) Ui::gradH(7.0f, 7.0f, 144.0f * hp, 7.0f, 0.35f, Ui::brighten(hpClr, 0.6f), hpClr);
-        if (hp < 0.25f) {
-            float blink = 0.5f + 0.5f * std::sin(animTick * 0.35f);
-            C2D_DrawRectSolid(5.0f, 5.0f, 0.4f, 148.0f, 11.0f, Ui::rgba(255, 60, 60, static_cast<int>(60 * blink)));
-        }
-
-        // Barra de progreso de la cancion
-        if (!beatmap.circles.empty()) {
-            float endT = static_cast<float>(beatmap.circles.back().endTime + 1000);
-            float prog = std::max(0.0f, std::min(1.0f, static_cast<float>(songTime) / std::max(1.0f, endT)));
-            C2D_DrawRectSolid(5.0f, 18.0f, 0.3f, 148.0f, 2.0f, Ui::rgba(255, 255, 255, 40));
-            C2D_DrawRectSolid(5.0f, 18.0f, 0.35f, 148.0f * prog, 2.0f, clrPrimary);
-        }
-
-        // HUD: Score, Accuracy, Live PP, Mods y Combo
-        char hudStr[64];
-        Ui::gradH(300.0f, 2.0f, 100.0f, 52.0f, 0.28f, Ui::rgba(10, 8, 20, 0), Ui::rgba(10, 8, 20, 170));
-        std::snprintf(hudStr, sizeof(hudStr), "%07d", score);
-        drawText(textBuf, 322.0f, 3.0f, 0.62f, clrWhite, hudStr);
-
-        int totalJudged = count300 + count100 + count50 + countMiss;
-        float acc = (totalJudged > 0)
-            ? ((count300 * 300.0f + count100 * 100.0f + count50 * 50.0f) / (totalJudged * 300.0f)) * 100.0f
-            : 100.0f;
-        std::snprintf(hudStr, sizeof(hudStr), "%.1f%%", acc);
-        drawText(textBuf, 340.0f, 24.0f, 0.40f, clr300, hudStr);
-
-        float livePP = calculatePP(
-            beatmap.starRating,
-            beatmap.diff.ar,
-            beatmap.diff.od,
-            maxCombo,
-            std::max(1, totalJudged),
-            count300, count100, count50, countMiss,
-            settings.activeMods
-        );
-        std::snprintf(hudStr, sizeof(hudStr), "%.0fpp", livePP);
-        drawText(textBuf, 345.0f, 38.0f, 0.36f, clrPrimary, hudStr);
-
-        if (settings.activeMods != MOD_NONE) {
-            std::string mTag = formatModsString(settings.activeMods);
-            drawText(textBuf, 330.0f, 52.0f, 0.34f, clrCursor, mTag.c_str());
-        }
-
-        std::snprintf(hudStr, sizeof(hudStr), "%dx", combo);
-        drawText(textBuf, 5.0f, 215.0f, 0.6f, clrCursor, hudStr);
-
-        // Key Overlay
-        C2D_DrawRectSolid(368.0f, 95.0f, 0.3f, 24.0f, 22.0f, k1Held ? clrKeyActive : clrKeyIdle);
-        C2D_DrawRectSolid(368.0f, 123.0f, 0.3f, 24.0f, 22.0f, k2Held ? clrKeyActive : clrKeyIdle);
-
-        // Estela del Cursor (Cursor Trail) y Cursor
-        for (size_t t = 0; t < cursorTrail.size(); ++t) {
-            float ratio = static_cast<float>(cursorTrail[t].life) / 12.0f;
-            u8 tAlpha = static_cast<u8>(115.0f * ratio);
-            u32 tClr = C2D_Color32(
-                activeSkin.cursorTrailColor.r,
-                activeSkin.cursorTrailColor.g,
-                activeSkin.cursorTrailColor.b,
-                tAlpha
-            );
-            float tr = (3.8f * ratio) * settings.cursorScale;
-            C2D_DrawCircleSolid(osuToTopX(cursorTrail[t].x), osuToTopY(cursorTrail[t].y), 0.86f, tr, tClr);
-        }
-
-        float expandFactor = (activeSkin.cursorExpand && anyHeld) ? 7.5f : 5.5f;
-        float cursorRadius = expandFactor * settings.cursorScale;
-        if (texSkinCursor.loaded) {
-            texSkinCursor.drawCenteredSprite(osuToTopX(cursorOsuX), osuToTopY(cursorOsuY), cursorRadius * 1.4f, 0.88f, C2D_Color32(255, 255, 255, 255));
-        } else {
-            C2D_DrawCircleSolid(osuToTopX(cursorOsuX), osuToTopY(cursorOsuY), 0.88f, cursorRadius, clrCursor);
-            C2D_DrawCircleSolid(osuToTopX(cursorOsuX), osuToTopY(cursorOsuY), 0.89f, 2.0f * settings.cursorScale, clrWhite);
-        }
-
-        // Overlay de Pausa en pantalla superior (Z-depth 0.92 para el fondo y 0.99 para el texto encima!)
-        if (isPaused) {
-            C2D_DrawRectSolid(75.0f, 40.0f, 0.92f, 250.0f, 160.0f, C2D_Color32(18, 16, 28, 245));
-            drawRectOutline(75.0f, 40.0f, 250.0f, 160.0f, 2.0f, clrPrimary, 0.95f);
-            drawCenteredText(textBuf, 200.0f, 62.0f, 0.62f, clrCursor, "JUEGO EN PAUSA", 0.99f);
-
-            const char* pOpts[3] = { "Continuar", "Reintentar Beatmap", "Volver a Canciones" };
-            for (int i = 0; i < 3; ++i) {
-                bool sel = (pauseOption == i);
-                float py = 98.0f + i * 28.0f;
-                if (sel) {
-                    C2D_DrawRectSolid(95.0f, py - 10.0f, 0.95f, 210.0f, 22.0f, C2D_Color32(55, 45, 80, 255));
+                    // Área exterior completamente a oscuras
+                    C2D_DrawTriangle(
+                        flX + cos0 * flR,      flY + sin0 * flR,      clrDarkSolid,
+                        flX + cos1 * flR,      flY + sin1 * flR,      clrDarkSolid,
+                        flX + cos0 * flROuter, flY + sin0 * flROuter, clrDarkSolid,
+                        0.72f
+                    );
+                    C2D_DrawTriangle(
+                        flX + cos1 * flR,      flY + sin1 * flR,      clrDarkSolid,
+                        flX + cos1 * flROuter, flY + sin1 * flROuter, clrDarkSolid,
+                        flX + cos0 * flROuter, flY + sin0 * flROuter, clrDarkSolid,
+                        0.72f
+                    );
                 }
-                u32 c = sel ? clr300 : clrWhite;
-                drawCenteredText(textBuf, 200.0f, py, 0.50f, c, pOpts[i], 0.99f);
             }
+            }
+
+            // 2B. Chispas y particulas de Sliders / Hits en plano frontal
+            for (const auto& pt : particles) {
+                float lifeRatio = static_cast<float>(pt.life) / static_cast<float>(std::max(1, pt.maxLife));
+                u8 pAlpha = static_cast<u8>(235.0f * lifeRatio);
+                u32 pClr = Ui::withAlpha(pt.color, pAlpha);
+                float pr = pt.size * (0.45f + 0.55f * lifeRatio);
+                float px = baseOffsetX + pt.x + shakeX + dFrontHud;
+                float py = baseOffsetY + pt.y + shakeY;
+                C2D_DrawCircleSolid(px, py, 0.76f, pr * 1.6f, Ui::withAlpha(pt.color, static_cast<u8>(pAlpha * 0.35f)));
+                C2D_DrawCircleSolid(px, py, 0.78f, pr, pClr);
+            }
+
+            // 3. Efecto Hit Burst y calificaciones flotantes (300 / 100 / 50 / X)
+            float dHitPopup = depthShift(4.8f);
+            for (size_t i = 0; i < popups.size(); ++i) {
+                float px = (isTaikoPlay || isManiaPlay || isCatchPlay) ? (popups[i].x + dHitPopup) : playX(popups[i].x, dHitPopup);
+                float py = (isTaikoPlay || isManiaPlay || isCatchPlay) ? (popups[i].y + shakeY) : playY(popups[i].y);
+                float age = static_cast<float>(18 - popups[i].timer);
+
+                if (popups[i].state != HIT_MISS && popups[i].timer > 6) {
+                    float burstR = popups[i].burstRadius * (1.0f + age * 0.045f);
+                    u8 bAlpha = static_cast<u8>(std::max(0, popups[i].timer * 10));
+                    u32 bClr = (popups[i].burstColor & 0x00FFFFFF) | (static_cast<u32>(bAlpha) << 24);
+                    drawRing(px, py, burstR, 1.8f, bClr, 18, 0.79f);
+                }
+
+                const char* txt = "300";
+                u32 clr = clr300;
+                if (popups[i].state == HIT_100)      { txt = "100"; clr = clr100; }
+                else if (popups[i].state == HIT_50)  { txt = "50";  clr = clr50; }
+                else if (popups[i].state == HIT_MISS){ txt = "X";   clr = clrMiss; }
+
+                if (!isTaikoPlay) {
+                    drawCenteredTextWithShadow(textBuf, px, py - age * 0.6f, 0.52f, clr, txt, 0.82f);
+                }
+            }
+
+            u32 hpClr = (hp > 0.5f) ? clr100 : ((hp > 0.25f) ? clr50 : clrMiss);
+            if (!isTaikoPlay) {
+                if (drawFullHud) {
+                    // Barra de Vida (HP Bar) con degradado y borde en plano HUD frontal (Pantalla Superior)
+                C2D_DrawRectSolid(5.0f + dFrontHud, 5.0f, 0.29f, 148.0f, 11.0f, Ui::rgba(0, 0, 0, 170));
+                C2D_DrawRectSolid(7.0f + dFrontHud, 7.0f, 0.3f, 144.0f, 7.0f, clrKeyIdle);
+                if (hp > 0.0f) Ui::gradH(7.0f + dFrontHud, 7.0f, 144.0f * hp, 7.0f, 0.35f, Ui::brighten(hpClr, 0.6f), hpClr);
+                if (hp < 0.25f) {
+                    float blink = 0.5f + 0.5f * std::sin(animTick * 0.35f);
+                    C2D_DrawRectSolid(5.0f + dFrontHud, 5.0f, 0.4f, 148.0f, 11.0f, Ui::rgba(255, 60, 60, static_cast<int>(60 * blink)));
+                }
+
+                // Barra de progreso de la cancion
+                if (!beatmap.circles.empty()) {
+                    float endT = static_cast<float>(beatmap.circles.back().endTime + 1000);
+                    float prog = std::max(0.0f, std::min(1.0f, static_cast<float>(songTime) / std::max(1.0f, endT)));
+                    C2D_DrawRectSolid(5.0f + dFrontHud, 18.0f, 0.3f, 148.0f, 2.0f, Ui::rgba(255, 255, 255, 40));
+                    C2D_DrawRectSolid(5.0f + dFrontHud, 18.0f, 0.35f, 148.0f * prog, 2.0f, clrPrimary);
+                }
+
+                // HUD: Score, Accuracy, Live PP, Mods y Combo
+                char hudStr[64];
+                Ui::gradH(300.0f + dFrontHud, 2.0f, 100.0f, 52.0f, 0.28f, Ui::rgba(10, 8, 20, 0), Ui::rgba(10, 8, 20, 170));
+                std::snprintf(hudStr, sizeof(hudStr), "%07d", score);
+                drawText(textBuf, 322.0f + dFrontHud, 3.0f, 0.62f, clrWhite, hudStr);
+
+                int totalJudged = count300 + count100 + count50 + countMiss;
+                float acc = (totalJudged > 0)
+                    ? ((count300 * 300.0f + count100 * 100.0f + count50 * 50.0f) / (totalJudged * 300.0f)) * 100.0f
+                    : 100.0f;
+                std::snprintf(hudStr, sizeof(hudStr), "%.1f%%", acc);
+                drawText(textBuf, 340.0f + dFrontHud, 24.0f, 0.40f, clr300, hudStr);
+
+                float livePP = calculatePP(
+                    beatmap.starRating,
+                    beatmap.diff.ar,
+                    beatmap.diff.od,
+                    maxCombo,
+                    std::max(1, totalJudged),
+                    count300, count100, count50, countMiss,
+                    settings.activeMods
+                );
+                std::snprintf(hudStr, sizeof(hudStr), "%.0fpp", livePP);
+                drawText(textBuf, 345.0f + dFrontHud, 38.0f, 0.36f, clrPrimary, hudStr);
+
+                if (settings.activeMods != MOD_NONE) {
+                    std::string mTag = formatModsString(settings.activeMods);
+                    drawText(textBuf, 330.0f + dFrontHud, 52.0f, 0.34f, clrCursor, mTag.c_str());
+                }
+
+                // Combo con efecto pop al golpear + fantasma rojo al romper combo + pulso rítmico en Kiai
+                std::snprintf(hudStr, sizeof(hudStr), "%dx", combo);
+                float kiaiPulseScale = (kiaiGlow > 0.01f) ? (0.07f * kiaiGlow * bpmPulse) : 0.0f;
+                float cScale = 0.60f * (comboScale + kiaiPulseScale);
+                u32 comboClr = (comboBreakAnim > 0.1f) ? clrMiss :
+                    ((kiaiGlow > 0.01f) ? Ui::lerpColor(clrCursor, Ui::rgba(255, 235, 110), kiaiGlow * bpmPulse * 0.75f) : clrCursor);
+                drawText(textBuf, 7.0f + dFrontHud, 234.0f - 30.0f * cScale, cScale, Ui::rgba(0, 0, 0, 160), hudStr, 0.38f);
+                drawText(textBuf, 6.0f + dFrontHud, 233.0f - 30.0f * cScale, cScale, comboClr, hudStr, 0.40f);
+                if (comboBreakAnim > 0.02f && lastBrokenCombo >= 5) {
+                    char brkStr[32];
+                    std::snprintf(brkStr, sizeof(brkStr), "%dx BREAK!", lastBrokenCombo);
+                    u8 bAlpha = static_cast<u8>(comboBreakAnim * 235.0f);
+                    float bLift = (1.0f - comboBreakAnim) * 14.0f;
+                    drawText(textBuf, 8.0f + dFrontHud, 196.0f - bLift, 0.40f, Ui::rgba(255, 75, 85, bAlpha), brkStr, 0.42f);
+                }
+
+                // Hit Error Meter (barra inferior de timing adelantado / retrasado estilo osu! PC)
+                {
+                    const float meterCX = 200.0f + dFrontHud;
+                    const float meterY  = 232.0f;
+                    const float halfW   = 62.0f;
+                    float maxWin = std::max(1.0f, hit50);
+                    float w100 = halfW * std::min(1.0f, beatmap.diff.hit100 / maxWin);
+                    float w300 = halfW * std::min(1.0f, beatmap.diff.hit300 / maxWin);
+
+                    C2D_DrawRectSolid(meterCX - halfW - 3.0f, meterY - 4.5f, 0.36f, (halfW + 3.0f) * 2.0f, 9.0f, Ui::rgba(8, 6, 16, 185));
+                    C2D_DrawRectSolid(meterCX - halfW, meterY - 1.5f, 0.38f, halfW * 2.0f, 3.0f, Ui::withAlpha(clr50, 155));
+                    C2D_DrawRectSolid(meterCX - w100,  meterY - 1.5f, 0.39f, w100 * 2.0f,  3.0f, Ui::withAlpha(clr100, 185));
+                    C2D_DrawRectSolid(meterCX - w300,  meterY - 1.5f, 0.40f, w300 * 2.0f,  3.0f, Ui::withAlpha(clr300, 220));
+
+                    for (const auto& tk : hitErrorTicks) {
+                        float norm = std::max(-1.0f, std::min(1.0f, tk.errMs / maxWin));
+                        float tx = meterCX + norm * halfW;
+                        u8 tAlpha = static_cast<u8>(std::min(255, tk.life * 2));
+                        u32 baseC = (tk.state == HIT_300) ? clr300 : ((tk.state == HIT_100) ? clr100 : clr50);
+                        u32 tClr = Ui::withAlpha(baseC, tAlpha);
+                        C2D_DrawLine(tx, meterY - 4.5f, tClr, tx, meterY + 4.5f, tClr, 1.5f, 0.43f);
+                    }
+
+                    // Marca central (0 ms perfecto) y aguja de tendencia media
+                    C2D_DrawLine(meterCX, meterY - 5.5f, clrWhite, meterCX, meterY + 5.5f, clrWhite, 1.8f, 0.45f);
+                    float needleNorm = std::max(-1.0f, std::min(1.0f, hitErrorNeedle / maxWin));
+                    float nx = meterCX + needleNorm * halfW;
+                    C2D_DrawTriangle(
+                        nx - 3.2f, meterY - 7.5f, clrWhite,
+                        nx + 3.2f, meterY - 7.5f, clrWhite,
+                        nx,        meterY - 3.2f, clrCursor,
+                        0.46f
+                    );
+                }
+
+                // Key Overlay estilizado con contadores K1 / K2
+                for (int k = 0; k < 2; ++k) {
+                    bool held = (k == 0) ? k1Held : k2Held;
+                    int cnt   = (k == 0) ? k1PressCount : k2PressCount;
+                    float ky  = 92.0f + k * 28.0f;
+                    u32 kClr  = held ? clrKeyActive : Ui::rgba(28, 24, 44, 210);
+                    u32 bClr  = held ? clrWhite : clrPrimary;
+                    Ui::panel(364.0f + dFrontHud, ky, 32.0f, 24.0f, 0.3f, kClr);
+                    C2D_DrawRectSolid(364.0f + dFrontHud, ky, 0.34f, 3.0f, 24.0f, bClr);
+                    std::snprintf(hudStr, sizeof(hudStr), "%d", cnt);
+                    drawCenteredText(textBuf, 381.0f + dFrontHud, ky + 12.0f, 0.37f, held ? Ui::rgba(20, 16, 30) : clrWhite, hudStr, 0.4f);
+                }
+            } else {
+                // Mini HUD superior discreto en la pantalla táctil inferior (barra fina de HP + Progreso)
+                C2D_DrawRectSolid(0.0f, 0.0f, 0.29f, 320.0f, 4.0f, Ui::rgba(0, 0, 0, 150));
+                if (hp > 0.0f) Ui::gradH(0.0f, 0.0f, 320.0f * hp, 3.0f, 0.35f, Ui::brighten(hpClr, 0.6f), hpClr);
+                if (!beatmap.circles.empty()) {
+                    float endT = static_cast<float>(beatmap.circles.back().endTime + 1000);
+                    float prog = std::max(0.0f, std::min(1.0f, static_cast<float>(songTime) / std::max(1.0f, endT)));
+                    C2D_DrawRectSolid(0.0f, 3.0f, 0.36f, 320.0f * prog, 1.5f, clrPrimary);
+                }
+            }
+            }
+
+            // 1. Renderizado de Humo (Smoke) estilo osu! 'C'
+            if (!isTaikoPlay && !isManiaPlay && !isCatchPlay) {
+                // 1. Partículas de Humo estilo osu! 'C'
+                for (const auto& sp : smokeParticles) {
+                    float ratio = static_cast<float>(sp.life) / static_cast<float>(sp.maxLife);
+                    float fadeAlpha = std::pow(ratio, 1.35f);
+                    u8 aOuter = static_cast<u8>(90.0f * fadeAlpha);
+                    u8 aInner = static_cast<u8>(155.0f * fadeAlpha);
+                    float sRadius = sp.size * SCALE_FACTOR * settings.cursorScale;
+                    float sx = baseOffsetX + sp.x * SCALE_FACTOR + dCursor;
+                    float sy = baseOffsetY + sp.y * SCALE_FACTOR;
+
+                    u32 smokeOuterClr = Ui::rgba(210, 218, 235, aOuter);
+                    u32 smokeInnerClr = Ui::rgba(235, 240, 252, aInner);
+
+                    C2D_DrawCircleSolid(sx, sy, 0.84f, sRadius, smokeOuterClr);
+                    C2D_DrawCircleSolid(sx, sy, 0.845f, sRadius * 0.52f, smokeInnerClr);
+                }
+
+                // 2. Renderizado de Estela Dinámica y Fluida del Cursor (Cursor Trail)
+                for (size_t t = 0; t < cursorTrail.size(); ++t) {
+                    float ratio = static_cast<float>(cursorTrail[t].life) / static_cast<float>(cursorTrail[t].maxLife);
+                    float tr = (5.2f * ratio + 0.8f) * settings.cursorScale;
+                    float tx = baseOffsetX + cursorTrail[t].x * SCALE_FACTOR + dCursor;
+                    float ty = baseOffsetY + cursorTrail[t].y * SCALE_FACTOR;
+
+                    u8 tAlpha = static_cast<u8>(145.0f * std::pow(ratio, 1.15f));
+                    u32 tClr = C2D_Color32(
+                        activeSkin.cursorTrailColor.r,
+                        activeSkin.cursorTrailColor.g,
+                        activeSkin.cursorTrailColor.b,
+                        tAlpha
+                    );
+
+                    if (texSkinCursorTrail.loaded) {
+                        texSkinCursorTrail.drawCenteredSprite(tx, ty, tr * 2.4f, 0.86f, tClr);
+                    } else {
+                        // Núcleo brillante y halo translúcido
+                        C2D_DrawCircleSolid(tx, ty, 0.86f, tr, tClr);
+                        C2D_DrawCircleSolid(tx, ty, 0.865f, tr * 0.42f, Ui::rgba(255, 255, 255, static_cast<u8>(160.0f * ratio)));
+                    }
+
+                    // Conectar con segmento hacia el punto siguiente para que la estela sea continua y sin huecos
+                    if (t + 1 < cursorTrail.size()) {
+                        float nextX = baseOffsetX + cursorTrail[t + 1].x * SCALE_FACTOR + dCursor;
+                        float nextY = baseOffsetY + cursorTrail[t + 1].y * SCALE_FACTOR;
+                        float lineW = std::max(1.5f, tr * 1.3f);
+                        C2D_DrawLine(tx, ty, tClr, nextX, nextY, tClr, lineW, 0.858f);
+                    }
+                }
+
+                // 3. Cursor principal
+                float expandFactor = (activeSkin.cursorExpand && anyHeld) ? 7.5f : 5.5f;
+                float cursorRadius = expandFactor * settings.cursorScale;
+                float curScreenX = baseOffsetX + cursorOsuX * SCALE_FACTOR + dCursor;
+                float curScreenY = baseOffsetY + cursorOsuY * SCALE_FACTOR;
+                if (texSkinCursor.loaded) {
+                    texSkinCursor.drawCenteredSprite(curScreenX, curScreenY, cursorRadius * 1.4f, 0.88f, C2D_Color32(255, 255, 255, 255));
+                } else {
+                    Ui::glow(curScreenX, curScreenY, 0.87f, cursorRadius * 1.8f, Ui::withAlpha(clrCursor, 110), 3);
+                    C2D_DrawCircleSolid(curScreenX, curScreenY, 0.88f, cursorRadius, clrCursor);
+                    C2D_DrawCircleSolid(curScreenX, curScreenY, 0.89f, 2.0f * settings.cursorScale, clrWhite);
+                }
+            }
+
+            // Marcador en vivo (Leaderboard) estilo osu! lazer en el margen izquierdo
+            if (drawFullHud && !isTaikoPlay) {
+                float lbX = (3.0f + dFrontHud);
+                float lbW = isTaikoPlay ? 80.0f : 74.0f;
+                float lbH = isTaikoPlay ? 18.0f : 26.0f;
+                float startY = isTaikoPlay ? 196.0f : 48.0f;
+
+                // Grado actual de precisión de la partida en vivo
+                int tJudged = count300 + count100 + count50 + countMiss;
+                float liveAcc = (tJudged > 0)
+                    ? ((count300 * 300.0f + count100 * 100.0f + count50 * 50.0f) / (tJudged * 300.0f)) * 100.0f
+                    : 100.0f;
+                const char* liveGrade = "SS";
+                u32 liveGradeClr = Ui::rgba(255, 102, 171);
+                if (countMiss > 0) {
+                    if (liveAcc >= 90.0f)      { liveGrade = "A"; liveGradeClr = clr100; }
+                    else if (liveAcc >= 80.0f) { liveGrade = "B"; liveGradeClr = clr300; }
+                    else if (liveAcc >= 70.0f) { liveGrade = "C"; liveGradeClr = clr50; }
+                    else                       { liveGrade = "D"; liveGradeClr = clrMiss; }
+                } else {
+                    if (liveAcc >= 99.9f)      { liveGrade = "SS"; liveGradeClr = Ui::rgba(255, 102, 171); }
+                    else if (liveAcc >= 93.0f) { liveGrade = "S";  liveGradeClr = clrCursor; }
+                    else if (liveAcc >= 85.0f) { liveGrade = "A";  liveGradeClr = clr100; }
+                    else if (liveAcc >= 75.0f) { liveGrade = "B";  liveGradeClr = clr300; }
+                    else                       { liveGrade = "C";  liveGradeClr = clr50; }
+                }
+
+                struct LeaderEntry {
+                    const char* tag;
+                    const char* name;
+                    int pts;
+                    const char* gr;
+                    u32 grClr;
+                    bool isLive;
+                };
+                std::vector<LeaderEntry> entries;
+
+                if (!localRecords.empty()) {
+                    int bestScore = localRecords[0].bestScore;
+                    const char* bGr = localRecords[0].bestGrade.c_str();
+                    u32 bGrClr = clrWhite;
+                    if (localRecords[0].bestGrade == "SS") bGrClr = Ui::rgba(255, 102, 171);
+                    else if (localRecords[0].bestGrade == "S") bGrClr = clrCursor;
+                    else if (localRecords[0].bestGrade == "A") bGrClr = clr100;
+                    else if (localRecords[0].bestGrade == "B") bGrClr = clr300;
+                    else bGrClr = clrMiss;
+
+                    if (score >= bestScore) {
+                        entries.push_back({ "#1", "TU", score, liveGrade, liveGradeClr, true });
+                        entries.push_back({ "#2", "RECORD", bestScore, bGr, bGrClr, false });
+                    } else {
+                        entries.push_back({ "#1", "RECORD", bestScore, bGr, bGrClr, false });
+                        entries.push_back({ "#2", "TU", score, liveGrade, liveGradeClr, true });
+                    }
+                } else {
+                    entries.push_back({ "#1", "TU", score, liveGrade, liveGradeClr, true });
+                }
+
+                for (size_t e = 0; e < entries.size(); ++e) {
+                    const auto& ent = entries[e];
+                    float ey = startY + e * (lbH + (isTaikoPlay ? 3.0f : 5.0f));
+                    u32 cBorder = ent.isLive
+                        ? (hasOvertakenBest ? Ui::rgba(255, 215, 60) : clrCursor)
+                        : Ui::rgba(65, 55, 90);
+                    u32 cBg = ent.isLive
+                        ? (hasOvertakenBest ? Ui::rgba(54, 44, 20, 230) : Ui::rgba(34, 26, 52, 230))
+                        : Ui::rgba(18, 14, 28, 210);
+
+                    if (ent.isLive && overtakeFlashAnim > 0.05f) {
+                        cBg = Ui::lerpColor(cBg, Ui::rgba(255, 215, 60), overtakeFlashAnim * 0.5f);
+                        cBorder = Ui::rgba(255, 255, 220);
+                    }
+
+                    Ui::panel(lbX, ey, lbW, lbH, 0.32f, cBg, cBorder);
+                    if (isTaikoPlay) {
+                        drawText(textBuf, lbX + 4.0f, ey + 3.0f, 0.28f, ent.isLive ? clr100 : clrWhite, ent.tag, 0.35f);
+                        drawText(textBuf, lbX + 22.0f, ey + 3.0f, 0.26f, ent.isLive ? clrCursor : clrMuted, ent.name, 0.35f);
+                        drawCenteredText(textBuf, lbX + lbW - 10.0f, ey + 9.0f, 0.32f, ent.grClr, ent.gr, 0.35f);
+                        char sBuf[32];
+                        std::snprintf(sBuf, sizeof(sBuf), "%d", ent.pts);
+                        drawText(textBuf, lbX + 4.0f, ey + 9.5f, 0.24f, clrWhite, sBuf, 0.35f);
+                    } else {
+                        drawText(textBuf, lbX + 4.0f, ey + 4.0f, 0.30f, ent.isLive ? clr100 : clrWhite, ent.tag, 0.35f);
+                        drawText(textBuf, lbX + 22.0f, ey + 4.0f, 0.28f, ent.isLive ? clrCursor : clrMuted, ent.name, 0.35f);
+                        drawCenteredText(textBuf, lbX + lbW - 10.0f, ey + 8.5f, 0.35f, ent.grClr, ent.gr, 0.35f);
+                        char sBuf[32];
+                        std::snprintf(sBuf, sizeof(sBuf), "%d", ent.pts);
+                        drawText(textBuf, lbX + 4.0f, ey + 15.0f, 0.27f, clrWhite, sBuf, 0.35f);
+                    }
+                }
+            }
+
+            // Pantalla central de Descanso (Break Time) con calificación, cuenta atrás y advertencia
+            if (inBreakPeriod) {
+                if (isTaikoPlay) {
+                    // En Taiko, mantener la pista visible y mostrar un cartel limpio estilo descanso de festival arriba
+                    float bcX = 200.0f + dFrontHud;
+                    float bcY = 46.0f;
+                    Ui::panel(bcX - 60.0f, bcY - 18.0f, 120.0f, 36.0f, 0.32f, Ui::rgba(20, 16, 34, 230), clrPrimary);
+                    drawCenteredText(textBuf, bcX, bcY - 8.0f, 0.35f, clrWhite, "DESCANSO", 0.35f);
+                    char cdStr[32];
+                    float sLeft = std::max(0.0f, breakRemainingMs / 1000.0f);
+                    std::snprintf(cdStr, sizeof(cdStr), "%.1f s", sLeft);
+                    drawCenteredText(textBuf, bcX, bcY + 6.0f, 0.32f, clr300, cdStr, 0.35f);
+                } else {
+                    C2D_DrawRectSolid(baseOffsetX + shakeX + dPlayfield, shakeY, 0.48f, 320.0f, 240.0f, Ui::rgba(10, 8, 20, 120));
+
+                    float bcX = playX(256.0f, dFrontHud);
+                    float bcY = playY(116.0f);
+
+                    Ui::panel(bcX - 85.0f, bcY - 44.0f, 170.0f, 96.0f, 0.50f, Ui::rgba(20, 16, 34, 245), clrPrimary);
+                    Ui::pill(bcX - 44.0f, bcY - 39.0f, 88.0f, 14.0f, 0.52f, Ui::rgba(255, 102, 171, 230));
+                    drawCenteredText(textBuf, bcX, bcY - 32.0f, 0.32f, clrWhite, "DESCANSO", 0.54f);
+
+                    // Letra grande de Accuracy Grade actual
+                    int tJudged = count300 + count100 + count50 + countMiss;
+                    float bAcc = (tJudged > 0)
+                        ? ((count300 * 300.0f + count100 * 100.0f + count50 * 50.0f) / (tJudged * 300.0f)) * 100.0f
+                        : 100.0f;
+                    const char* bGrade = "SS";
+                    u32 bGradeClr = Ui::rgba(255, 102, 171);
+                    if (countMiss > 0) {
+                        if (bAcc >= 90.0f)      { bGrade = "A"; bGradeClr = clr100; }
+                        else if (bAcc >= 80.0f) { bGrade = "B"; bGradeClr = clr300; }
+                        else if (bAcc >= 70.0f) { bGrade = "C"; bGradeClr = clr50; }
+                        else                    { bGrade = "D"; bGradeClr = clrMiss; }
+                    } else {
+                        if (bAcc >= 99.9f)      { bGrade = "SS"; bGradeClr = Ui::rgba(255, 102, 171); }
+                        else if (bAcc >= 93.0f) { bGrade = "S";  bGradeClr = clrCursor; }
+                        else if (bAcc >= 85.0f) { bGrade = "A";  bGradeClr = clr100; }
+                        else if (bAcc >= 75.0f) { bGrade = "B";  bGradeClr = clr300; }
+                        else                    { bGrade = "C";  bGradeClr = clr50; }
+                    }
+
+                    Ui::glow(bcX, bcY - 4.0f, 0.51f, 32.0f, Ui::withAlpha(bGradeClr, 110), 3);
+                    drawCenteredText(textBuf, bcX, bcY - 4.0f, 0.85f, bGradeClr, bGrade, 0.55f);
+
+                    char cdStr[48];
+                    float sLeft = std::max(0.0f, breakRemainingMs / 1000.0f);
+                    std::snprintf(cdStr, sizeof(cdStr), "Circulos en: %.1f s", sLeft);
+                    drawCenteredText(textBuf, bcX, bcY + 21.0f, 0.38f, clrWhite, cdStr, 0.54f);
+
+                    std::snprintf(cdStr, sizeof(cdStr), "Precision: %.1f%%  •  %dx", bAcc, combo);
+                    drawCenteredText(textBuf, bcX, bcY + 33.0f, 0.28f, clrMuted, cdStr, 0.54f);
+                    drawCenteredText(textBuf, bcX, bcY + 44.0f, 0.25f, clrCursor, "[Manten SELECT para Humo]", 0.54f);
+
+                    // Indicador de advertencia visual (últimos 2.2 segundos antes de que vuelvan las notas)
+                    if (breakRemainingMs <= 2200) {
+                        float warnPhase = static_cast<float>(2200 - breakRemainingMs) / 2200.0f;
+                        float blink = 0.5f + 0.5f * std::sin(animTick * 0.45f);
+
+                        // Pill superior parpadeante de ¡ATENTO!
+                        Ui::pill(bcX - 45.0f, bcY - 64.0f, 90.0f, 16.0f, 0.56f, Ui::withAlpha(clrMiss, static_cast<u8>(180 + 75 * blink)));
+                        drawCenteredText(textBuf, bcX, bcY - 56.0f, 0.35f, clrWhite, "¡ATENTO!", 0.58f);
+
+                        // Anillos concéntricos convergiendo hacia el próximo círculo
+                        float nx = playX(breakNextObjPos.x, dCircle);
+                        float ny = playY(breakNextObjPos.y);
+                        float targetR = rScreen * (1.1f + (1.0f - warnPhase) * 1.5f);
+
+                        drawRing(nx, ny, targetR, 2.2f, Ui::withAlpha(clrCursor, static_cast<u8>(220 * blink)), 24, 0.58f);
+                        drawRing(nx, ny, rScreen, 1.4f, Ui::withAlpha(clrWhite, 190), 20, 0.58f);
+
+                        // Flechas laterales apuntando hacia el objetivo
+                        float aDist = targetR + 8.0f;
+                        C2D_DrawTriangle(nx - aDist, ny, clrCursor, nx - aDist - 7.0f, ny - 6.0f, clrCursor, nx - aDist - 7.0f, ny + 6.0f, clrCursor, 0.59f);
+                        C2D_DrawTriangle(nx + aDist, ny, clrCursor, nx + aDist + 7.0f, ny - 6.0f, clrCursor, nx + aDist + 7.0f, ny + 6.0f, clrCursor, 0.59f);
+                    }
+                }
+            }
+
+            // Botón SKIP >> animado con estilo osu!
+            if (skipAvailable && !isPaused) {
+                float skipX = drawFullHud ? (302.0f + dFrontHud) : 210.0f;
+                float skipY = drawFullHud ? 198.0f : 194.0f;
+                float skipW = drawFullHud ? 92.0f : 100.0f;
+                float skipH = drawFullHud ? 32.0f : 36.0f;
+
+                float skipPulse = 0.5f + 0.5f * std::sin(animTick * 0.25f);
+                u32 sBg = Ui::lerpColor(Ui::rgba(255, 80, 140, 240), Ui::rgba(255, 120, 180, 250), skipPulse);
+
+                Ui::panel(skipX, skipY, skipW, skipH, 0.94f, sBg, clrWhite);
+                drawCenteredText(textBuf, skipX + (skipW * 0.5f), skipY + (skipH * 0.35f), 0.46f, clrWhite, "SKIP >>", 0.96f);
+                drawCenteredText(textBuf, skipX + (skipW * 0.5f), skipY + (skipH * 0.74f), 0.26f, Ui::rgba(255, 235, 245),
+                                 drawFullHud ? "ZL / ZR / START" : "Toca o ZL / ZR", 0.96f);
+            }
+
+            // Combo Burst (Aparición de personaje / mascota en hitos de combo: 30x, 60x, 100x, 150x...)
+            if (comboBurstTimer > 0 && drawFullHud && !isPaused) {
+                float slideT = 1.0f;
+                float alpha = 1.0f;
+                if (comboBurstTimer > 32) {
+                    float t = static_cast<float>(48 - comboBurstTimer) / 16.0f;
+                    slideT = std::sin(t * (static_cast<float>(M_PI) * 0.5f));
+                    alpha = std::min(1.0f, t * 1.5f);
+                } else if (comboBurstTimer <= 14) {
+                    float t = static_cast<float>(comboBurstTimer) / 14.0f;
+                    slideT = t;
+                    alpha = t;
+                }
+
+                float burstW = 120.0f;
+                float burstH = 175.0f;
+                float restX = (comboBurstSide == 0) ? (screenW - burstW + 15.0f) : -15.0f;
+                float offX  = (comboBurstSide == 0) ? (screenW + 10.0f) : (-burstW - 10.0f);
+                float dBurst = depthShift(4.4f);
+                float burstX = offX + (restX - offX) * slideT + dBurst;
+                float burstY = 240.0f - burstH + 5.0f;
+                u8 aVal = static_cast<u8>(255.0f * alpha);
+
+                if (texSkinComboBurst.loaded) {
+                    texSkinComboBurst.drawRect(burstX, burstY, burstW, burstH, 0.82f, aVal);
+                } else {
+                    // Mascota vectorial estilizada de osu! (Chibi Pippi con orejitas anime, destellos y badge)
+                    float cx = burstX + burstW * 0.5f;
+                    float cy = burstY + burstH * 0.55f;
+                    u32 pPink = Ui::withAlpha(Ui::rgba(255, 102, 171), aVal);
+                    u32 pGold = Ui::withAlpha(Ui::rgba(255, 215, 60), aVal);
+                    u32 pDark = Ui::withAlpha(Ui::rgba(26, 20, 42), static_cast<u8>(aVal * 0.90f));
+
+                    // Resplandor de fondo
+                    Ui::glow(cx, cy, 0.80f, 65.0f, Ui::withAlpha(pPink, static_cast<u8>(aVal * 0.45f)), 3);
+
+                    // Silueta de cuerpo y cabeza estilizada
+                    C2D_DrawCircleSolid(cx, cy - 14.0f, 0.81f, 32.0f, pPink);
+                    C2D_DrawCircleSolid(cx, cy - 14.0f, 0.82f, 28.0f, pDark);
+
+                    // Auriculares de gatito / orejitas anime
+                    C2D_DrawTriangle(cx - 24.0f, cy - 30.0f, pPink, cx - 10.0f, cy - 42.0f, pPink, cx - 8.0f, cy - 28.0f, pPink, 0.83f);
+                    C2D_DrawTriangle(cx + 24.0f, cy - 30.0f, pPink, cx + 10.0f, cy - 42.0f, pPink, cx + 8.0f, cy - 28.0f, pPink, 0.83f);
+                    C2D_DrawTriangle(cx - 20.0f, cy - 30.0f, pGold, cx - 11.0f, cy - 38.0f, pGold, cx - 9.0f, cy - 28.0f, pGold, 0.84f);
+                    C2D_DrawTriangle(cx + 20.0f, cy - 30.0f, pGold, cx + 11.0f, cy - 38.0f, pGold, cx + 9.0f, cy - 28.0f, pGold, 0.84f);
+
+                    // Ojos estilo anime felices (^^)
+                    drawRing(cx - 10.0f, cy - 16.0f, 6.0f, 1.8f, pPink, 14, 0.84f);
+                    drawRing(cx + 10.0f, cy - 16.0f, 6.0f, 1.8f, pPink, 14, 0.84f);
+                    C2D_DrawCircleSolid(cx - 12.0f, cy - 10.0f, 0.84f, 4.0f, Ui::withAlpha(Ui::rgba(255, 140, 180), aVal));
+                    C2D_DrawCircleSolid(cx + 12.0f, cy - 10.0f, 0.84f, 4.0f, Ui::withAlpha(Ui::rgba(255, 140, 180), aVal));
+
+                    // Estrellas flotantes de celebración
+                    float sBob = std::sin(animTick * 0.2f) * 4.0f;
+                    Ui::glow(cx - 36.0f, cy - 35.0f + sBob, 0.85f, 10.0f, pGold, 2);
+                    C2D_DrawCircleSolid(cx - 36.0f, cy - 35.0f + sBob, 0.86f, 4.0f, pGold);
+                    Ui::glow(cx + 36.0f, cy - 25.0f - sBob, 0.85f, 10.0f, pGold, 2);
+                    C2D_DrawCircleSolid(cx + 36.0f, cy - 25.0f - sBob, 0.86f, 4.5f, pGold);
+                }
+
+                // Cinta o Badge con el hito: "100 COMBO!"
+                char cbStr[32];
+                std::snprintf(cbStr, sizeof(cbStr), "%d COMBO!", comboBurstValue);
+                float pillW = 96.0f;
+                float pillH = 18.0f;
+                float pillX = burstX + (burstW - pillW) * 0.5f;
+                float pillY = burstY + burstH - 26.0f;
+
+                Ui::pill(pillX, pillY, pillW, pillH, 0.85f, Ui::withAlpha(Ui::rgba(255, 102, 171), aVal));
+                drawCenteredText(textBuf, pillX + pillW * 0.5f, pillY + pillH * 0.5f, 0.38f, Ui::withAlpha(clrWhite, aVal), cbStr, 0.88f);
+            }
+
+            // Overlay de Pausa en pantalla superior (estilo osu!lazer)
+            if (drawFullHud && isPaused) {
+                float dPause = depthShift(5.0f);
+                C2D_DrawRectSolid(0.0f, 0.0f, 0.90f, 400.0f, 240.0f, Ui::rgba(8, 6, 16, 185));
+                Ui::panel(70.0f + dPause, 36.0f, 260.0f, 168.0f, 0.92f, Ui::rgba(22, 18, 38, 248), clrPrimary);
+                drawCenteredText(textBuf, 200.0f + dPause, 58.0f, 0.62f, clrCursor, "JUEGO EN PAUSA", 0.99f);
+
+                const char* pOpts[3] = { "Continuar", "Reintentar Beatmap", "Volver a Canciones" };
+                u32 pClrs[3] = { clr100, clrCursor, clrPrimary };
+                for (int i = 0; i < 3; ++i) {
+                    bool sel = (pauseOption == i);
+                    float py = 84.0f + i * 34.0f;
+                    if (sel) {
+                        Ui::slantRectGrad(90.0f + dPause, py, 220.0f, 26.0f, 8.0f, 0.95f, pClrs[i], Ui::rgba(45, 35, 78, 245));
+                    } else {
+                        Ui::slantRect(90.0f + dPause, py, 220.0f, 26.0f, 8.0f, 0.94f, Ui::rgba(36, 30, 56, 220));
+                    }
+                    drawCenteredText(textBuf, 200.0f + dPause, py + 13.0f, 0.46f, clrWhite, pOpts[i], 0.99f);
+                }
+                if (isTaikoPlay) {
+                    u32 bClr = (settings.taikoBgMode == 0) ? Ui::rgba(225, 145, 25, 230) : ((settings.taikoBgMode == 1) ? Ui::rgba(45, 130, 215, 230) : Ui::rgba(165, 55, 185, 230));
+                    Ui::pill(90.0f + dPause, 186.0f, 220.0f, 15.0f, 0.94f, bClr);
+                    char bgInfo[64];
+                    std::snprintf(bgInfo, sizeof(bgInfo), "X: Fondo Taiko (%s)", settings.getTaikoBgModeName());
+                    drawCenteredText(textBuf, 200.0f + dPause, 193.5f, 0.26f, clrWhite, bgInfo, 0.99f);
+                }
+            }
+            Ui::drawTransition(screenW, 240.0f, screenFade, clrPrimary);
+        };
+
+        // --- PANTALLA SUPERIOR (OJO IZQUIERDO Y OJO DERECHO EN 3D + HUD COMPLETO) ---
+        for (int eye = 0; eye < (stereoActive ? 2 : 1); ++eye) {
+            C3D_RenderTarget* curTop = (eye == 0) ? topScreen : topScreenRight;
+            float eyeSign = stereoActive ? ((eye == 0) ? 1.0f : -1.0f) : 0.0f;
+            C2D_TargetClear(curTop, clrBgDark);
+            C2D_SceneBegin(curTop);
+            renderPlayfield(400.0f, PLAYFIELD_TOP_OFFSET_X, PLAYFIELD_TOP_OFFSET_Y, eyeSign, slider3D, true);
         }
 
-        // --- PANTALLA INFERIOR: SUPERFICIE DE TABLET ACTIVA O BOTONES TÁCTILES DE PAUSA ---
+        // --- PANTALLA INFERIOR: JUEGO TÁCTIL DIRECTO 1:1, SUPERFICIE DE TABLET O PAUSA ---
         C2D_TargetClear(bottomScreen, clrTabletBg);
         C2D_SceneBegin(bottomScreen);
 
         if (isPaused) {
+            Ui::backdrop(320.0f, 240.0f, static_cast<float>(animTick), Ui::rgba(22, 16, 38), Ui::rgba(10, 8, 18), clrPrimary, 0.01f);
             const char* pOpts[3] = { "CONTINUAR", "REINTENTAR", "VOLVER A CANCIONES" };
+            u32 pClrs[3] = { clr100, clrCursor, clrPrimary };
             for (int i = 0; i < 3; ++i) {
                 bool sel = (pauseOption == i);
                 float bx = 40.0f;
-                float by = 40.0f + i * 58.0f;
+                float by = 40.0f + i * 54.0f;
                 float bw = 240.0f;
-                float bh = 44.0f;
+                float bh = 42.0f;
 
-                u32 bg = sel ? clrPrimary : clrPanelBg;
-                C2D_DrawRectSolid(bx, by, 0.2f, bw, bh, bg);
-                drawRectOutline(bx, by, bw, bh, sel ? 2.0f : 1.0f, sel ? clrWhite : clrMuted, 0.3f);
-                drawCenteredText(textBuf, bx + bw * 0.5f, by + bh * 0.5f, 0.52f, clrWhite, pOpts[i], 0.85f);
+                if (sel) {
+                    Ui::slantRectGrad(bx, by, bw, bh, 12.0f, 0.25f, pClrs[i], Ui::rgba(45, 35, 78, 245));
+                    C2D_DrawLine(bx + 12.0f, by, clrWhite, bx + bw, by, clrWhite, 1.5f, 0.3f);
+                } else {
+                    Ui::slantRectGrad(bx, by, bw, bh, 12.0f, 0.2f, Ui::rgba(40, 35, 62, 230), Ui::rgba(22, 19, 36, 230));
+                    C2D_DrawLine(bx + 12.0f, by, pClrs[i], bx, by + bh, pClrs[i], 3.0f, 0.3f);
+                }
+                drawCenteredText(textBuf, bx + bw * 0.5f, by + bh * 0.5f, 0.50f, clrWhite, pOpts[i], 0.85f);
             }
+            if (isTaikoPlay) {
+                u32 bClr = (settings.taikoBgMode == 0) ? Ui::rgba(225, 145, 25, 240) : ((settings.taikoBgMode == 1) ? Ui::rgba(45, 130, 215, 240) : Ui::rgba(165, 55, 185, 240));
+                Ui::pill(40.0f, 206.0f, 240.0f, 24.0f, 0.25f, bClr);
+                char bgInfo[64];
+                std::snprintf(bgInfo, sizeof(bgInfo), "Fondo Taiko: %s (Toca o X)", settings.getTaikoBgModeName());
+                drawCenteredText(textBuf, 160.0f, 218.0f, 0.32f, clrWhite, bgInfo, 0.85f);
+            }
+            Ui::drawTransition(320.0f, 240.0f, screenFade, clrPrimary);
+        } else if (isTaikoPlay) {
+            // Modo osu!taiko: Tambor interactivo táctil completo en la pantalla inferior (estilo 3DS 1:1)
+            taikoEngine.renderBottomDrum(textBuf, static_cast<float>(animTick), &settings, taikoGuideAlpha);
+
+            // Botón SKIP si aplica
+            if (skipAvailable) {
+                float skipPulse = 0.5f + 0.5f * std::sin(animTick * 0.25f);
+                u32 sBg = Ui::lerpColor(Ui::rgba(255, 80, 140, 240), Ui::rgba(255, 120, 180, 250), skipPulse);
+                Ui::panel(212.0f, 196.0f, 100.0f, 34.0f, 0.85f, sBg, clrWhite);
+                drawCenteredText(textBuf, 262.0f, 208.0f, 0.44f, clrWhite, "SKIP >>", 0.90f);
+                drawCenteredText(textBuf, 262.0f, 222.0f, 0.25f, Ui::rgba(255, 230, 242), "Toca o ZL / ZR", 0.90f);
+            }
+            Ui::drawTransition(320.0f, 240.0f, screenFade, clrPrimary);
+        } else if (isManiaPlay) {
+            // Modo osu!mania: Teclado interactivo de 4 columnas en la pantalla inferior
+            Ui::backdrop(320.0f, 240.0f, static_cast<float>(animTick), Ui::rgba(18, 14, 30), Ui::rgba(8, 6, 14), clrPrimary, 0.01f);
+            maniaEngine.renderBottomLanes(textBuf, static_cast<float>(animTick));
+
+            // Mini HUD superior discreto (Barra de HP)
+            u32 hpClr = (hp > 0.5f) ? clr100 : ((hp > 0.25f) ? clr50 : clrMiss);
+            C2D_DrawRectSolid(0.0f, 0.0f, 0.29f, 320.0f, 4.0f, Ui::rgba(0, 0, 0, 150));
+            if (hp > 0.0f) Ui::gradH(0.0f, 0.0f, 320.0f * hp, 3.0f, 0.35f, Ui::brighten(hpClr, 0.6f), hpClr);
+
+            // Botón SKIP si aplica
+            if (skipAvailable) {
+                float skipPulse = 0.5f + 0.5f * std::sin(animTick * 0.25f);
+                u32 sBg = Ui::lerpColor(Ui::rgba(255, 80, 140, 240), Ui::rgba(255, 120, 180, 250), skipPulse);
+                Ui::panel(212.0f, 196.0f, 100.0f, 34.0f, 0.85f, sBg, clrWhite);
+                drawCenteredText(textBuf, 262.0f, 208.0f, 0.44f, clrWhite, "SKIP >>", 0.90f);
+                drawCenteredText(textBuf, 262.0f, 222.0f, 0.25f, Ui::rgba(255, 230, 242), "Toca o ZL / ZR", 0.90f);
+            }
+            Ui::drawTransition(320.0f, 240.0f, screenFade, clrPrimary);
+        } else if (isCatchPlay) {
+            // Modo osu!catch: Deck de control táctil con radar de frutas en la pantalla inferior
+            Ui::backdrop(320.0f, 240.0f, static_cast<float>(animTick), Ui::rgba(16, 22, 34), Ui::rgba(8, 12, 18), clrPrimary, 0.01f);
+            catchEngine.renderBottomDeck(textBuf, static_cast<float>(animTick), songTime);
+
+            // Mini HUD superior discreto (Barra de HP)
+            u32 hpClr = (hp > 0.5f) ? clr100 : ((hp > 0.25f) ? clr50 : clrMiss);
+            C2D_DrawRectSolid(0.0f, 0.0f, 0.29f, 320.0f, 4.0f, Ui::rgba(0, 0, 0, 150));
+            if (hp > 0.0f) Ui::gradH(0.0f, 0.0f, 320.0f * hp, 3.0f, 0.35f, Ui::brighten(hpClr, 0.6f), hpClr);
+
+            // Botón SKIP si aplica
+            if (skipAvailable) {
+                float skipPulse = 0.5f + 0.5f * std::sin(animTick * 0.25f);
+                u32 sBg = Ui::lerpColor(Ui::rgba(255, 80, 140, 240), Ui::rgba(255, 120, 180, 250), skipPulse);
+                Ui::panel(212.0f, 196.0f, 100.0f, 34.0f, 0.85f, sBg, clrWhite);
+                drawCenteredText(textBuf, 262.0f, 208.0f, 0.44f, clrWhite, "SKIP >>", 0.90f);
+                drawCenteredText(textBuf, 262.0f, 222.0f, 0.25f, Ui::rgba(255, 230, 242), "Toca o ZL / ZR", 0.90f);
+            }
+            Ui::drawTransition(320.0f, 240.0f, screenFade, clrPrimary);
+        } else if (settings.playOnBottomScreen) {
+            // ¡Modo Táctil Directo! Renderiza el playfield completo 1:1 en la pantalla inferior (320x240)
+            renderPlayfield(320.0f, PLAYFIELD_BOT_OFFSET_X, PLAYFIELD_BOT_OFFSET_Y, 0.0f, 0.0f, false);
         } else {
+            Ui::backdrop(320.0f, 240.0f, static_cast<float>(animTick), Ui::rgba(22, 16, 38), Ui::rgba(10, 8, 18), clrPrimary, 0.01f);
             float rx, ry, rw, rh;
             settings.getTabletRect(rx, ry, rw, rh);
 
-            C2D_DrawRectSolid(rx, ry, 0.1f, rw, rh, C2D_Color32(28, 25, 40, 255));
-            drawRectOutline(rx, ry, rw, rh, 1.5f, C2D_Color32(85, 75, 120, 200));
-            drawRing(settings.tabletCenterX, settings.tabletCenterY, 12.0f, 1.0f, C2D_Color32(55, 50, 75, 255), 16);
+            Ui::panel(rx, ry, rw, rh, 0.1f, C2D_Color32(28, 24, 44, 235), clrPrimary);
+            u32 gridClr = C2D_Color32(95, 80, 145, 70);
+            C2D_DrawLine(rx + rw * 0.5f, ry, gridClr, rx + rw * 0.5f, ry + rh, gridClr, 1.0f, 0.14f);
+            C2D_DrawLine(rx, ry + rh * 0.5f, gridClr, rx + rw, ry + rh * 0.5f, gridClr, 1.0f, 0.14f);
+            drawRectOutline(rx, ry, rw, rh, 1.5f, C2D_Color32(120, 95, 185, 200), 0.16f);
+            if (kiaiGlow > 0.01f) {
+                float pulse = getBpmPulse();
+                u8 tAlpha = static_cast<u8>(kiaiGlow * (45.0f + 110.0f * pulse));
+                drawRectOutline(rx - 1.0f, ry - 1.0f, rw + 2.0f, rh + 2.0f, 2.0f, Ui::rgba(255, 195, 75, tAlpha), 0.17f);
+            }
+            drawRing(settings.tabletCenterX, settings.tabletCenterY, 12.0f, 1.2f, C2D_Color32(110, 95, 165, 180), 18, 0.18f);
+
+            // Barra inferior de información rápida de la canción
+            Ui::gradV(0.0f, 218.0f, 320.0f, 22.0f, 0.25f, Ui::rgba(14, 11, 26, 120), Ui::rgba(14, 11, 26, 240));
+            std::string nowPlaying = truncateString(beatmap.title + " [" + beatmap.version + "]", 42);
+            drawCenteredText(textBuf, 160.0f, 229.0f, 0.36f, clrMuted, nowPlaying.c_str(), 0.3f);
 
             if (isTouching) {
+                Ui::glow(touch.px, touch.py, 0.45f, 12.0f, Ui::withAlpha(clrKeyActive, 130), 3);
                 C2D_DrawCircleSolid(touch.px, touch.py, 0.5f, 4.0f, clrKeyActive);
             }
+
+            if (skipAvailable && !isPaused) {
+                float skipPulse = 0.5f + 0.5f * std::sin(animTick * 0.25f);
+                u32 sBg = Ui::lerpColor(Ui::rgba(255, 80, 140, 240), Ui::rgba(255, 120, 180, 250), skipPulse);
+                Ui::panel(212.0f, 196.0f, 100.0f, 34.0f, 0.85f, sBg, clrWhite);
+                drawCenteredText(textBuf, 262.0f, 208.0f, 0.44f, clrWhite, "SKIP >>", 0.90f);
+                drawCenteredText(textBuf, 262.0f, 222.0f, 0.25f, Ui::rgba(255, 230, 242), "Toca o ZL / ZR", 0.90f);
+            }
+            Ui::drawTransition(320.0f, 240.0f, screenFade, clrPrimary);
         }
 
         C3D_FrameEnd(0);
     }
 
+    videoPlayer.shutdown();
+    bgLoader.stop();
     bgTex.unload();
     texSkinCursor.unload();
+    texSkinCursorTrail.unload();
     texSkinCircle.unload();
     texSkinOverlay.unload();
     texSkinApproach.unload();
+    texSkinComboBurst.unload();
     settings.save();
     audio.exitAll();
     C2D_TextBufDelete(textBuf);
@@ -2054,5 +6805,6 @@ int main(int argc, char* argv[]) {
     C3D_Fini();
     romfsExit();
     gfxExit();
+    osSetSpeedupEnable(false);
     return 0;
 }

@@ -33,6 +33,7 @@ struct TimingPoint {
     float beatLength = 333.33f;
     bool uninherited = true;
     int volume = 100;
+    bool kiai = false;
 };
 
 struct SliderTick {
@@ -55,6 +56,7 @@ struct HitCircle {
 
     bool isSlider = false;
     bool isSpinner = false;
+    bool isHold = false;
     bool sliderDone = false;
     bool sliderTracking = false;
     int repeats = 1;
@@ -68,6 +70,9 @@ struct HitCircle {
     float spinnerProgress = 0.0f;
     float spinnerRequiredRads = 12.0f;
     float lastSpinnerAngle = 0.0f;
+    float spinnerRotAngle = 0.0f;
+    int spinnerBonusCount = 0;
+    bool spinnerCleared = false;
     bool spinnerAngleInit = false;
 
     int stackCount = 0;
@@ -165,10 +170,14 @@ struct Beatmap {
     std::string fullAudioPath = "";
     std::string backgroundFilename = "";
     std::string fullBackgroundPath = "";
+    std::string videoFilename = "";
+    std::string fullVideoPath = "";
+    int videoOffsetMs = 0;
     int audioLeadIn = 0;
     int previewTime = -1;
     float stackLeniency = 0.7f;
     int mode = 0;
+    std::string sampleSetName = "Normal";
 
     std::string title = "Unknown";
     std::string artist = "Unknown Artist";
@@ -178,14 +187,27 @@ struct Beatmap {
     BeatmapDifficulty diff;
     float starRating = 1.5f;
     int maxPossibleCombo = 0;
+    float baseBeatLengthMs = 500.0f;
+    float firstTimingOffsetMs = 0.0f;
 
     std::vector<TimingPoint> timingPoints;
     std::vector<RGBColor> customComboColors;
     std::vector<HitCircle> circles;
 
+    struct BreakPeriod {
+        int startTime = 0;
+        int endTime = 0;
+        BreakPeriod() = default;
+        BreakPeriod(int s, int e) : startTime(s), endTime(e) {}
+    };
+    std::vector<BreakPeriod> breaks;
+
     int circleCount = 0;
     int sliderCount = 0;
     int spinnerCount = 0;
+    int firstObjectTime = 0;
+    int lastObjectTime = 0;
+    std::vector<float> strainGraph;
 
     struct StrainSample {
         float x;
@@ -304,14 +326,78 @@ struct Beatmap {
         return fallbackImg;
     }
 
+    // Resuelve la ruta del archivo de video optimizado para 3DS (.3dsv o .mjpg) en la carpeta de la canción
+    static std::string resolveVideoPath(const std::string& folder, const std::string& vidName) {
+        if (folder.empty() || folder == "romfs:/") return "";
+
+        std::string stemLower = "";
+        if (!vidName.empty()) {
+            size_t dot = vidName.find_last_of('.');
+            std::string stem = (dot != std::string::npos) ? vidName.substr(0, dot) : vidName;
+            stemLower = toLower(stem);
+
+            // Probar nombres directos comunes primero
+            const char* exts[] = { ".3dsv", ".mjpg" };
+            for (const char* ext : exts) {
+                std::string tryPath = folder + stem + ext;
+                FILE* f = std::fopen(tryPath.c_str(), "rb");
+                if (f) { std::fclose(f); return tryPath; }
+            }
+        }
+
+        // Probar video.3dsv / video.mjpg estandar generado por el gestor Wi-Fi
+        {
+            const char* defaults[] = { "video.3dsv", "video.mjpg" };
+            for (const char* defName : defaults) {
+                std::string tryPath = folder + defName;
+                FILE* f = std::fopen(tryPath.c_str(), "rb");
+                if (f) { std::fclose(f); return tryPath; }
+            }
+        }
+
+        std::string dirPath = folder;
+        if (dirPath.size() > 1 && dirPath.back() == '/' && dirPath.find(":/") != dirPath.size() - 2) {
+            dirPath.pop_back();
+        }
+        DIR* dir = opendir(dirPath.c_str());
+        if (!dir) return "";
+
+        std::string fallbackVid = "";
+        struct dirent* entry;
+        while ((entry = readdir(dir)) != nullptr) {
+            std::string candidate = entry->d_name;
+            std::string candLower = toLower(candidate);
+            bool isVideoExt = (candLower.size() > 5 && candLower.rfind(".3dsv") == candLower.size() - 5) ||
+                              (candLower.size() > 5 && candLower.rfind(".mjpg") == candLower.size() - 5);
+            if (!isVideoExt) continue;
+
+            if (!stemLower.empty() && candLower.rfind(stemLower, 0) == 0) {
+                closedir(dir);
+                return folder + candidate;
+            }
+            if (fallbackVid.empty()) {
+                fallbackVid = folder + candidate;
+            }
+        }
+        closedir(dir);
+        return fallbackVid;
+    }
+
     // Calcula las Estrellas (★ Star Rating) estilo osu!standard analizando saltos (Aim) y velocidad (Speed)
-    float computeStarRatingFromSamples(const std::vector<StrainSample>& samples) const {
-        if (samples.size() < 2) return 1.0f;
+    // y genera la curva de esfuerzo / densidad normalizada (strainGraph)
+    float computeStarRatingFromSamples(const std::vector<StrainSample>& samples, std::vector<float>* outGraph = nullptr) const {
+        if (samples.size() < 2) {
+            if (outGraph) outGraph->assign(48, 0.08f);
+            return 1.0f;
+        }
 
         std::vector<float> aimPeaks;
         std::vector<float> speedPeaks;
         aimPeaks.reserve(64);
         speedPeaks.reserve(64);
+
+        std::vector<float> rawStrains;
+        if (outGraph) rawStrains.reserve(samples.size() / 2 + 16);
 
         const int sectionLen = 400;
         int currentSectionEnd = samples.front().time + sectionLen;
@@ -326,6 +412,7 @@ struct Beatmap {
             while (t > currentSectionEnd) {
                 aimPeaks.push_back(maxAimInSec);
                 speedPeaks.push_back(maxSpeedInSec);
+                if (outGraph) rawStrains.push_back(maxAimInSec + maxSpeedInSec);
                 curAimStrain *= 0.35f;
                 curSpeedStrain *= 0.35f;
                 maxAimInSec = curAimStrain;
@@ -352,6 +439,35 @@ struct Beatmap {
         }
         aimPeaks.push_back(maxAimInSec);
         speedPeaks.push_back(maxSpeedInSec);
+        if (outGraph) rawStrains.push_back(maxAimInSec + maxSpeedInSec);
+
+        // Generar 48 puntos normalizados (0.0f..1.0f) para la curva de esfuerzo / densidad
+        if (outGraph) {
+            const int targetBins = 48;
+            outGraph->assign(targetBins, 0.08f);
+            if (!rawStrains.empty()) {
+                float maxStrain = 0.001f;
+                for (float s : rawStrains) {
+                    if (s > maxStrain) maxStrain = s;
+                }
+                size_t numSrc = rawStrains.size();
+                for (int b = 0; b < targetBins; ++b) {
+                    float pos = (static_cast<float>(b) / static_cast<float>(targetBins - 1)) * static_cast<float>(numSrc - 1);
+                    size_t idx = static_cast<size_t>(pos);
+                    float frac = pos - static_cast<float>(idx);
+                    float v0 = rawStrains[idx];
+                    float v1 = (idx + 1 < numSrc) ? rawStrains[idx + 1] : v0;
+                    float interp = (1.0f - frac) * v0 + frac * v1;
+                    (*outGraph)[b] = std::max(0.04f, std::min(1.0f, interp / maxStrain));
+                }
+                // Filtro de suavizado de 3 puntos
+                std::vector<float> smoothed = *outGraph;
+                for (int b = 1; b < targetBins - 1; ++b) {
+                    smoothed[b] = (*outGraph)[b - 1] * 0.22f + (*outGraph)[b] * 0.56f + (*outGraph)[b + 1] * 0.22f;
+                }
+                *outGraph = smoothed;
+            }
+        }
 
         std::sort(aimPeaks.begin(), aimPeaks.end(), std::greater<float>());
         std::sort(speedPeaks.begin(), speedPeaks.end(), std::greater<float>());
@@ -527,6 +643,38 @@ struct Beatmap {
         }
     }
 
+    // Determina si el efecto Kiai Time está activo en el momento timeMs
+    bool isKiaiAt(int timeMs) const {
+        if (timingPoints.empty()) return false;
+        bool activeKiai = false;
+        for (const auto& tp : timingPoints) {
+            if (tp.time > static_cast<double>(timeMs) + 1.0) break;
+            activeKiai = tp.kiai;
+        }
+        return activeKiai;
+    }
+
+    // Obtiene el tiempo base y duracion del beat activo para ritmos y metronomos (Nightcore)
+    bool getBeatInfoAt(int timeMs, double& outBeatTime, float& outBeatLength) const {
+        if (timingPoints.empty()) {
+            outBeatTime = 0.0;
+            outBeatLength = baseBeatLengthMs > 0.0f ? baseBeatLengthMs : 500.0f;
+            return false;
+        }
+        double tpTime = timingPoints.front().time;
+        float beatLen = baseBeatLengthMs > 0.0f ? baseBeatLengthMs : 500.0f;
+        for (const auto& tp : timingPoints) {
+            if (tp.time > static_cast<double>(timeMs) + 1.0) break;
+            if (tp.uninherited && tp.beatLength > 0.0f) {
+                tpTime = tp.time;
+                beatLen = tp.beatLength;
+            }
+        }
+        outBeatTime = tpTime;
+        outBeatLength = beatLen;
+        return true;
+    }
+
     void applyStacking() {
         if (circles.size() < 2 || stackLeniency <= 0.0f) return;
 
@@ -610,6 +758,9 @@ struct Beatmap {
         audioFilename = "audio.mp3";
         backgroundFilename = "";
         fullBackgroundPath = "";
+        videoFilename = "";
+        fullVideoPath = "";
+        videoOffsetMs = 0;
         audioLeadIn = 0;
         previewTime = -1;
         stackLeniency = 0.7f;
@@ -618,13 +769,21 @@ struct Beatmap {
         artist = "Unknown Artist";
         creator = "";
         version = "Normal";
+        sampleSetName = "Normal";
         diff = BeatmapDifficulty();
         starRating = 1.5f;
         maxPossibleCombo = 0;
+        baseBeatLengthMs = 500.0f;
+        firstTimingOffsetMs = 0.0f;
+        firstObjectTime = 0;
+        lastObjectTime = 0;
+        strainGraph.clear();
+        bool foundBaseBpm = false;
 
         timingPoints.clear();
         customComboColors.clear();
         circles.clear();
+        breaks.clear();
         if (!metadataOnly) circles.reserve(1024);
 
         std::vector<StrainSample> strainSamples;
@@ -663,6 +822,7 @@ struct Beatmap {
                     else if (key == "PreviewTime")   previewTime = std::atoi(val.c_str());
                     else if (key == "StackLeniency") stackLeniency = std::strtof(val.c_str(), nullptr);
                     else if (key == "Mode")          mode = std::atoi(val.c_str());
+                    else if (key == "SampleSet")     sampleSetName = val;
                 }
             } else if (section == "Metadata") {
                 size_t sep = line.find(':');
@@ -690,7 +850,17 @@ struct Beatmap {
                     else if (key == "SliderTickRate")    diff.sliderTickRate = std::strtof(val.c_str(), nullptr);
                 }
             } else if (section == "Events") {
-                if (backgroundFilename.empty() && (line.rfind("0,", 0) == 0 || line.rfind("Image,", 0) == 0)) {
+                if (line.rfind("2,", 0) == 0 || line.rfind("Break,", 0) == 0) {
+                    std::vector<std::string> ev = split(line, ',');
+                    if (ev.size() >= 3) {
+                        BreakPeriod bp;
+                        bp.startTime = std::atoi(trim(ev[1]).c_str());
+                        bp.endTime = std::atoi(trim(ev[2]).c_str());
+                        if (bp.endTime > bp.startTime + 1500) {
+                            breaks.push_back(bp);
+                        }
+                    }
+                } else if (backgroundFilename.empty() && (line.rfind("0,", 0) == 0 || line.rfind("Image,", 0) == 0)) {
                     std::vector<std::string> ev = split(line, ',');
                     if (ev.size() >= 3) {
                         std::string bg = trim(ev[2]);
@@ -700,6 +870,18 @@ struct Beatmap {
                         size_t sl = bg.find_last_of("/\\");
                         if (sl != std::string::npos) bg = bg.substr(sl + 1);
                         if (!bg.empty()) backgroundFilename = bg;
+                    }
+                } else if (videoFilename.empty() && (line.rfind("1,", 0) == 0 || line.rfind("Video,", 0) == 0)) {
+                    std::vector<std::string> ev = split(line, ',');
+                    if (ev.size() >= 3) {
+                        videoOffsetMs = std::atoi(trim(ev[1]).c_str());
+                        std::string vid = trim(ev[2]);
+                        if (vid.size() >= 2 && vid.front() == '"' && vid.back() == '"') {
+                            vid = vid.substr(1, vid.size() - 2);
+                        }
+                        size_t sl = vid.find_last_of("/\\");
+                        if (sl != std::string::npos) vid = vid.substr(sl + 1);
+                        if (!vid.empty()) videoFilename = vid;
                     }
                 }
             } else if (section == "Colours") {
@@ -720,7 +902,7 @@ struct Beatmap {
                     }
                 }
             } else if (section == "TimingPoints") {
-                if (metadataOnly) continue;
+                if (metadataOnly && foundBaseBpm) continue;
                 std::vector<std::string> tokens = split(line, ',');
                 if (tokens.size() >= 2) {
                     TimingPoint tp;
@@ -734,7 +916,17 @@ struct Beatmap {
                     if (tokens.size() >= 6) {
                         tp.volume = std::atoi(tokens[5].c_str());
                     }
-                    timingPoints.push_back(tp);
+                    if (tokens.size() >= 8) {
+                        tp.kiai = (std::atoi(tokens[7].c_str()) & 1) != 0;
+                    }
+                    if (!foundBaseBpm && tp.uninherited && tp.beatLength > 60.0f && tp.beatLength < 2000.0f) {
+                        baseBeatLengthMs = tp.beatLength;
+                        firstTimingOffsetMs = static_cast<float>(tp.time);
+                        foundBaseBpm = true;
+                    }
+                    if (!metadataOnly) {
+                        timingPoints.push_back(tp);
+                    }
                 }
             } else if (section == "HitObjects") {
                 std::vector<std::string> tokens = split(line, ',');
@@ -744,16 +936,18 @@ struct Beatmap {
                 bool isCircle  = (type & 1) != 0;
                 bool isSlider  = (type & 2) != 0;
                 bool isSpinner = (type & 8) != 0;
+                bool isHold    = (type & 128) != 0;
 
                 if (isCircle)  { circleCount++;  maxPossibleCombo += 1; }
                 if (isSpinner) { spinnerCount++; maxPossibleCombo += 1; }
+                if (isHold)    { circleCount++;  maxPossibleCombo += 2; }
                 if (isSlider)  {
                     sliderCount++;
                     int reps = (tokens.size() >= 7) ? std::max(1, std::atoi(tokens[6].c_str())) : 1;
                     maxPossibleCombo += 1 + reps;
                 }
 
-                if (isCircle || isSlider) {
+                if (isCircle || isSlider || isHold) {
                     strainSamples.push_back({
                         std::strtof(tokens[0].c_str(), nullptr),
                         std::strtof(tokens[1].c_str(), nullptr),
@@ -763,7 +957,7 @@ struct Beatmap {
 
                 if (metadataOnly) continue;
 
-                if (isCircle || isSlider || isSpinner) {
+                if (isCircle || isSlider || isSpinner || isHold) {
                     int colorCount = customComboColors.empty() ? 4 : static_cast<int>(customComboColors.size());
                     if ((type & 4) || circles.empty() || isSpinner) {
                         currentComboNum = 1;
@@ -784,8 +978,14 @@ struct Beatmap {
                     c.state = NOT_HIT;
                     c.isSlider = isSlider;
                     c.isSpinner = isSpinner;
+                    c.isHold = isHold;
 
-                    if (isSpinner && tokens.size() >= 6) {
+                    if (isHold && tokens.size() >= 6) {
+                        std::string endStr = tokens[5];
+                        size_t colon = endStr.find(':');
+                        if (colon != std::string::npos) endStr = endStr.substr(0, colon);
+                        c.endTime = std::max(c.time + 30, std::atoi(endStr.c_str()));
+                    } else if (isSpinner && tokens.size() >= 6) {
                         c.x = 256.0f;
                         c.y = 192.0f;
                         c.endTime = std::max(c.time + 100, std::atoi(tokens[5].c_str()));
@@ -894,10 +1094,46 @@ struct Beatmap {
         diff.calculateDerivedValues();
         fullAudioPath = resolveAudioPath(folderPath, audioFilename);
         fullBackgroundPath = resolveBackgroundPath(folderPath, backgroundFilename);
-        starRating = computeStarRatingFromSamples(strainSamples);
+        fullVideoPath = resolveVideoPath(folderPath, videoFilename);
+        if (!strainSamples.empty()) {
+            firstObjectTime = strainSamples.front().time;
+            lastObjectTime = strainSamples.back().time;
+        }
+        starRating = computeStarRatingFromSamples(strainSamples, &strainGraph);
 
         if (!metadataOnly) {
+            std::sort(timingPoints.begin(), timingPoints.end(), [](const TimingPoint& a, const TimingPoint& b) {
+                return a.time < b.time;
+            });
             applyStacking();
+
+            // Auto-detección de descansos si existen huecos de más de 5.5 segundos entre notas
+            if (circles.size() >= 2) {
+                for (size_t i = 0; i + 1 < circles.size(); ++i) {
+                    int gapStart = circles[i].endTime;
+                    int gapEnd = circles[i + 1].time;
+                    if (gapEnd - gapStart >= 5500) {
+                        int bStart = gapStart + 500;
+                        int bEnd = gapEnd - static_cast<int>(diff.preempt) - 500;
+                        if (bEnd > bStart + 1800) {
+                            bool covered = false;
+                            for (const auto& brk : breaks) {
+                                if (std::abs(brk.startTime - bStart) < 1500 || std::abs(brk.endTime - bEnd) < 1500) {
+                                    covered = true;
+                                    break;
+                                }
+                            }
+                            if (!covered) {
+                                breaks.push_back({bStart, bEnd});
+                            }
+                        }
+                    }
+                }
+                std::sort(breaks.begin(), breaks.end(), [](const BreakPeriod& a, const BreakPeriod& b) {
+                    return a.startTime < b.startTime;
+                });
+            }
+
             return !circles.empty();
         }
         return (circleCount + sliderCount + spinnerCount) > 0;
@@ -927,6 +1163,19 @@ struct Beatmap {
                     }
                     for (auto& tk : c.sliderTicks) {
                         tk.y = 384.0f - tk.y;
+                    }
+                }
+            }
+        }
+        if (mods & (1u << 13)) { // MOD_MR (Mirror horizontal)
+            for (auto& c : circles) {
+                if (!c.isSpinner) {
+                    c.x = 512.0f - c.x;
+                    for (auto& pt : c.sliderPath) {
+                        pt.x = 512.0f - pt.x;
+                    }
+                    for (auto& tk : c.sliderTicks) {
+                        tk.x = 512.0f - tk.x;
                     }
                 }
             }

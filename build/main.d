@@ -117,14 +117,20 @@ main.o: C:/Users/Diyel/osu-3ds/source/main.cpp \
  C:/Users/Diyel/osu-3ds/include/stb_vorbis.h \
  C:/Users/Diyel/osu-3ds/include/SongManager.hpp \
  C:/Users/Diyel/osu-3ds/include/OszExtractor.hpp \
+ C:/Users/Diyel/osu-3ds/include/ScoreManager.hpp \
  C:/Users/Diyel/osu-3ds/include/Settings.hpp \
  C:/Users/Diyel/osu-3ds/include/SkinManager.hpp \
- C:/Users/Diyel/osu-3ds/include/ScoreManager.hpp \
  C:/Users/Diyel/osu-3ds/include/WifiServer.hpp \
  C:/msys64/opt/devkitpro/libctru/include/arpa/inet.h \
  C:/Users/Diyel/osu-3ds/include/TextureLoader.hpp \
  C:/Users/Diyel/osu-3ds/include/stb_image.h \
- C:/Users/Diyel/osu-3ds/include/UiKit.hpp
+ C:/Users/Diyel/osu-3ds/include/VideoPlayer.hpp \
+ C:/Users/Diyel/osu-3ds/include/UiKit.hpp \
+ C:/Users/Diyel/osu-3ds/include/qrcodegen.h \
+ C:/Users/Diyel/osu-3ds/include/DirectDownloader.hpp \
+ C:/Users/Diyel/osu-3ds/include/ModeTaiko.hpp \
+ C:/Users/Diyel/osu-3ds/include/ModeMania.hpp \
+ C:/Users/Diyel/osu-3ds/include/ModeCatch.hpp
 C:/msys64/opt/devkitpro/libctru/include/3ds.h:
 C:/msys64/opt/devkitpro/libctru/include/3ds/types.h:
 C:/msys64/opt/devkitpro/libctru/include/3ds/result.h:
@@ -243,11 +249,17 @@ C:/Users/Diyel/osu-3ds/include/minimp3.h:
 C:/Users/Diyel/osu-3ds/include/stb_vorbis.h:
 C:/Users/Diyel/osu-3ds/include/SongManager.hpp:
 C:/Users/Diyel/osu-3ds/include/OszExtractor.hpp:
+C:/Users/Diyel/osu-3ds/include/ScoreManager.hpp:
 C:/Users/Diyel/osu-3ds/include/Settings.hpp:
 C:/Users/Diyel/osu-3ds/include/SkinManager.hpp:
-C:/Users/Diyel/osu-3ds/include/ScoreManager.hpp:
 C:/Users/Diyel/osu-3ds/include/WifiServer.hpp:
 C:/msys64/opt/devkitpro/libctru/include/arpa/inet.h:
 C:/Users/Diyel/osu-3ds/include/TextureLoader.hpp:
 C:/Users/Diyel/osu-3ds/include/stb_image.h:
+C:/Users/Diyel/osu-3ds/include/VideoPlayer.hpp:
 C:/Users/Diyel/osu-3ds/include/UiKit.hpp:
+C:/Users/Diyel/osu-3ds/include/qrcodegen.h:
+C:/Users/Diyel/osu-3ds/include/DirectDownloader.hpp:
+C:/Users/Diyel/osu-3ds/include/ModeTaiko.hpp:
+C:/Users/Diyel/osu-3ds/include/ModeMania.hpp:
+C:/Users/Diyel/osu-3ds/include/ModeCatch.hpp:

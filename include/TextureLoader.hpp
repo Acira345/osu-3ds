@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <cstdlib>
 
 #define STB_IMAGE_IMPLEMENTATION
 #define STBI_ONLY_JPEG
@@ -78,8 +79,8 @@ struct LoadedTexture {
             u32 sy = std::min(static_cast<u32>(srcH - 1), (dy * static_cast<u32>(srcH)) / dstH);
             const unsigned char* srcRow = pixels + (sy * srcW * 4);
 
-            // Invertir eje Y en memoria de textura para coincidir con coordenadas UV de citro2d
-            u32 memY = (texH - 1) - dy;
+            // En PICA200 (igual que tex3ds), memY = 0 corresponde a subtex.top = 1.0f
+            u32 memY = dy;
             u32 tileY = memY >> 3;
             u32 inTileY = mortonLUT[memY & 7] << 1;
 
@@ -140,88 +141,6 @@ struct LoadedTexture {
         return ok;
     }
 
-        int srcW = 0, srcH = 0, channels = 0;
-        unsigned char* pixels = stbi_load(path.c_str(), &srcW, &srcH, &channels, 4);
-        if (!pixels || srcW <= 0 || srcH <= 0) {
-            if (pixels) stbi_image_free(pixels);
-            return false;
-        }
-
-        // Escalar proporcionalmente para ajustarse a los límites de memoria y GPU de la 3DS
-        float scale = 1.0f;
-        if (srcW > maxW || srcH > maxH) {
-            float sx = static_cast<float>(maxW) / static_cast<float>(srcW);
-            float sy = static_cast<float>(maxH) / static_cast<float>(srcH);
-            scale = std::min(sx, sy);
-        }
-
-        u32 dstW = std::max<u32>(1, std::min<u32>(512, static_cast<u32>(std::round(srcW * scale))));
-        u32 dstH = std::max<u32>(1, std::min<u32>(512, static_cast<u32>(std::round(srcH * scale))));
-        u32 texW = nextPow2(dstW);
-        u32 texH = nextPow2(dstH);
-
-        if (!C3D_TexInit(&tex, texW, texH, GPU_RGBA8)) {
-            stbi_image_free(pixels);
-            return false;
-        }
-
-        C3D_TexSetFilter(&tex, GPU_LINEAR, GPU_LINEAR);
-        C3D_TexSetWrap(&tex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
-
-        u32* outBuf = static_cast<u32*>(tex.data);
-        std::memset(outBuf, 0, texW * texH * sizeof(u32));
-
-        // Tabla de entrelazado Morton para tiles de 8x8 de la GPU PICA200
-        static const u8 mortonLUT[8] = { 0, 1, 4, 5, 16, 17, 20, 21 };
-        u32 tilesPerRow = texW >> 3;
-
-        for (u32 dy = 0; dy < dstH; ++dy) {
-            u32 sy = std::min(static_cast<u32>(srcH - 1), (dy * static_cast<u32>(srcH)) / dstH);
-            const unsigned char* srcRow = pixels + (sy * srcW * 4);
-
-            // Invertir eje Y en memoria de textura para coincidir con coordenadas UV de citro2d
-            u32 memY = (texH - 1) - dy;
-            u32 tileY = memY >> 3;
-            u32 inTileY = mortonLUT[memY & 7] << 1;
-
-            for (u32 dx = 0; dx < dstW; ++dx) {
-                u32 sx = std::min(static_cast<u32>(srcW - 1), (dx * static_cast<u32>(srcW)) / dstW);
-                const unsigned char* p = srcRow + (sx * 4);
-
-                u32 r = p[0];
-                u32 g = p[1];
-                u32 b = p[2];
-                u32 a = p[3];
-
-                // Formato GPU_RGBA8 en PICA200: [A, B, G, R] en little-endian = (r<<24)|(g<<16)|(b<<8)|a
-                u32 rgba8 = (r << 24) | (g << 16) | (b << 8) | a;
-
-                u32 tileX = dx >> 3;
-                u32 inTileX = mortonLUT[dx & 7];
-                u32 tileIndex = (tileY * tilesPerRow) + tileX;
-                u32 mIndex = (tileIndex << 6) | inTileY | inTileX;
-
-                outBuf[mIndex] = rgba8;
-            }
-        }
-
-        stbi_image_free(pixels);
-        GSPGPU_FlushDataCache(outBuf, texW * texH * sizeof(u32));
-
-        subtex.width  = static_cast<u16>(dstW);
-        subtex.height = static_cast<u16>(dstH);
-        subtex.left   = 0.0f;
-        subtex.top    = 1.0f;
-        subtex.right  = static_cast<float>(dstW) / static_cast<float>(texW);
-        subtex.bottom = 1.0f - (static_cast<float>(dstH) / static_cast<float>(texH));
-
-        image.tex    = &tex;
-        image.subtex = &subtex;
-        loaded       = true;
-        sourcePath   = path;
-        return true;
-    }
-
     // Dibuja la imagen cubriendo el rectángulo (x, y, w, h) con una opacidad/tinte
     void drawRect(float x, float y, float w, float h, float z, u8 alpha = 255) const {
         if (!loaded || subtex.width == 0 || subtex.height == 0) return;
@@ -246,5 +165,156 @@ struct LoadedTexture {
         C2D_ImageTint tint;
         C2D_PlainImageTint(&tint, color, blend);
         C2D_DrawImageAt(image, cx - size * 0.5f, cy - size * 0.5f, z, &tint, sx, sy);
+    }
+
+    // Dibuja la imagen centrada en (cx, cy) con tamaño (w, h)
+    void drawCentered(float cx, float cy, float w, float h, float z, u8 alpha = 255) const {
+        if (!loaded || subtex.width == 0 || subtex.height == 0) return;
+        float x = cx - w * 0.5f;
+        float y = cy - h * 0.5f;
+        drawRect(x, y, w, h, z, alpha);
+    }
+};
+
+// =============================================================================
+// Cargador asincrono de fondos: decodifica JPG/PNG en un hilo secundario para que
+// el selector de canciones no se congele (~1s por imagen en el ARM11 de la 3DS).
+// Siempre gana la peticion mas reciente: si el jugador pasa rapido de cancion,
+// las imagenes intermedias se descartan.
+// =============================================================================
+class AsyncTextureLoader {
+private:
+    Thread worker = nullptr;
+    LightLock lock;
+    LightEvent wake;
+    volatile bool quit = false;
+
+    // Peticion pendiente (protegida por lock)
+    std::string reqPath;
+    int reqW = 256, reqH = 192;
+    u32 reqId = 0;
+
+    // Resultado listo (protegido por lock)
+    LoadedTexture::Decoded result;
+    std::string resultPath;
+    u32 resultId = 0;
+    bool resultReady = false;
+    bool resultFailed = false;
+
+    static void threadMain(void* arg) {
+        static_cast<AsyncTextureLoader*>(arg)->run();
+    }
+
+    void run() {
+        while (!quit) {
+            LightEvent_Wait(&wake);
+            if (quit) break;
+
+            LightLock_Lock(&lock);
+            std::string path = reqPath;
+            int w = reqW, h = reqH;
+            u32 id = reqId;
+            LightLock_Unlock(&lock);
+
+            if (path.empty()) continue;
+
+            LoadedTexture::Decoded d;
+            bool ok = LoadedTexture::decode(path, w, h, d);
+
+            LightLock_Lock(&lock);
+            if (id == reqId) {
+                // Sigue siendo la peticion vigente: publicar
+                result.release();
+                result = d;
+                resultPath = path;
+                resultId = id;
+                resultReady = ok;
+                resultFailed = !ok;
+            } else {
+                // Llego una peticion mas nueva mientras decodificabamos: descartar
+                d.release();
+                LightEvent_Signal(&wake);
+            }
+            LightLock_Unlock(&lock);
+        }
+    }
+
+public:
+    bool start(bool isNew3DS = false) {
+        LightLock_Init(&lock);
+        LightEvent_Init(&wake, RESET_ONESHOT);
+        quit = false;
+
+        s32 prio = 0x30;
+        svcGetThreadPriority(&prio, CUR_THREAD_HANDLE);
+        s32 workerPrio = std::min<s32>(0x3F, prio + 1);
+
+        APT_SetAppCpuTimeLimit(isNew3DS ? 70 : 30);
+        if (isNew3DS) {
+            // En New 3DS / New 2DS XL el núcleo 2 es exclusivo para hilos secundarios de la app a 804 MHz
+            worker = threadCreate(threadMain, this, 64 * 1024, workerPrio, 2, false);
+        }
+        if (!worker) worker = threadCreate(threadMain, this, 64 * 1024, workerPrio, 1, false);
+        if (!worker) worker = threadCreate(threadMain, this, 64 * 1024, workerPrio, -2, false);
+        return worker != nullptr;
+    }
+
+    void stop() {
+        if (!worker) return;
+        quit = true;
+        LightEvent_Signal(&wake);
+        threadJoin(worker, U64_MAX);
+        threadFree(worker);
+        worker = nullptr;
+        result.release();
+    }
+
+    // Solicita cargar una imagen (no bloquea)
+    void request(const std::string& path, int maxW, int maxH) {
+        LightLock_Lock(&lock);
+        if (path != reqPath || resultFailed) {
+            reqPath = path;
+            reqW = maxW;
+            reqH = maxH;
+            reqId++;
+            resultReady = false;
+            resultFailed = false;
+            result.release();
+            LightEvent_Signal(&wake);
+        }
+        LightLock_Unlock(&lock);
+    }
+
+    // Cancela cualquier peticion pendiente
+    void cancel() {
+        LightLock_Lock(&lock);
+        reqPath.clear();
+        reqId++;
+        resultReady = false;
+        result.release();
+        LightLock_Unlock(&lock);
+    }
+
+    bool isPending() {
+        LightLock_Lock(&lock);
+        bool p = !reqPath.empty() && !resultReady && !resultFailed;
+        LightLock_Unlock(&lock);
+        return p;
+    }
+
+    // Llamar cada frame en el hilo principal. Devuelve true si se subio una textura nueva.
+    bool poll(LoadedTexture& dst) {
+        if (!worker) return false;
+        bool uploaded = false;
+        LightLock_Lock(&lock);
+        if (resultReady && resultId == reqId) {
+            if (!(dst.loaded && dst.sourcePath == resultPath)) {
+                uploaded = dst.upload(result, resultPath);
+            }
+            result.release();
+            resultReady = false;
+        }
+        LightLock_Unlock(&lock);
+        return uploaded;
     }
 };

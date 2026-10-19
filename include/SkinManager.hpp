@@ -29,13 +29,21 @@ struct SkinProfile {
 
     std::string hitNormalWav  = "romfs:/drum-hitnormal2.wav";
     std::string hitWhistleWav = "romfs:/drum-hitwhistle2.wav";
+    std::string hitFinishWav  = "romfs:/drum-hitclap2.wav";
     std::string hitClapWav    = "romfs:/drum-hitclap2.wav";
+    std::string comboBreakWav = "";
+    std::string nightcoreKickWav = "";
+    std::string nightcoreClapWav = "";
+    std::string nightcoreHatWav  = "";
+    int synthPreset = 0; // 0 = RomFS Classic, 1 = Soft/Minimal Click, 2 = Rafis Ping, 3 = Neon Synth
 
     // Sprites PNG opcionales de skins personalizados (.osk)
     std::string cursorPng           = "";
+    std::string cursorTrailPng      = "";
     std::string hitCirclePng        = "";
     std::string hitCircleOverlayPng = "";
     std::string approachCirclePng   = "";
+    std::string comboBurstPng       = "";
 };
 
 class SkinManager {
@@ -71,6 +79,7 @@ private:
             SkinProfile s;
             s.name = "osu! Classic";
             s.author = "Built-in";
+            s.synthPreset = 0;
             s.comboColors = {
                 RGBColor(255, 115, 180),
                 RGBColor(90, 235, 140),
@@ -91,6 +100,7 @@ private:
             SkinProfile s;
             s.name = "WhiteCat Minimal";
             s.author = "Built-in";
+            s.synthPreset = 1;
             s.comboColors = {
                 RGBColor(235, 195, 165),
                 RGBColor(165, 205, 235),
@@ -112,6 +122,7 @@ private:
             SkinProfile s;
             s.name = "Rafis Cyan";
             s.author = "Built-in";
+            s.synthPreset = 2;
             s.comboColors = {
                 RGBColor(0, 200, 255),
                 RGBColor(190, 235, 255),
@@ -132,6 +143,7 @@ private:
             SkinProfile s;
             s.name = "Neon Synth";
             s.author = "Built-in";
+            s.synthPreset = 3;
             s.comboColors = {
                 RGBColor(255, 50, 160),
                 RGBColor(0, 245, 212),
@@ -272,19 +284,40 @@ private:
             "soft-hitwhistle2.wav", "normal-hitwhistle2.wav", "drum-hitwhistle2.wav"
         }, "romfs:/drum-hitwhistle2.wav");
 
+        s.hitFinishWav = findWavInSkinFolder(folderPath, {
+            "soft-hitfinish.wav", "normal-hitfinish.wav", "drum-hitfinish.wav",
+            "soft-hitfinish.ogg", "normal-hitfinish.ogg", "drum-hitfinish.ogg",
+            "soft-hitfinish2.wav", "normal-hitfinish2.wav", "drum-hitfinish2.wav",
+            "soft-hitclap.wav", "normal-hitclap.wav", "drum-hitclap.wav"
+        }, "romfs:/drum-hitclap2.wav");
+
         s.hitClapWav = findWavInSkinFolder(folderPath, {
             "soft-hitclap.wav", "normal-hitclap.wav", "drum-hitclap.wav",
             "soft-hitclap.ogg", "normal-hitclap.ogg", "drum-hitclap.ogg",
-            "soft-hitfinish.wav", "normal-hitfinish.wav", "drum-hitfinish.wav",
-            "soft-hitfinish.ogg", "normal-hitfinish.ogg", "drum-hitfinish.ogg",
             "soft-hitclap2.wav", "normal-hitclap2.wav", "drum-hitclap2.wav"
         }, "romfs:/drum-hitclap2.wav");
 
+        s.comboBreakWav = findWavInSkinFolder(folderPath, {
+            "combobreak.wav", "combobreak.ogg"
+        }, "");
+
+        s.nightcoreKickWav = findWavInSkinFolder(folderPath, {
+            "nightcore-kick.wav", "nightcore-kick.ogg"
+        }, "");
+        s.nightcoreClapWav = findWavInSkinFolder(folderPath, {
+            "nightcore-clap.wav", "nightcore-clap.ogg"
+        }, "");
+        s.nightcoreHatWav  = findWavInSkinFolder(folderPath, {
+            "nightcore-hat.wav", "nightcore-hat.ogg"
+        }, "");
+
         // Resolver sprites PNG opcionales del skin
         s.cursorPng           = findWavInSkinFolder(folderPath, {"cursor.png"}, "");
+        s.cursorTrailPng      = findWavInSkinFolder(folderPath, {"cursortrail.png"}, "");
         s.hitCirclePng        = findWavInSkinFolder(folderPath, {"hitcircle.png"}, "");
         s.hitCircleOverlayPng = findWavInSkinFolder(folderPath, {"hitcircleoverlay.png"}, "");
         s.approachCirclePng   = findWavInSkinFolder(folderPath, {"approachcircle.png"}, "");
+        s.comboBurstPng       = findWavInSkinFolder(folderPath, {"comboburst.png", "comboburst-0.png", "comboburst-1.png"}, "");
 
         skins.push_back(s);
     }

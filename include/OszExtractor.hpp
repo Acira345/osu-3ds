@@ -261,8 +261,8 @@ inline void ensureDirectoryRecursive(const std::string& path) {
 }
 
 inline bool shouldExtractFile(const std::string& filename) {
-    // Extraer archivos de mapas (.osu), configuración de skins (.ini), audio (.mp3, .wav, .ogg)
-    // e imágenes de fondo/skins (.jpg, .jpeg, .png), omitiendo duplicados @2x de alta resolución
+    // Extraer archivos de mapas (.osu), configuración de skins (.ini), audio (.mp3, .wav, .ogg),
+    // video optimizado (.3dsv, .mjpg) e imágenes de fondo/skins (.jpg, .jpeg, .png), omitiendo duplicados @2x
     size_t dot = filename.find_last_of('.');
     if (dot == std::string::npos) return false;
     std::string lowName = filename;
@@ -273,7 +273,8 @@ inline bool shouldExtractFile(const std::string& filename) {
 
     std::string ext = lowName.substr(dot);
     return (ext == ".osu" || ext == ".ini" || ext == ".mp3" || ext == ".wav" ||
-            ext == ".ogg" || ext == ".jpg" || ext == ".jpeg" || ext == ".png");
+            ext == ".ogg" || ext == ".jpg" || ext == ".jpeg" || ext == ".png" ||
+            ext == ".3dsv" || ext == ".mjpg");
 }
 
 // Extrae un archivo .osz o .osk en destFolder usando el Central Directory del ZIP
@@ -363,8 +364,9 @@ inline bool extractOszFile(const std::string& oszPath, const std::string& destFo
         uint16_t lfhExtraLen = readLE16(&lfh[28]);
         uint32_t dataOffset  = lfhOffset + 30 + lfhNameLen + lfhExtraLen;
 
-        // Evitar archivos excesivamente grandes en RAM (> 20 MB comprimidos)
-        if (compSize > 20 * 1024 * 1024) continue;
+        // Para DEFLATE (que carga en RAM), limitar a 20 MB; para STORED (streaming de 32 KB), permitir hasta 64 MB
+        uint32_t maxAllowedSize = (method == 0) ? (64 * 1024 * 1024) : (20 * 1024 * 1024);
+        if (compSize > maxAllowedSize) continue;
 
         std::string outPath = destFolder;
         if (!outPath.empty() && outPath.back() != '/') outPath += '/';
@@ -451,6 +453,30 @@ inline int extractAllPendingOsz(const std::string& searchFolder, const std::stri
 
 inline int extractAllPendingOsk(const std::string& searchFolder, const std::string& skinsRoot) {
     return extractAllPendingArchives(searchFolder, skinsRoot, ".osk");
+}
+
+inline bool removeDirectoryRecursive(const std::string& path) {
+    DIR* dir = opendir(path.c_str());
+    if (!dir) {
+        return std::remove(path.c_str()) == 0;
+    }
+    struct dirent* entry;
+    while ((entry = readdir(dir)) != nullptr) {
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) continue;
+        std::string sub = path;
+        if (!sub.empty() && sub.back() != '/') sub += '/';
+        sub += entry->d_name;
+        struct stat st;
+        if (stat(sub.c_str(), &st) == 0) {
+            if (S_ISDIR(st.st_mode)) {
+                removeDirectoryRecursive(sub);
+            } else {
+                std::remove(sub.c_str());
+            }
+        }
+    }
+    closedir(dir);
+    return rmdir(path.c_str()) == 0;
 }
 
 } // namespace OszExtractor
