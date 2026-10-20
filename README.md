@@ -6,6 +6,21 @@ El juego está ultra-optimizado para funcionar a **60 FPS estables** incluso en 
 
 ---
 
+### 📲 Instalación rápida (.CIA)
+
+Escanea el siguiente código QR desde la aplicación **FBI** en tu consola (`Remote Install` ➔ `Scan QR Code`) para descargar e instalar el archivo `.cia` directamente vía Wi-Fi:
+
+<div align="center">
+ <img width="1113" height="1113" alt="Osu V3 5" src="https://github.com/user-attachments/assets/3d7de3cd-86f1-4298-a2df-218b79590a10" />
+
+
+
+  <p><i>Requiere conexión Wi-Fi activa y Custom Firmware (Luma3DS).</i></p>
+</div>
+
+---
+---
+
 ## ✨ Características Principales
 
 ### 🎮 Los 4 Modos de Juego de osu!
@@ -121,20 +136,6 @@ make -j4
 
 Port personalizado del popular juego de ritmo **osu!** para la familia de consolas **Nintendo 3DS / 2DS**, diseñado con experiencia de juego tipo tableta digitalizadora y compatibilidad nativa con beatmaps oficiales.
 
----
-
-### 📲 Instalación rápida (.CIA)
-
-Escanea el siguiente código QR desde la aplicación **FBI** en tu consola (`Remote Install` ➔ `Scan QR Code`) para descargar e instalar el archivo `.cia` directamente vía Wi-Fi:
-
-<div align="center">
- <img width="1113" height="1113" alt="Osu V3 0" src="https://github.com/user-attachments/assets/dbb37071-697e-4ec8-aa1e-6b1535820442" />
-
-
-  <p><i>Requiere conexión Wi-Fi activa y Custom Firmware (Luma3DS).</i></p>
-</div>
-
----
 
 ## 🌟 Características Principales (v2.0)
 
