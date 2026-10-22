@@ -20,6 +20,8 @@
 #include "ModeTaiko.hpp"
 #include "ModeMania.hpp"
 #include "ModeCatch.hpp"
+#include "NetCommon.hpp"
+#include "MultiplayerManager.hpp"
 
 // Aumentar pila del hilo principal en la 3DS a 256 KB (por defecto libctru asigna solo 32 KB)
 extern "C" {
@@ -94,7 +96,12 @@ enum AppState {
     STATE_SETTINGS,
     STATE_SONG_SELECT,
     STATE_PLAYING,
-    STATE_RESULTS
+    STATE_RESULTS,
+    STATE_MULTI_BROWSER,
+    STATE_MULTI_LOBBY,
+    STATE_MODS_SELECT,
+    STATE_MULTI_RESULTS,
+    STATE_MULTI_SYNC
 };
 
 struct HitPopup {
@@ -137,15 +144,18 @@ struct GameplayParticle {
 };
 
 void drawRingZ(float x, float y, float z, float radius, float thickness, u32 color, int segments = 24) {
-    const float step = (2.0f * static_cast<float>(M_PI)) / segments;
-    for (int i = 0; i < segments; ++i) {
-        float a0 = i * step;
-        float a1 = (i + 1) * step;
-        C2D_DrawLine(
-            x + std::cos(a0) * radius, y + std::sin(a0) * radius, color,
-            x + std::cos(a1) * radius, y + std::sin(a1) * radius, color,
-            thickness, z
-        );
+    if (radius < 0.5f) return;
+    int segs = std::max(12, std::min(segments, 24));
+    const float step = (2.0f * static_cast<float>(M_PI)) / segs;
+    float prevX = x + radius;
+    float prevY = y;
+    for (int i = 1; i <= segs; ++i) {
+        float a = i * step;
+        float curX = x + std::cos(a) * radius;
+        float curY = y + std::sin(a) * radius;
+        C2D_DrawLine(prevX, prevY, color, curX, curY, color, thickness, z);
+        prevX = curX;
+        prevY = curY;
     }
 }
 
@@ -164,7 +174,9 @@ void drawText(C2D_TextBuf buf, float x, float y, float scale, u32 color, const c
     C2D_Text text;
     C2D_TextParse(&text, buf, str);
     C2D_TextOptimize(&text);
-    C2D_DrawText(&text, C2D_WithColor, x, y, z, scale, scale, color);
+    float rx = std::round(x);
+    float ry = std::round(y);
+    C2D_DrawText(&text, C2D_WithColor, rx, ry, z, scale, scale, color);
 }
 
 void drawCenteredText(C2D_TextBuf buf, float cx, float cy, float scale, u32 color, const char* str, float z = 0.85f) {
@@ -173,15 +185,19 @@ void drawCenteredText(C2D_TextBuf buf, float cx, float cy, float scale, u32 colo
     C2D_TextOptimize(&text);
     float w = 0.0f, h = 0.0f;
     C2D_TextGetDimensions(&text, scale, scale, &w, &h);
-    C2D_DrawText(&text, C2D_WithColor, cx - (w * 0.5f), cy - (h * 0.5f), z, scale, scale, color);
+    float rx = std::round(cx - (w * 0.5f));
+    float ry = std::round(cy - (h * 0.5f));
+    C2D_DrawText(&text, C2D_WithColor, rx, ry, z, scale, scale, color);
 }
 
 void drawTextWithShadow(C2D_TextBuf buf, float x, float y, float scale, u32 color, const char* str, float z = 0.85f, u32 shadowColor = Ui::rgba(0, 0, 0, 220)) {
     C2D_Text text;
     C2D_TextParse(&text, buf, str);
     C2D_TextOptimize(&text);
-    C2D_DrawText(&text, C2D_WithColor, x + 1.0f, y + 1.0f, z - 0.001f, scale, scale, shadowColor);
-    C2D_DrawText(&text, C2D_WithColor, x, y, z, scale, scale, color);
+    float rx = std::round(x);
+    float ry = std::round(y);
+    C2D_DrawText(&text, C2D_WithColor, rx + 1.0f, ry + 1.0f, z - 0.001f, scale, scale, shadowColor);
+    C2D_DrawText(&text, C2D_WithColor, rx, ry, z, scale, scale, color);
 }
 
 void drawCenteredTextWithShadow(C2D_TextBuf buf, float cx, float cy, float scale, u32 color, const char* str, float z = 0.85f, u32 shadowColor = Ui::rgba(0, 0, 0, 220)) {
@@ -190,10 +206,21 @@ void drawCenteredTextWithShadow(C2D_TextBuf buf, float cx, float cy, float scale
     C2D_TextOptimize(&text);
     float w = 0.0f, h = 0.0f;
     C2D_TextGetDimensions(&text, scale, scale, &w, &h);
-    float rx = cx - (w * 0.5f);
-    float ry = cy - (h * 0.5f);
+    float rx = std::round(cx - (w * 0.5f));
+    float ry = std::round(cy - (h * 0.5f));
     C2D_DrawText(&text, C2D_WithColor, rx + 1.0f, ry + 1.0f, z - 0.001f, scale, scale, shadowColor);
     C2D_DrawText(&text, C2D_WithColor, rx, ry, z, scale, scale, color);
+}
+
+// Dibuja una insignia de control estilo consola (Pastilla de color con letra + texto en alto contraste)
+void drawKeyBadge(C2D_TextBuf buf, float x, float y, const char* key, const char* label, u32 keyClr, u32 textClr = Ui::rgba(255, 255, 255), float z = 0.85f) {
+    float rx = std::round(x);
+    float ry = std::round(y);
+    int len = key ? static_cast<int>(std::strlen(key)) : 1;
+    float kw = (len <= 1) ? 15.0f : std::round(8.0f + len * 6.0f);
+    Ui::pill(rx, ry - 1.0f, kw, 15.0f, z - 0.005f, keyClr);
+    drawCenteredText(buf, rx + kw * 0.5f, ry + 6.5f, (len > 3) ? 0.25f : 0.30f, Ui::rgba(0, 0, 0, 245), key, z);
+    drawTextWithShadow(buf, rx + kw + 4.0f, ry, 0.34f, textClr, label, z);
 }
 
 // Dibuja una flecha de rebote (Reverse Arrow) en (cx, cy) apuntando hacia (targetX, targetY)
@@ -286,7 +313,8 @@ int main(int argc, char* argv[]) {
     gfxInitDefault();
     gfxSet3D(false);          // Se activa dinamicamente solo cuando el slider 3D fisico > 0
     romfsInit();
-    C3D_Init(C3D_DEFAULT_CMDBUF_SIZE * 2);
+    acInit();                 // Iniciar servicio de acceso a red para mantener activa la conexion Wi-Fi
+    C3D_Init(C3D_DEFAULT_CMDBUF_SIZE * 4);
     C2D_Init(C2D_DEFAULT_MAX_OBJECTS * 4);
     C2D_Prepare();
 
@@ -331,6 +359,33 @@ int main(int argc, char* argv[]) {
     audio.setVolumes(settings.musicVolume, settings.sfxVolume);
 
     WifiServer wifiServer;
+    MultiplayerManager multiMgr;
+    multiMgr.enableBgDownload = (settings.multiDlOption != 0);
+
+    // Detectar nombre de usuario configurado en la consola 3DS
+    std::string sysUser = "Player3DS";
+    u16 utf16_user[16] = {0};
+    if (R_SUCCEEDED(cfguInit())) {
+        CFGU_GetConfigInfoBlk2(0x1C, 0x000A0000, utf16_user);
+        cfguExit();
+        std::string tmp;
+        for (int i = 0; i < 10 && utf16_user[i] != 0; ++i) {
+            if (utf16_user[i] >= 32 && utf16_user[i] < 127) tmp.push_back(static_cast<char>(utf16_user[i]));
+        }
+        if (!tmp.empty()) sysUser = tmp;
+    }
+    multiMgr.localPlayerName = sysUser;
+    bool multiQueuePickerOpen = false;
+    int multiQueuePickerIndex = 0;
+    int multiQueuePickerDiff = 0;
+    enum MultiPickerAction {
+        PICKER_ACTION_ACTIVE = 0,
+        PICKER_ACTION_QUEUE  = 1
+    };
+    MultiPickerAction multiPickerAction = PICKER_ACTION_ACTIVE;
+    int multiResultsTab = 0;
+    bool multiSyncLoaded = false;
+    int multiSyncLeadIn = 0;
 
     // Texturas GPU dinámicas (Fondo de canción y Sprites PNG de Skin personalizado)
     LoadedTexture bgTex;
@@ -350,6 +405,7 @@ int main(int argc, char* argv[]) {
     // Decodificador de fondos en hilo secundario (usa nucleo dedicado en New 3DS)
     AsyncTextureLoader bgLoader;
     bgLoader.start(isNew3DS);
+    audio.startAsyncLoader(isNew3DS);
     VideoPlayer videoPlayer;
     videoPlayer.init();
     int previewDelay = 0;      // frames de espera antes de cargar audio/fondo (debounce)
@@ -395,7 +451,7 @@ int main(int argc, char* argv[]) {
     AppState wifiReturnState = STATE_MAIN_MENU;
 
     int mainMenuOption = 0; // 0: Jugar, 1: Descargar Wi-Fi, 2: Configuraciones, 3: Salir
-    int settingsOption = 0; // 0..18 (5 pestañas)
+    int settingsOption = 0; // 0..20 (5 pestañas)
     int capturingKeyIndex = -1; // -1: inactivo, 4..7: capturando tecla física
     int settingsControlsMode = MODE_STD; // Modo activo en la pestaña de controles (0: STD, 1: TAIKO, 2: CATCH, 3: MANIA)
     float taikoGuideTimer = 0.0f; // Temporizador para mostrar guía de controles en pantalla (4 segundos)
@@ -439,6 +495,7 @@ int main(int argc, char* argv[]) {
     float prevCursorOsuY = 192.0f;
     std::vector<TrailPoint> cursorTrail;
     std::vector<SmokeParticle> smokeParticles;
+    u64 gameplayFallbackStartTick = 0;
     int combo = 0;
     int prevCombo = 0;
     int lastBrokenCombo = 0;
@@ -562,16 +619,49 @@ int main(int argc, char* argv[]) {
         }
         const std::string& audioPath = curDiff.audioPath;
         float speedRate = getModsSpeedMultiplier(settings.activeMods);
-        if (!audio.getIsPlaying() || audio.getLoadedMusicPath() != audioPath) {
-            int startOff = (curDiff.previewTimeMs > 0) ? curDiff.previewTimeMs : 0;
-            audio.startMusic(audioPath, 0, speedRate, startOff);
+        bool shouldLoop = (appState == STATE_SONG_SELECT);
+        int startOff = (curDiff.previewTimeMs > 0) ? curDiff.previewTimeMs : 0;
+        if (!audio.getIsPlaying() || audio.isSongFinished() || audio.getLoadedMusicPath() != audioPath) {
+            audio.requestPreview(audioPath, speedRate, startOff, shouldLoop);
+        } else {
+            audio.setLoop(shouldLoop, startOff);
         }
+    };
+
+    auto rotateMenuSong = [&]() {
+        if (!settings.songPreview) return;
+        if (songMgr.sets.empty()) {
+            std::string themePath = "romfs:/circles.mp3";
+            audio.startMusic(themePath, 0, 1.0f, 0);
+            audio.setLoop(false);
+            bgLoader.cancel();
+            bgTex.unload();
+            return;
+        }
+
+        int nSets = static_cast<int>(songMgr.sets.size());
+        if (nSets > 1) {
+            int next = selectedSet;
+            while (next == selectedSet) {
+                next = std::rand() % nSets;
+            }
+            selectedSet = next;
+        } else {
+            selectedSet = 0;
+        }
+        selectedDiff = 0;
+        carouselPos = static_cast<float>(selectedSet);
+        updateSongPreview();
     };
 
     auto getBpmPulse = [&]() -> float {
         float beatLen = 500.0f;
         float offset = 0.0f;
-        if (!songMgr.sets.empty() && selectedSet >= 0 && selectedSet < static_cast<int>(songMgr.sets.size())) {
+        if (audio.getLoadedMusicPath() == "romfs:/circles.mp3") {
+            // Nekodex - Circles (175 BPM)
+            beatLen = 60000.0f / 175.0f;
+            offset = 0.0f;
+        } else if (!songMgr.sets.empty() && selectedSet >= 0 && selectedSet < static_cast<int>(songMgr.sets.size())) {
             const auto& cs = songMgr.sets[selectedSet];
             if (!cs.difficulties.empty()) {
                 int dIdx = std::max(0, std::min(selectedDiff, static_cast<int>(cs.difficulties.size()) - 1));
@@ -729,6 +819,7 @@ int main(int argc, char* argv[]) {
 
         float speedRate = getModsSpeedMultiplier(settings.activeMods);
         audio.startMusic(beatmap.fullAudioPath, leadIn, speedRate, 0);
+        gameplayFallbackStartTick = osGetTime() + leadIn;
 
         combo = 0;
         prevCombo = 0;
@@ -794,6 +885,11 @@ int main(int argc, char* argv[]) {
     auto toggleModByIndex = [&](int idx) {
         if (idx < 0 || idx >= 15) return;
         uint32_t bit = modTable[idx].bit;
+        if (multiMgr.inMultiplayer && (bit == MOD_AUTO || bit == MOD_RX || bit == MOD_AP)) {
+            // Mods no permitidos en partidas multijugador (Auto, Relax, AutoPilot)
+            audio.playHitSound(4);
+            return;
+        }
         if (settings.activeMods & bit) {
             settings.activeMods &= ~bit;
         } else {
@@ -811,12 +907,38 @@ int main(int argc, char* argv[]) {
             if (bit == MOD_RX) settings.activeMods &= ~(MOD_AUTO | MOD_AP);
             if (bit == MOD_AP) settings.activeMods &= ~(MOD_AUTO | MOD_RX);
         }
+        if (multiMgr.inMultiplayer) {
+            settings.activeMods &= ~(MOD_AUTO | MOD_RX | MOD_AP);
+            multiMgr.players[multiMgr.localSlot].activeMods = settings.activeMods;
+            if (!multiMgr.isHost()) {
+                multiMgr.sendPlayerUpdate();
+            } else {
+                multiMgr.broadcastLobbyState();
+            }
+        }
         settings.save();
     };
 
-    // Al arrancar el juego, elegir una canción aleatoria para reproducir su música y mostrar su escenario en el Menú Principal
+    // Al arrancar el juego, reproducir siempre en primer lugar la canción emblemática ("Click the circles")
     std::srand(static_cast<unsigned int>(osGetTime()));
-    if (!songMgr.sets.empty()) {
+    selectedSet = 0;
+    selectedDiff = 0;
+    carouselPos = 0.0f;
+
+    std::string themePath = "romfs:/circles.mp3";
+    bool themeStarted = false;
+    FILE* fTheme = std::fopen(themePath.c_str(), "rb");
+    if (fTheme) {
+        std::fclose(fTheme);
+        themeStarted = audio.startMusic(themePath, 0, 1.0f, 0);
+        if (themeStarted) {
+            audio.setLoop(false);
+            bgLoader.cancel();
+            bgTex.unload();
+        }
+    }
+
+    if (!themeStarted && !songMgr.sets.empty()) {
         selectedSet = std::rand() % static_cast<int>(songMgr.sets.size());
         selectedDiff = 0;
         carouselPos = static_cast<float>(selectedSet);
@@ -837,11 +959,18 @@ int main(int argc, char* argv[]) {
         hidCstickRead(&cstick);
 
         float slider3D = osGet3DSliderState();
-        bool stereoActive = (slider3D > 0.02f);
-        if (stereoActive != stereoEnabledState) {
-            stereoEnabledState = stereoActive;
-            gfxSet3D(stereoActive);
+        if (stereoEnabledState) {
+            if (slider3D < 0.02f) {
+                stereoEnabledState = false;
+                gfxSet3D(false);
+            }
+        } else {
+            if (slider3D > 0.06f) {
+                stereoEnabledState = true;
+                gfxSet3D(true);
+            }
         }
+        bool stereoActive = stereoEnabledState;
         if (analogNavCooldown > 0) analogNavCooldown--;
 
         touchPosition touch;
@@ -877,26 +1006,19 @@ int main(int argc, char* argv[]) {
             audio.update();
             if (bgLoader.poll(bgTex)) bgFade = 0.0f;
             bgFade = Ui::approach(bgFade, 255.0f, 0.10f);
-            // Al terminar la canción del menú, pasar a otra aleatoria (como en osu! de PC)
-            if (settings.songPreview && !songMgr.sets.empty() &&
-                (audio.isSongFinished() || !audio.getIsPlaying())) {
-                if (songMgr.sets.size() > 1) {
-                    int next = selectedSet;
-                    while (next == selectedSet) next = std::rand() % static_cast<int>(songMgr.sets.size());
-                    selectedSet = next;
-                }
-                selectedDiff = 0;
-                carouselPos = static_cast<float>(selectedSet);
-                updateSongPreview();
+            // Al terminar la canción del menú (sea Click the circles o una descargada),
+            // continuar con otra de las canciones descargadas continuamente sin quedarse en silencio
+            if (settings.songPreview && !audio.isPreviewLoading() && (audio.isSongFinished() || !audio.getIsPlaying())) {
+                rotateMenuSong();
             }
             if (kDown & KEY_START) break;
 
             if (kDown & KEY_DUP) {
-                mainMenuOption = (mainMenuOption + 3) % 4;
+                mainMenuOption = (mainMenuOption + 4) % 5;
                 audio.playHitSound(0);
             }
             if (kDown & KEY_DDOWN) {
-                mainMenuOption = (mainMenuOption + 1) % 4;
+                mainMenuOption = (mainMenuOption + 1) % 5;
                 audio.playHitSound(0);
             }
             // Cambiar canción del menú manualmente con L y R o cruceta Izq/Der
@@ -913,10 +1035,10 @@ int main(int argc, char* argv[]) {
             bool activateOption = (kDown & KEY_A) != 0;
 
             if (touchJustDown) {
-                if (touch.px >= 40 && touch.px <= 280) {
-                    for (int i = 0; i < 4; ++i) {
-                        float by = 16.0f + i * 42.0f;
-                        if (touch.py >= by && touch.py <= by + 36.0f) {
+                if (touch.px >= 18 && touch.px <= 302) {
+                    for (int i = 0; i < 5; ++i) {
+                        float by = 12.0f + i * 34.0f;
+                        if (touch.py >= by && touch.py <= by + 30.0f) {
                             mainMenuOption = i;
                             activateOption = true;
                             break;
@@ -931,15 +1053,20 @@ int main(int argc, char* argv[]) {
                     appState = STATE_SONG_SELECT;
                     updateSongPreview();
                 } else if (mainMenuOption == 1) {
+                    // Abrir Navegador de Salas Multijugador Local (LAN)
+                    multiMgr.startBrowser(sysUser);
+                    appState = STATE_MULTI_BROWSER;
+                } else if (mainMenuOption == 2) {
                     audio.stopMusic();
+                    multiMgr.stop();
                     wifiReturnState = STATE_MAIN_MENU;
                     wifiServer.start();
                     appState = STATE_WIFI_TRANSFER;
-                } else if (mainMenuOption == 2) {
+                } else if (mainMenuOption == 3) {
                     settingsReturnState = STATE_MAIN_MENU;
                     calibrationMode = false;
                     appState = STATE_SETTINGS;
-                } else if (mainMenuOption == 3) {
+                } else if (mainMenuOption == 4) {
                     break;
                 }
             }
@@ -947,7 +1074,20 @@ int main(int argc, char* argv[]) {
             C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
 
             float beat = getBpmPulse();
-            const char* menuLabels[4] = { "JUGAR", "DESCARGAR WI-FI", "CONFIGURACION", "SALIR" };
+            const char* menuLabels[5] = {
+                LOC(STR_MENU_PLAY),
+                LOC(STR_MENU_MULTI),
+                LOC(STR_MENU_WIFI),
+                LOC(STR_MENU_SETTINGS),
+                LOC(STR_MENU_EXIT)
+            };
+            const char* menuSubPills[5] = {
+                LOC(STR_MENU_PILL_SOLO),
+                LOC(STR_MENU_PILL_MULTI),
+                LOC(STR_MENU_PILL_WIFI),
+                LOC(STR_MENU_PILL_SETTINGS),
+                LOC(STR_MENU_PILL_EXIT)
+            };
             for (int eye = 0; eye < (stereoActive ? 2 : 1); ++eye) {
                 C3D_RenderTarget* curTop = (eye == 0) ? topScreen : topScreenRight;
                 float eyeSign = stereoActive ? ((eye == 0) ? 1.0f : -1.0f) : 0.0f;
@@ -965,13 +1105,20 @@ int main(int argc, char* argv[]) {
                     Ui::backdrop(400.0f, 240.0f, static_cast<float>(animTick), Ui::rgba(34, 14, 56), Ui::rgba(10, 7, 22), clrPrimary, 0.02f);
                 }
 
-                // Barra superior de canción en reproducción (Estilo osu! PC)
+                // Barra superior de canción en reproducción (Estilo osu! PC / Multijugador)
                 if (!songMgr.sets.empty() && selectedSet >= 0 && selectedSet < static_cast<int>(songMgr.sets.size())) {
                     const auto& curSet = songMgr.sets[selectedSet];
-                    Ui::gradV(0.0f, 0.0f, 400.0f, 24.0f, 0.28f, Ui::rgba(14, 10, 24, 230), Ui::rgba(14, 10, 24, 60));
-                    std::string nowPlaying = std::string("♫  ") + curSet.artist + " - " + curSet.title;
-                    drawText(textBuf, 12.0f, 4.0f, 0.38f, clr300, truncateString(nowPlaying, 38).c_str(), 0.35f);
-                    drawText(textBuf, 310.0f, 4.0f, 0.34f, isNew3DS ? clr100 : clrMuted, isNew3DS ? "New3DS 804M" : "3DS 268M", 0.35f);
+                    Ui::gradV(0.0f, 0.0f, 400.0f, 26.0f, 0.28f, Ui::rgba(14, 10, 24, 240), Ui::rgba(14, 10, 24, 60));
+
+                    // Pastilla indicadora de música estilo multijugador (sin signos de interrogación)
+                    Ui::pill(10.0f, 5.0f, 56.0f, 16.0f, 0.32f, Ui::rgba(255, 102, 171));
+                    drawCenteredText(textBuf, 38.0f, 12.0f, 0.28f, clrWhite, LOC(STR_MENU_MUSIC_NOW), 0.35f);
+
+                    std::string nowPlaying = curSet.artist + " - " + curSet.title;
+                    drawTextWithShadow(textBuf, 72.0f, 5.0f, 0.38f, clrWhite, truncateString(nowPlaying, 34).c_str(), 0.35f);
+
+                    Ui::pill(322.0f, 5.0f, 70.0f, 16.0f, 0.32f, Ui::rgba(30, 24, 46, 230));
+                    drawCenteredText(textBuf, 357.0f, 12.0f, 0.29f, isNew3DS ? clr100 : clrMuted, isNew3DS ? "New3DS 804M" : "3DS 268M", 0.35f);
                 }
 
                 // Logo que late sincronizado al BPM real y flota hacia adelante en 3D
@@ -992,30 +1139,40 @@ int main(int argc, char* argv[]) {
                 drawCenteredText(textBuf, logoX, logoY - 6.0f, 1.10f + beat * 0.06f, clrWhite, "osu!");
                 drawCenteredText(textBuf, logoX, logoY + 24.0f, 0.46f, Ui::rgba(255, 235, 245), "3DS Edition");
 
-                for (int i = 0; i < 4; ++i) {
+                for (int i = 0; i < 5; ++i) {
                     bool sel = (mainMenuOption == i);
                     float dBtn = depthShift(sel ? 4.2f : 1.5f);
-                    float bx = (sel ? (206.0f - beat * 4.0f) : 224.0f) + dBtn;
-                    float by = 36.0f + i * 44.0f;
-                    float bw = 210.0f;
-                    float bh = 36.0f;
+                    float bx = (sel ? (202.0f - beat * 3.5f) : 218.0f) + dBtn;
+                    float by = 28.0f + i * 36.0f;
+                    float bw = 178.0f;
+                    float bh = 30.0f;
 
                     const RGBColor& c = activeSkin.comboColors[i % activeSkin.comboColors.size()];
                     u32 base = C2D_Color32(c.r, c.g, c.b, 255);
-                    Ui::slantRect(bx + 2.0f, by + 3.0f, bw, bh, 12.0f, 0.18f, Ui::rgba(0, 0, 0, 90));
-                    if (sel) {
-                        Ui::slantRectGrad(bx, by, bw, bh, 12.0f, 0.2f, Ui::brighten(base, 1.0f), Ui::lerpColor(base, Ui::rgba(40, 30, 70), 0.6f));
-                        C2D_DrawLine(bx + 12.0f, by, clrWhite, bx + bw, by, clrWhite, 1.5f, 0.22f);
-                    } else {
-                        Ui::slantRectGrad(bx, by, bw, bh, 12.0f, 0.2f, Ui::rgba(40, 35, 62, 225), Ui::rgba(22, 19, 36, 225));
-                        C2D_DrawLine(bx + 12.0f, by, base, bx, by + bh, base, 3.0f, 0.22f);
-                    }
-                    drawCenteredText(textBuf, bx + bw * 0.5f + 6.0f, by + bh * 0.5f, 0.50f, clrWhite, menuLabels[i]);
+                    u32 bg = sel ? Ui::rgba(42, 34, 70, 250) : Ui::rgba(22, 19, 36, 235);
+                    Ui::button(bx, by, bw, bh, 0.20f, bg, base, sel);
+
+                    // Pastilla indicadora de selección [>] o [A]
+                    Ui::pill(bx + 8.0f, by + 6.0f, 20.0f, 18.0f, 0.24f, sel ? base : Ui::rgba(38, 32, 55, 240));
+                    drawCenteredText(textBuf, bx + 18.0f, by + 14.0f, 0.28f, sel ? Ui::rgba(0, 0, 0, 245) : clrWhite, sel ? "A" : ">", 0.28f);
+
+                    // Título de la opción del menú
+                    drawTextWithShadow(textBuf, bx + 34.0f, by + 6.5f, 0.38f, clrWhite, menuLabels[i], 0.28f);
+
+                    // Pastilla de categoría / modo a la derecha estilo multijugador
+                    Ui::pill(bx + bw - 58.0f, by + 6.0f, 52.0f, 18.0f, 0.24f, sel ? base : Ui::rgba(32, 26, 48, 220));
+                    drawCenteredText(textBuf, bx + bw - 32.0f, by + 14.0f, 0.26f, sel ? Ui::rgba(0, 0, 0, 245) : Ui::rgba(215, 210, 235), menuSubPills[i], 0.28f);
                 }
 
-                Ui::gradV(0.0f, 214.0f, 400.0f, 26.0f, 0.3f, Ui::rgba(14, 11, 26, 120), Ui::rgba(14, 11, 26, 250));
-                drawText(textBuf, 10.0f, 221.0f, 0.38f, clrMuted, "Arr/Abj + A o toca la pantalla inferior");
-                drawText(textBuf, 330.0f, 221.0f, 0.38f, Ui::rgba(150, 215, 255), "v2.0 3D");
+                // Barra inferior de atajos estilo multijugador con v4.0 3D
+                Ui::gradV(0.0f, 212.0f, 400.0f, 28.0f, 0.3f, Ui::rgba(14, 11, 26, 140), Ui::rgba(14, 11, 26, 250));
+                float byY = 219.0f;
+                drawKeyBadge(textBuf, 12.0f, byY, "A", LOC(STR_SELECT_ACTION), Ui::rgba(50, 165, 255));
+                drawKeyBadge(textBuf, 88.0f, byY, "DPAD", LOC(STR_MOVE_ACTION), Ui::rgba(255, 180, 40));
+                drawKeyBadge(textBuf, 164.0f, byY, "TOUCH", LOC(STR_TOUCH_ACTION), Ui::rgba(50, 215, 115));
+
+                Ui::pill(328.0f, byY - 1.0f, 62.0f, 16.0f, 0.30f, Ui::rgba(25, 40, 65, 230));
+                drawCenteredText(textBuf, 359.0f, byY + 6.5f, 0.30f, Ui::rgba(100, 215, 255), "v4.0 3D", 0.32f);
                 Ui::drawTransition(400.0f, 240.0f, screenFade, clrPrimary);
             }
 
@@ -1028,36 +1185,40 @@ int main(int argc, char* argv[]) {
                 C2D_DrawRectSolid(0.0f, 0.0f, 0.04f, 320.0f, 240.0f, Ui::rgba(14, 11, 24, 160));
             }
 
-            for (int i = 0; i < 4; ++i) {
+            for (int i = 0; i < 5; ++i) {
                 bool sel = (mainMenuOption == i);
-                float bx = 40.0f;
-                float by = 16.0f + i * 42.0f;
-                float bw = 240.0f;
-                float bh = 36.0f;
+                float bx = 20.0f;
+                float by = 12.0f + i * 34.0f;
+                float bw = 280.0f;
+                float bh = 30.0f;
 
                 const RGBColor& c = activeSkin.comboColors[i % activeSkin.comboColors.size()];
                 u32 base = C2D_Color32(c.r, c.g, c.b, 255);
-                Ui::slantRect(bx + 2.0f, by + 3.0f, bw, bh, 10.0f, 0.18f, Ui::rgba(0, 0, 0, 90));
-                if (sel) {
-                    Ui::slantRectGrad(bx, by, bw, bh, 10.0f, 0.2f, base, Ui::lerpColor(base, Ui::rgba(40, 30, 70), 0.6f));
-                    C2D_DrawLine(bx + 10.0f, by, clrWhite, bx + bw, by, clrWhite, 1.5f, 0.22f);
-                } else {
-                    Ui::slantRectGrad(bx, by, bw, bh, 10.0f, 0.2f, Ui::rgba(40, 35, 62, 225), Ui::rgba(22, 19, 36, 225));
-                    C2D_DrawLine(bx + 10.0f, by, base, bx, by + bh, base, 3.0f, 0.22f);
-                }
-                drawCenteredText(textBuf, bx + bw * 0.5f + 5.0f, by + bh * 0.5f, 0.50f, clrWhite, menuLabels[i]);
+                u32 bg = sel ? Ui::rgba(45, 36, 72, 250) : Ui::rgba(22, 19, 36, 235);
+                Ui::button(bx, by, bw, bh, 0.20f, bg, base, sel);
+
+                // Pastilla indicadora de atajo [A]
+                Ui::pill(bx + 8.0f, by + 6.0f, 22.0f, 18.0f, 0.24f, sel ? base : Ui::rgba(38, 32, 55, 240));
+                drawCenteredText(textBuf, bx + 19.0f, by + 14.5f, 0.28f, sel ? Ui::rgba(0, 0, 0, 245) : clrWhite, "A", 0.28f);
+
+                // Titulo de la opcion del menu con sombra nitida
+                drawTextWithShadow(textBuf, bx + 36.0f, by + 6.0f, 0.42f, clrWhite, menuLabels[i], 0.28f);
+
+                // Pastilla de categoria / modo a la derecha estilo multijugador
+                Ui::pill(bx + bw - 74.0f, by + 6.0f, 66.0f, 18.0f, 0.24f, sel ? base : Ui::rgba(32, 26, 48, 220));
+                drawCenteredText(textBuf, bx + bw - 41.0f, by + 14.5f, 0.27f, sel ? Ui::rgba(0, 0, 0, 245) : Ui::rgba(215, 210, 235), menuSubPills[i], 0.28f);
             }
 
-            Ui::panel(10.0f, 188.0f, 300.0f, 44.0f, 0.2f, Ui::rgba(30, 27, 44, 235), clr300);
+            Ui::panel(10.0f, 186.0f, 300.0f, 46.0f, 0.20f, Ui::rgba(20, 18, 34, 240), clr300);
             char summary1[96];
-            std::snprintf(summary1, sizeof(summary1), "Modo: %s | Area: %d%% | Offset: %+dms",
+            std::snprintf(summary1, sizeof(summary1), "Modo: %s  •  Area: %d%%  •  Offset: %+dms",
                 settings.getShortInputModeLabel(),
                 static_cast<int>(std::round(settings.tabletScale * 100.0f)),
                 settings.audioOffsetMs);
-            drawCenteredText(textBuf, 160.0f, 201.0f, 0.37f, clr300, summary1);
+            drawCenteredTextWithShadow(textBuf, 160.0f, 199.0f, 0.35f, clr300, summary1, 0.25f);
 
-            std::string skinLine = "Skin: " + truncateString(activeSkin.name, 24) + " | Mods: " + formatModsString(settings.activeMods);
-            drawCenteredText(textBuf, 160.0f, 219.0f, 0.37f, clrCursor, skinLine.c_str());
+            std::string skinLine = "Skin: " + truncateString(activeSkin.name, 22) + "  •  Mods: " + formatModsString(settings.activeMods);
+            drawCenteredTextWithShadow(textBuf, 160.0f, 217.0f, 0.35f, clrCursor, skinLine.c_str(), 0.25f);
             Ui::drawTransition(320.0f, 240.0f, screenFade, clrPrimary);
 
             C3D_FrameEnd(0);
@@ -1101,6 +1262,9 @@ int main(int argc, char* argv[]) {
                 char rescanMsg[96];
                 std::snprintf(rescanMsg, sizeof(rescanMsg), "✓ Biblioteca actualizada: %d canciones", static_cast<int>(songMgr.sets.size()));
                 wifiServer.statusText = rescanMsg;
+                if (!wifiServer.isRunning()) {
+                    wifiServer.restart();
+                }
             }
 
             if (exitWifi) {
@@ -1128,19 +1292,19 @@ int main(int argc, char* argv[]) {
 
                 Ui::gradV(0.0f, 0.0f, 400.0f, 32.0f, 0.3f, Ui::rgba(18, 15, 32, 245), Ui::rgba(18, 15, 32, 160));
                 C2D_DrawRectSolid(0.0f, 31.0f, 0.31f, 400.0f, 1.5f, clr300);
-                drawText(textBuf, 12.0f, 7.0f, 0.50f, clrWhite, "Descargar / Enviar Beatmaps y Skins por Wi-Fi");
+                drawText(textBuf, 12.0f, 7.0f, 0.50f, clrWhite, LOC(STR_WIFI_HEADER));
 
                 Ui::panel(16.0f + dCard, 42.0f, 368.0f, 66.0f, 0.2f, Ui::rgba(26, 22, 42, 235), clrPrimary);
                 drawCenteredText(textBuf, 200.0f + dCard, 56.0f, 0.42f, clrWhite,
-                    "Abre esta direccion en el navegador de tu Celular o PC:");
+                    LOC(STR_WIFI_BROWSER_PROMPT));
                 drawCenteredText(textBuf, 200.0f + dCard, 84.0f, 0.72f, clrCursor,
-                    wifiServer.serverUrl.empty() ? "Sin conexion Wi-Fi" : wifiServer.serverUrl.c_str());
+                    wifiServer.serverUrl.empty() ? (wifiServer.isConnecting() ? LOC(STR_WIFI_IP_CONNECTING) : LOC(STR_WIFI_IP_NONE)) : wifiServer.serverUrl.c_str());
 
                 Ui::panel(16.0f + dCard * 0.6f, 114.0f, 368.0f, 42.0f, 0.2f, Ui::rgba(22, 19, 36, 220));
                 drawText(textBuf, 24.0f + dCard * 0.6f, 118.0f, 0.40f, clrWhite,
-                    "1. Sube tus propios archivos .osz (Mapas) o .osk (Skins)");
+                    LOC(STR_WIFI_STEP1));
                 drawText(textBuf, 24.0f + dCard * 0.6f, 136.0f, 0.40f, clr100,
-                    "2. O usa el Buscador Online integrado en esa misma web!");
+                    LOC(STR_WIFI_STEP2));
 
                 // Barra de progreso de recepción en tiempo real
                 Ui::panel(16.0f + dCard, 162.0f, 368.0f, 42.0f, 0.2f, Ui::rgba(26, 22, 42, 235), clr300);
@@ -1153,7 +1317,7 @@ int main(int argc, char* argv[]) {
                 Ui::gradV(0.0f, 212.0f, 400.0f, 28.0f, 0.3f, Ui::rgba(18, 15, 32, 170), Ui::rgba(18, 15, 32, 250));
                 char footerWifi[96];
                 std::snprintf(footerWifi, sizeof(footerWifi),
-                    "Paquetes instalados en esta sesion: %d | Total canciones: %d",
+                    LOC(STR_WIFI_FOOTER_FMT),
                     wifiServer.uploadedCount, static_cast<int>(songMgr.sets.size()));
                 drawCenteredText(textBuf, 200.0f, 226.0f, 0.40f, clrWhite, footerWifi);
                 Ui::drawTransition(400.0f, 240.0f, screenFade, clr300);
@@ -1168,45 +1332,52 @@ int main(int argc, char* argv[]) {
             // Cabecera superior
             Ui::gradV(0.0f, 0.0f, 320.0f, 26.0f, 0.3f, Ui::rgba(18, 15, 32, 245), Ui::rgba(18, 15, 32, 160));
             C2D_DrawRectSolid(0.0f, 25.0f, 0.31f, 320.0f, 1.5f, clr300);
-            drawCenteredText(textBuf, 160.0f, 5.0f, 0.44f, clrWhite, "TRANSFERENCIA Y DESCARGAS");
+            drawCenteredText(textBuf, 160.0f, 5.0f, 0.44f, clrWhite, LOC(STR_WIFI_TITLE));
 
             // Panel Izquierdo: Código QR nítido
             if (!wifiServer.serverUrl.empty()) {
                 renderQrCode(wifiServer.serverUrl.c_str(), 14.0f, 32.0f, 138.0f);
             } else {
                 Ui::panel(14.0f, 32.0f, 138.0f, 138.0f, 0.22f, Ui::rgba(26, 22, 42, 235), clrPrimary);
-                drawCenteredText(textBuf, 83.0f, 85.0f, 0.40f, clrCursor, "Buscando");
-                drawCenteredText(textBuf, 83.0f, 105.0f, 0.40f, clrWhite, "Red Wi-Fi...");
+                if (wifiServer.isConnecting()) {
+                    drawCenteredText(textBuf, 83.0f, 85.0f, 0.40f, clrCursor, LOC(STR_WIFI_CONNECTING));
+                    drawCenteredText(textBuf, 83.0f, 105.0f, 0.40f, clrWhite, "Wi-Fi...");
+                } else {
+                    drawCenteredText(textBuf, 83.0f, 85.0f, 0.40f, clrCursor, LOC(STR_WIFI_SEARCHING));
+                    drawCenteredText(textBuf, 83.0f, 105.0f, 0.40f, clrWhite, "Red Wi-Fi...");
+                }
             }
 
             // Panel Derecho: Monitor de señal Wi-Fi e instrucciones rápidas
             Ui::panel(158.0f, 32.0f, 148.0f, 138.0f, 0.22f, Ui::rgba(24, 20, 40, 240), clr300);
             u8 wifiSig = osGetWifiStrength();
             renderWifiBars(166.0f, 40.0f, wifiSig, clr100, Ui::rgba(70, 65, 90));
-            const char* sigText = (wifiSig == 3) ? "Excelente" : ((wifiSig == 2) ? "Buena" : ((wifiSig == 1) ? "Debil" : "Sin senal"));
+            const char* sigText = (wifiSig == 3) ? LOC(STR_WIFI_SIG_EXCELLENT) : ((wifiSig == 2) ? LOC(STR_WIFI_SIG_GOOD) : ((wifiSig == 1) ? LOC(STR_WIFI_SIG_WEAK) : LOC(STR_WIFI_SIG_NONE)));
             drawText(textBuf, 188.0f, 39.0f, 0.36f, (wifiSig > 0) ? clr100 : clrMiss, sigText);
 
-            drawText(textBuf, 166.0f, 58.0f, 0.44f, clrCursor, "ESCANEA CON MOVIL");
-            drawText(textBuf, 166.0f, 78.0f, 0.34f, clrWhite, "Apunta la camara al QR");
-            drawText(textBuf, 166.0f, 94.0f, 0.34f, clrWhite, "para abrir la web.");
-            drawText(textBuf, 166.0f, 110.0f, 0.34f, clrWhite, "Descarga con audio y");
-            drawText(textBuf, 166.0f, 126.0f, 0.34f, clr100, "filtros por estrellas.");
+            drawText(textBuf, 166.0f, 58.0f, 0.44f, clrCursor, LOC(STR_WIFI_SCAN_MOBILE));
+            drawText(textBuf, 166.0f, 78.0f, 0.34f, clrWhite, LOC(STR_WIFI_AIM_CAM));
+            drawText(textBuf, 166.0f, 94.0f, 0.34f, clrWhite, LOC(STR_WIFI_OPEN_WEB));
+            drawText(textBuf, 166.0f, 110.0f, 0.34f, clrWhite, LOC(STR_WIFI_DL_AUDIO));
+            drawText(textBuf, 166.0f, 126.0f, 0.34f, clr100, LOC(STR_WIFI_STAR_FILTER));
 
             char countBuf[48];
-            std::snprintf(countBuf, sizeof(countBuf), "Canciones: %d", static_cast<int>(songMgr.sets.size()));
+            std::snprintf(countBuf, sizeof(countBuf), "%s: %d", LOC(STR_SONGS), static_cast<int>(songMgr.sets.size()));
             drawText(textBuf, 166.0f, 148.0f, 0.36f, clrWhite, countBuf);
 
             // Botón Izquierdo: Re-escanear canciones
-            Ui::slantRectGrad(14.0f, 178.0f, 140.0f, 48.0f, 8.0f, 0.25f, Ui::rgba(50, 140, 225), Ui::rgba(25, 75, 150));
-            C2D_DrawLine(22.0f, 178.0f, clrWhite, 146.0f, 178.0f, clrWhite, 1.2f, 0.3f);
-            drawCenteredText(textBuf, 84.0f, 194.0f, 0.40f, clrWhite, "RE-ESCANEAR (X)");
-            drawCenteredText(textBuf, 84.0f, 210.0f, 0.32f, clr100, "Refrescar canciones");
+            Ui::button(14.0f, 178.0f, 140.0f, 48.0f, 0.25f, Ui::rgba(22, 38, 62, 240), Ui::rgba(40, 180, 240), false);
+            Ui::pill(22.0f, 184.0f, 26.0f, 16.0f, 0.28f, Ui::rgba(40, 180, 240));
+            drawCenteredText(textBuf, 35.0f, 192.0f, 0.30f, Ui::rgba(0, 0, 0, 240), "X", 0.32f);
+            drawTextWithShadow(textBuf, 54.0f, 184.0f, 0.38f, clrWhite, LOC(STR_WIFI_RESCAN_BTN), 0.30f);
+            drawTextWithShadow(textBuf, 22.0f, 206.0f, 0.30f, clr100, LOC(STR_WIFI_RESCAN_SUB), 0.30f);
 
             // Botón Derecho: Volver al menú
-            Ui::slantRectGrad(166.0f, 178.0f, 140.0f, 48.0f, 8.0f, 0.25f, clrPrimary, Ui::rgba(110, 45, 135));
-            C2D_DrawLine(174.0f, 178.0f, clrWhite, 298.0f, 178.0f, clrWhite, 1.2f, 0.3f);
-            drawCenteredText(textBuf, 236.0f, 194.0f, 0.44f, clrWhite, "VOLVER (B)");
-            drawCenteredText(textBuf, 236.0f, 210.0f, 0.32f, clrWhite, "Guardar cambios");
+            Ui::button(166.0f, 178.0f, 140.0f, 48.0f, 0.25f, Ui::rgba(42, 20, 52, 240), clrPrimary, false);
+            Ui::pill(174.0f, 184.0f, 26.0f, 16.0f, 0.28f, clrPrimary);
+            drawCenteredText(textBuf, 187.0f, 192.0f, 0.30f, clrWhite, "B", 0.32f);
+            drawTextWithShadow(textBuf, 206.0f, 184.0f, 0.40f, clrWhite, LOC(STR_WIFI_BACK_BTN), 0.30f);
+            drawTextWithShadow(textBuf, 174.0f, 206.0f, 0.30f, Ui::rgba(255, 180, 215), LOC(STR_WIFI_SAVE_SUB), 0.30f);
 
             Ui::drawTransition(320.0f, 240.0f, screenFade, clr300);
 
@@ -1218,8 +1389,27 @@ int main(int argc, char* argv[]) {
         // 2. MENÚ DE CONFIGURACIONES (Tablet, Audio, Calibración, Skins)
         // =========================================================
         if (appState == STATE_SETTINGS) {
-            const int numSettings = 20;
-            int activeTab = settingsOption / 4; // 0: TABLET, 1: CONTROLES, 2: AUDIO, 3: JUEGO, 4: VISUAL
+            audio.update();
+            if (!calibrationMode && settings.songPreview && !audio.isPreviewLoading() && audio.isSongFinished()) {
+                rotateMenuSong();
+            }
+            auto getTabForOption = [](int opt) -> int {
+                if (opt >= 0 && opt <= 3) return 0;
+                if (opt >= 4 && opt <= 7) return 1;
+                if (opt >= 8 && opt <= 11) return 2;
+                if ((opt >= 12 && opt <= 15) || opt == 20 || opt == 22) return 3;
+                if ((opt >= 16 && opt <= 19) || opt == 21) return 4;
+                return 0;
+            };
+            const int tabItems[5][6] = {
+                { 0, 1, 2, 3, -1, -1 },
+                { 4, 5, 6, 7, -1, -1 },
+                { 8, 9, 10, 11, -1, -1 },
+                { 22, 12, 13, 14, 15, 20 },
+                { 16, 17, 18, 19, 21, -1 }
+            };
+            const int tabItemCounts[5] = { 4, 4, 4, 6, 5 };
+            int activeTab = getTabForOption(settingsOption); // 0: TABLET, 1: CONTROLES, 2: AUDIO, 3: JUEGO, 4: VISUAL
 
             if (capturingKeyIndex != -1) {
                 u32 anyKey = kDown & (KEY_A | KEY_B | KEY_X | KEY_Y | KEY_L | KEY_R | KEY_ZL | KEY_ZR | KEY_DUP | KEY_DDOWN | KEY_DLEFT | KEY_DRIGHT | KEY_SELECT | KEY_START);
@@ -1324,23 +1514,23 @@ int main(int argc, char* argv[]) {
             if (activeTab != 1) {
                 if (kDown & (KEY_L | KEY_ZL)) {
                     activeTab = (activeTab + 4) % 5;
-                    settingsOption = activeTab * 4;
+                    settingsOption = tabItems[activeTab][0];
                     audio.playHitSound(0);
                 }
                 if (kDown & (KEY_R | KEY_ZR)) {
                     activeTab = (activeTab + 1) % 5;
-                    settingsOption = activeTab * 4;
+                    settingsOption = tabItems[activeTab][0];
                     audio.playHitSound(0);
                 }
             } else {
                 if (kDown & KEY_ZL) {
                     activeTab = (activeTab + 4) % 5;
-                    settingsOption = activeTab * 4;
+                    settingsOption = tabItems[activeTab][0];
                     audio.playHitSound(0);
                 }
                 if (kDown & KEY_ZR) {
                     activeTab = (activeTab + 1) % 5;
-                    settingsOption = activeTab * 4;
+                    settingsOption = tabItems[activeTab][0];
                     audio.playHitSound(0);
                 }
             }
@@ -1352,7 +1542,7 @@ int main(int argc, char* argv[]) {
                         float tx = 7.0f + t * 62.0f;
                         if (touch.px >= tx && touch.px <= tx + 58.0f) {
                             activeTab = t;
-                            settingsOption = t * 4;
+                            settingsOption = tabItems[t][0];
                             audio.playHitSound(0);
                             break;
                         }
@@ -1433,12 +1623,22 @@ int main(int argc, char* argv[]) {
                         audio.playHitSound(2);
                     }
                 } else {
+                    int curIdx = 0;
+                    int count = tabItemCounts[activeTab];
+                    for (int i = 0; i < count; ++i) {
+                        if (tabItems[activeTab][i] == settingsOption) {
+                            curIdx = i;
+                            break;
+                        }
+                    }
                     if (kDown & KEY_DUP) {
-                        settingsOption = (settingsOption - 1 + numSettings) % numSettings;
+                        curIdx = (curIdx - 1 + count) % count;
+                        settingsOption = tabItems[activeTab][curIdx];
                         audio.playHitSound(0);
                     }
                     if (kDown & KEY_DDOWN) {
-                        settingsOption = (settingsOption + 1) % numSettings;
+                        curIdx = (curIdx + 1) % count;
+                        settingsOption = tabItems[activeTab][curIdx];
                         audio.playHitSound(0);
                     }
 
@@ -1478,6 +1678,12 @@ int main(int argc, char* argv[]) {
                         case 11: // Hitsounds Propios del Beatmap
                             settings.beatmapHitsounds = !settings.beatmapHitsounds;
                             break;
+                        case 22: // Idioma / Language
+                            settings.language = (settings.language + stepDir + LANG_COUNT) % LANG_COUNT;
+                            Localization::setLanguage(static_cast<AppLanguage>(settings.language));
+                            settings.save();
+                            audio.playHitSound(2);
+                            break;
                         case 12: // Modo de Juego (STD / TAIKO / CATCH / MANIA)
                             settings.gameMode = static_cast<GameMode>((settings.gameMode + stepDir + 4) % 4);
                             break;
@@ -1492,6 +1698,9 @@ int main(int argc, char* argv[]) {
                         case 15: // Combo Bursts (Mascota)
                             settings.comboBursts = !settings.comboBursts;
                             break;
+                        case 20: // Efecto Visual Golpes 300
+                            settings.showHit300 = !settings.showHit300;
+                            break;
                         case 16: // Fondo en Modo Taiko (Festivo / Imagen / Video)
                             settings.taikoBgMode = (settings.taikoBgMode + stepDir + 3) % 3;
                             break;
@@ -1503,6 +1712,10 @@ int main(int argc, char* argv[]) {
                             break;
                         case 19: // Videos de Fondo (.3dsv)
                             settings.enableVideo = !settings.enableVideo;
+                            break;
+                        case 21: // Descargas en Multijugador
+                            settings.multiDlOption = (settings.multiDlOption + stepDir + 2) % 2;
+                            multiMgr.enableBgDownload = (settings.multiDlOption != 0);
                             break;
                     }
                     settings.clampValues();
@@ -1522,6 +1735,12 @@ int main(int argc, char* argv[]) {
                         audio.stopMusic();
                     }
                     else if (settingsOption == 11) settings.beatmapHitsounds = !settings.beatmapHitsounds;
+                    else if (settingsOption == 22) {
+                        settings.language = (settings.language + 1) % LANG_COUNT;
+                        Localization::setLanguage(static_cast<AppLanguage>(settings.language));
+                        settings.save();
+                        audio.playHitSound(2);
+                    }
                     else if (settingsOption == 12) {
                         settings.gameMode = static_cast<GameMode>((settings.gameMode + 1) % 4);
                         settings.save();
@@ -1532,11 +1751,20 @@ int main(int argc, char* argv[]) {
                     }
                     else if (settingsOption == 14) settings.snakingSliders = !settings.snakingSliders;
                     else if (settingsOption == 15) settings.comboBursts = !settings.comboBursts;
+                    else if (settingsOption == 20) {
+                        settings.showHit300 = !settings.showHit300;
+                        settings.save();
+                    }
                     else if (settingsOption == 16) {
                         settings.taikoBgMode = (settings.taikoBgMode + 1) % 3;
                         settings.save();
                     }
                     else if (settingsOption == 19) settings.enableVideo = !settings.enableVideo;
+                    else if (settingsOption == 21) {
+                        settings.multiDlOption = (settings.multiDlOption + 1) % 2;
+                        multiMgr.enableBgDownload = (settings.multiDlOption != 0);
+                        settings.save();
+                    }
                     audio.playHitSound(0);
                 }
             }
@@ -1561,7 +1789,7 @@ int main(int argc, char* argv[]) {
 
             float rx, ry, rw, rh;
             settings.getTabletRect(rx, ry, rw, rh);
-            activeTab = settingsOption / 4;
+            activeTab = getTabForOption(settingsOption);
 
             // --- PANTALLA SUPERIOR: TARJETAS REDISEÑADAS POR CATEGORÍA ESTILO OSU!LAZER ---
             for (int eye = 0; eye < (stereoActive ? 2 : 1); ++eye) {
@@ -1585,7 +1813,13 @@ int main(int argc, char* argv[]) {
                 Ui::gradV(0.0f, 0.0f, 400.0f, 28.0f, 0.3f, Ui::rgba(18, 15, 32, 245), Ui::rgba(18, 15, 32, 160));
                 C2D_DrawRectSolid(0.0f, 27.0f, 0.31f, 400.0f, 1.5f, clrPrimary);
 
-                const char* tabNames[5] = { "1. TABLET", "2. TECLAS", "3. AUDIO", "4. JUEGO", "5. VISUAL" };
+                const char* tabNames[5] = {
+                    LOC(STR_TAB_TABLET),
+                    LOC(STR_TAB_CONTROLS),
+                    LOC(STR_TAB_AUDIO),
+                    LOC(STR_TAB_GAME),
+                    LOC(STR_TAB_VISUAL)
+                };
                 for (int t = 0; t < 5; ++t) {
                     float tx = 6.0f + t * 62.0f;
                     bool isTabActive = (activeTab == t);
@@ -1909,16 +2143,23 @@ int main(int argc, char* argv[]) {
                         drawManiaNote(3, 5);
                     }
                 } else {
-                    // Renderizado de las 4 tarjetas de la categoría activa (Tabs 0, 2, 3, 4)
-                    int startOpt = activeTab * 4;
-                    for (int i = 0; i < 4; ++i) {
-                        int optIdx = startOpt + i;
-                        if (optIdx >= numSettings) break;
+                    // Renderizado de las tarjetas de la categoría activa (Tabs 0, 2, 3, 4)
+                    int count = tabItemCounts[activeTab];
+                    float ch = (count == 6) ? 27.0f : ((count == 5) ? 31.0f : 38.0f);
+                    float step = (count == 6) ? 29.5f : ((count == 5) ? 34.0f : 44.0f);
+                    float startY = (count == 6) ? 31.0f : ((count == 5) ? 32.0f : 34.0f);
+                    float titleYOff = (count == 6) ? 1.5f : ((count == 5) ? 2.5f : 4.0f);
+                    float descYOff  = (count == 6) ? 14.5f : ((count == 5) ? 16.5f : 20.0f);
+                    float ctrlYOff  = (count == 6) ? 4.0f : ((count == 5) ? 5.5f : 8.0f);
+                    float swYOff    = (count == 6) ? 4.5f : ((count == 5) ? 6.5f : 11.0f);
+                    float sldYOff   = (count == 6) ? 8.5f : ((count == 5) ? 10.5f : 14.0f);
+
+                    for (int i = 0; i < count; ++i) {
+                        int optIdx = tabItems[activeTab][i];
                         bool sel = (!calibrationMode && settingsOption == optIdx);
                         float dCard = depthShift(sel ? 3.5f : 1.2f);
-                        float cy = 34.0f + i * 44.0f;
+                        float cy = startY + i * step;
                         float cw = 376.0f;
-                        float ch = 38.0f;
                         float cx = 12.0f + dCard;
 
                         u32 cardBg = sel ? Ui::rgba(38, 30, 64, 245) : Ui::rgba(22, 19, 36, 225);
@@ -1930,95 +2171,111 @@ int main(int argc, char* argv[]) {
 
                         // Título y valor según opción
                         if (optIdx == 0) { // Modo de Entrada
-                            drawText(textBuf, cx + 12.0f, cy + 4.0f, 0.44f, sel ? clrWhite : clrCursor, "Modo de Entrada / Pantalla de Juego");
-                            drawText(textBuf, cx + 12.0f, cy + 20.0f, 0.35f, clrMuted, "Tocar directo en pantalla inf. o modo tablet");
-                            Ui::pill(cx + 205.0f, cy + 8.0f, 160.0f, 22.0f, 0.25f, settings.playOnBottomScreen ? Ui::rgba(35, 110, 75) : Ui::rgba(55, 45, 95));
-                            drawCenteredText(textBuf, cx + 285.0f, cy + 19.0f, 0.36f, clrWhite, settings.getInputModeLabel(), 0.85f);
+                            drawText(textBuf, cx + 12.0f, cy + titleYOff, 0.44f, sel ? clrWhite : clrCursor, LOC(STR_SET_INPUT_MODE));
+                            drawText(textBuf, cx + 12.0f, cy + descYOff, 0.35f, clrMuted, LOC(STR_SET_INPUT_MODE_DESC));
+                            Ui::pill(cx + 205.0f, cy + ctrlYOff, 160.0f, (count == 6) ? 19.0f : 22.0f, 0.25f, settings.playOnBottomScreen ? Ui::rgba(35, 110, 75) : Ui::rgba(55, 45, 95));
+                            drawCenteredText(textBuf, cx + 285.0f, cy + ctrlYOff + ((count == 6) ? 9.5f : 11.0f), 0.36f, clrWhite, settings.getInputModeLabel(), 0.85f);
                         } else if (optIdx == 1) { // Tamaño Área Tablet
-                            drawText(textBuf, cx + 12.0f, cy + 4.0f, 0.44f, sel ? clrWhite : clrCursor, "Tamano Area Activa Tablet");
+                            drawText(textBuf, cx + 12.0f, cy + titleYOff, 0.44f, sel ? clrWhite : clrCursor, LOC(STR_SET_TABLET_SIZE));
                             char desc[64];
                             std::snprintf(desc, sizeof(desc), "%d%% (%dx%d px)", static_cast<int>(std::round(settings.tabletScale * 100.0f)), (int)rw, (int)rh);
-                            drawText(textBuf, cx + 12.0f, cy + 20.0f, 0.35f, clr300, desc);
+                            drawText(textBuf, cx + 12.0f, cy + descYOff, 0.35f, clr300, desc);
                             float ratio = (settings.tabletScale - 0.30f) / 0.70f;
-                            Ui::sliderBar(cx + 230.0f, cy + 14.0f, 134.0f, 10.0f, 0.25f, ratio, sel ? clrCursor : clrPrimary, sel);
+                            Ui::sliderBar(cx + 230.0f, cy + sldYOff, 134.0f, 10.0f, 0.25f, ratio, sel ? clrCursor : clrPrimary, sel);
                         } else if (optIdx == 2) { // Posición X
-                            drawText(textBuf, cx + 12.0f, cy + 4.0f, 0.44f, sel ? clrWhite : clrCursor, "Posicion Horizontal (X)");
+                            drawText(textBuf, cx + 12.0f, cy + titleYOff, 0.44f, sel ? clrWhite : clrCursor, LOC(STR_SET_POS_X));
                             char desc[64]; std::snprintf(desc, sizeof(desc), "X = %.0f px  (C-Pad / Stylus)", settings.tabletCenterX);
-                            drawText(textBuf, cx + 12.0f, cy + 20.0f, 0.35f, clr300, desc);
+                            drawText(textBuf, cx + 12.0f, cy + descYOff, 0.35f, clr300, desc);
                             float ratio = settings.tabletCenterX / 320.0f;
-                            Ui::sliderBar(cx + 230.0f, cy + 14.0f, 134.0f, 10.0f, 0.25f, ratio, sel ? clrCursor : clrPrimary, sel);
+                            Ui::sliderBar(cx + 230.0f, cy + sldYOff, 134.0f, 10.0f, 0.25f, ratio, sel ? clrCursor : clrPrimary, sel);
                         } else if (optIdx == 3) { // Posición Y
-                            drawText(textBuf, cx + 12.0f, cy + 4.0f, 0.44f, sel ? clrWhite : clrCursor, "Posicion Vertical (Y)");
+                            drawText(textBuf, cx + 12.0f, cy + titleYOff, 0.44f, sel ? clrWhite : clrCursor, LOC(STR_SET_POS_Y));
                             char desc[64]; std::snprintf(desc, sizeof(desc), "Y = %.0f px  (C-Pad / Stylus)", settings.tabletCenterY);
-                            drawText(textBuf, cx + 12.0f, cy + 20.0f, 0.35f, clr300, desc);
+                            drawText(textBuf, cx + 12.0f, cy + descYOff, 0.35f, clr300, desc);
                             float ratio = settings.tabletCenterY / 240.0f;
-                            Ui::sliderBar(cx + 230.0f, cy + 14.0f, 134.0f, 10.0f, 0.25f, ratio, sel ? clrCursor : clrPrimary, sel);
+                            Ui::sliderBar(cx + 230.0f, cy + sldYOff, 134.0f, 10.0f, 0.25f, ratio, sel ? clrCursor : clrPrimary, sel);
                         } else if (optIdx == 8) { // Volumen Música
-                            drawText(textBuf, cx + 12.0f, cy + 4.0f, 0.44f, sel ? clrWhite : clrCursor, "Volumen de Musica");
+                            drawText(textBuf, cx + 12.0f, cy + titleYOff, 0.44f, sel ? clrWhite : clrCursor, LOC(STR_SET_MUSIC_VOL));
                             char desc[32]; std::snprintf(desc, sizeof(desc), "%d%%", settings.musicVolume);
-                            drawText(textBuf, cx + 12.0f, cy + 20.0f, 0.35f, clr300, desc);
+                            drawText(textBuf, cx + 12.0f, cy + descYOff, 0.35f, clr300, desc);
                             float ratio = settings.musicVolume / 100.0f;
-                            Ui::sliderBar(cx + 230.0f, cy + 14.0f, 134.0f, 10.0f, 0.25f, ratio, sel ? clrCursor : clrPrimary, sel);
+                            Ui::sliderBar(cx + 230.0f, cy + sldYOff, 134.0f, 10.0f, 0.25f, ratio, sel ? clrCursor : clrPrimary, sel);
                         } else if (optIdx == 9) { // Volumen Hitsounds
-                            drawText(textBuf, cx + 12.0f, cy + 4.0f, 0.44f, sel ? clrWhite : clrCursor, "Volumen de Hitsounds (Efectos)");
+                            drawText(textBuf, cx + 12.0f, cy + titleYOff, 0.44f, sel ? clrWhite : clrCursor, LOC(STR_SET_SFX_VOL));
                             char desc[32]; std::snprintf(desc, sizeof(desc), "%d%%", settings.sfxVolume);
-                            drawText(textBuf, cx + 12.0f, cy + 20.0f, 0.35f, clr300, desc);
+                            drawText(textBuf, cx + 12.0f, cy + descYOff, 0.35f, clr300, desc);
                             float ratio = settings.sfxVolume / 100.0f;
-                            Ui::sliderBar(cx + 230.0f, cy + 14.0f, 134.0f, 10.0f, 0.25f, ratio, sel ? clrCursor : clrPrimary, sel);
+                            Ui::sliderBar(cx + 230.0f, cy + sldYOff, 134.0f, 10.0f, 0.25f, ratio, sel ? clrCursor : clrPrimary, sel);
                         } else if (optIdx == 10) { // Offset de Audio
-                            drawText(textBuf, cx + 12.0f, cy + 4.0f, 0.44f, sel ? clrWhite : clrCursor, "Offset / Sincronizacion de Audio");
+                            drawText(textBuf, cx + 12.0f, cy + titleYOff, 0.44f, sel ? clrWhite : clrCursor, LOC(STR_SET_OFFSET));
                             char desc[64]; std::snprintf(desc, sizeof(desc), "%+d ms  (Pulsa X o A para Calibrar)", settings.audioOffsetMs);
-                            drawText(textBuf, cx + 12.0f, cy + 20.0f, 0.35f, clr100, desc);
+                            drawText(textBuf, cx + 12.0f, cy + descYOff, 0.35f, clr100, desc);
                             float ratio = (settings.audioOffsetMs + 150) / 300.0f;
-                            Ui::sliderBar(cx + 230.0f, cy + 14.0f, 134.0f, 10.0f, 0.25f, ratio, sel ? clrCursor : clr300, sel);
+                            Ui::sliderBar(cx + 230.0f, cy + sldYOff, 134.0f, 10.0f, 0.25f, ratio, sel ? clrCursor : clr300, sel);
                         } else if (optIdx == 11) { // Hitsounds del Beatmap
-                            drawText(textBuf, cx + 12.0f, cy + 4.0f, 0.44f, sel ? clrWhite : clrCursor, "Hitsounds del Beatmap");
-                            drawText(textBuf, cx + 12.0f, cy + 20.0f, 0.35f, clrMuted, "Usar sonidos propios de la carpeta del mapa");
-                            Ui::toggleSwitch(cx + 312.0f, cy + 11.0f, 48.0f, 18.0f, 0.25f, settings.beatmapHitsounds, clr100);
+                            drawText(textBuf, cx + 12.0f, cy + titleYOff, 0.44f, sel ? clrWhite : clrCursor, LOC(STR_SET_MAP_HITSOUNDS));
+                            drawText(textBuf, cx + 12.0f, cy + descYOff, 0.35f, clrMuted, LOC(STR_SET_MAP_HITSOUNDS_DESC));
+                            Ui::toggleSwitch(cx + 312.0f, cy + swYOff, 48.0f, 18.0f, 0.25f, settings.beatmapHitsounds, clr100);
+                        } else if (optIdx == 22) { // Idioma / Language
+                            drawText(textBuf, cx + 12.0f, cy + titleYOff, 0.44f, sel ? clrWhite : clrCursor, LOC(STR_SET_LANGUAGE));
+                            drawText(textBuf, cx + 12.0f, cy + descYOff, 0.35f, clrMuted, LOC(STR_SET_LANGUAGE_DESC));
+                            u32 lBg = Ui::rgba(45, 115, 215);
+                            Ui::pill(cx + 205.0f, cy + ctrlYOff, 160.0f, (count == 6) ? 19.0f : 22.0f, 0.25f, lBg);
+                            drawCenteredText(textBuf, cx + 285.0f, cy + ctrlYOff + ((count == 6) ? 9.5f : 11.0f), 0.36f, clrWhite, settings.getLanguageName(), 0.85f);
                         } else if (optIdx == 12) { // Modo de Juego
-                            drawText(textBuf, cx + 12.0f, cy + 4.0f, 0.44f, sel ? clrWhite : clrCursor, "Modo de Juego Principal");
-                            drawText(textBuf, cx + 12.0f, cy + 20.0f, 0.35f, clrMuted, "Convierte mapas o juega modos nativos");
+                            drawText(textBuf, cx + 12.0f, cy + titleYOff, 0.44f, sel ? clrWhite : clrCursor, LOC(STR_SET_MAIN_MODE));
+                            drawText(textBuf, cx + 12.0f, cy + descYOff, 0.35f, clrMuted, LOC(STR_SET_MAIN_MODE_DESC));
                             u32 mBg = (settings.gameMode == MODE_TAIKO) ? Ui::rgba(180, 45, 45) : ((settings.gameMode == MODE_CATCH) ? Ui::rgba(35, 160, 85) : ((settings.gameMode == MODE_MANIA) ? Ui::rgba(140, 35, 175) : Ui::rgba(65, 45, 115)));
-                            Ui::pill(cx + 205.0f, cy + 8.0f, 160.0f, 22.0f, 0.25f, mBg);
-                            drawCenteredText(textBuf, cx + 285.0f, cy + 19.0f, 0.36f, clrWhite, settings.getGameModeName(), 0.85f);
+                            Ui::pill(cx + 205.0f, cy + ctrlYOff, 160.0f, (count == 6) ? 19.0f : 22.0f, 0.25f, mBg);
+                            drawCenteredText(textBuf, cx + 285.0f, cy + ctrlYOff + ((count == 6) ? 9.5f : 11.0f), 0.36f, clrWhite, settings.getGameModeName(), 0.85f);
                         } else if (optIdx == 13) { // Skin Activo
-                            drawText(textBuf, cx + 12.0f, cy + 4.0f, 0.44f, sel ? clrWhite : clrCursor, "Skin Activo (.osk / Presets)");
+                            drawText(textBuf, cx + 12.0f, cy + titleYOff, 0.44f, sel ? clrWhite : clrCursor, LOC(STR_SET_ACTIVE_SKIN));
                             char desc[64]; std::snprintf(desc, sizeof(desc), "%s (%d/%d)", truncateString(activeSkin.name, 22).c_str(), settings.skinIndex + 1, (int)skinMgr.skins.size());
-                            drawText(textBuf, cx + 12.0f, cy + 20.0f, 0.35f, clr300, desc);
+                            drawText(textBuf, cx + 12.0f, cy + descYOff, 0.35f, clr300, desc);
                             for (size_t c = 0; c < std::min((size_t)4, activeSkin.comboColors.size()); ++c) {
                                 u32 cc = C2D_Color32(activeSkin.comboColors[c].r, activeSkin.comboColors[c].g, activeSkin.comboColors[c].b, 255);
-                                C2D_DrawCircleSolid(cx + 276.0f + c * 20.0f, cy + 19.0f, 0.25f, 6.5f, cc);
+                                C2D_DrawCircleSolid(cx + 276.0f + c * 20.0f, cy + ctrlYOff + ((count == 6) ? 9.5f : 11.0f), 0.25f, 6.5f, cc);
                             }
                         } else if (optIdx == 14) { // Sliders Serpiente (Snaking)
-                            drawText(textBuf, cx + 12.0f, cy + 4.0f, 0.44f, sel ? clrWhite : clrCursor, "Sliders Serpiente (Snaking)");
-                            drawText(textBuf, cx + 12.0f, cy + 20.0f, 0.35f, clrMuted, "Los sliders se dibujan fluidos como en PC/lazer");
-                            Ui::toggleSwitch(cx + 312.0f, cy + 11.0f, 48.0f, 18.0f, 0.25f, settings.snakingSliders, clr100);
+                            drawText(textBuf, cx + 12.0f, cy + titleYOff, 0.44f, sel ? clrWhite : clrCursor, LOC(STR_SET_SNAKING));
+                            drawText(textBuf, cx + 12.0f, cy + descYOff, 0.35f, clrMuted, LOC(STR_SET_SNAKING_DESC));
+                            Ui::toggleSwitch(cx + 312.0f, cy + swYOff, 48.0f, 18.0f, 0.25f, settings.snakingSliders, clr100);
                         } else if (optIdx == 15) { // Combo Bursts (Mascota)
-                            drawText(textBuf, cx + 12.0f, cy + 4.0f, 0.44f, sel ? clrWhite : clrCursor, "Combo Bursts (Mascota / Skin)");
-                            drawText(textBuf, cx + 12.0f, cy + 20.0f, 0.35f, clrMuted, "Aparicion lateral en hitos de combo");
-                            Ui::toggleSwitch(cx + 312.0f, cy + 11.0f, 48.0f, 18.0f, 0.25f, settings.comboBursts, clr100);
+                            drawText(textBuf, cx + 12.0f, cy + titleYOff, 0.44f, sel ? clrWhite : clrCursor, LOC(STR_SET_BURSTS));
+                            drawText(textBuf, cx + 12.0f, cy + descYOff, 0.35f, clrMuted, LOC(STR_SET_BURSTS_DESC));
+                            Ui::toggleSwitch(cx + 312.0f, cy + swYOff, 48.0f, 18.0f, 0.25f, settings.comboBursts, clr100);
+                        } else if (optIdx == 20) { // Efecto Visual Golpes 300
+                            drawText(textBuf, cx + 12.0f, cy + titleYOff, 0.44f, sel ? clrWhite : clrCursor, LOC(STR_SET_HIT300));
+                            drawText(textBuf, cx + 12.0f, cy + descYOff, 0.35f, clrMuted, LOC(STR_SET_HIT300_DESC));
+                            Ui::toggleSwitch(cx + 312.0f, cy + swYOff, 48.0f, 18.0f, 0.25f, settings.showHit300, clr100);
                         } else if (optIdx == 16) { // Fondo Taiko
-                            drawText(textBuf, cx + 12.0f, cy + 4.0f, 0.44f, sel ? clrWhite : clrCursor, "Fondo en Modo Taiko");
-                            drawText(textBuf, cx + 12.0f, cy + 20.0f, 0.35f, clrMuted, "Festivo (Bailarines) / Imagen / Video");
+                            drawText(textBuf, cx + 12.0f, cy + titleYOff, 0.44f, sel ? clrWhite : clrCursor, LOC(STR_SET_TAIKO_BG));
+                            drawText(textBuf, cx + 12.0f, cy + descYOff, 0.35f, clrMuted, "Festivo / Imagen / Video");
                             u32 bClr = (settings.taikoBgMode == 0) ? Ui::rgba(225, 145, 25) : ((settings.taikoBgMode == 1) ? Ui::rgba(45, 130, 215) : Ui::rgba(165, 55, 185));
-                            Ui::pill(cx + 205.0f, cy + 8.0f, 160.0f, 22.0f, 0.25f, bClr);
-                            drawCenteredText(textBuf, cx + 285.0f, cy + 19.0f, 0.34f, clrWhite, settings.getTaikoBgModeName(), 0.85f);
+                            Ui::pill(cx + 205.0f, cy + ctrlYOff, 160.0f, 22.0f, 0.25f, bClr);
+                            drawCenteredText(textBuf, cx + 285.0f, cy + ctrlYOff + 11.0f, 0.34f, clrWhite, settings.getTaikoBgModeName(), 0.85f);
                         } else if (optIdx == 17) { // Tamaño del Cursor
-                            drawText(textBuf, cx + 12.0f, cy + 4.0f, 0.44f, sel ? clrWhite : clrCursor, "Tamano del Cursor");
+                            drawText(textBuf, cx + 12.0f, cy + titleYOff, 0.44f, sel ? clrWhite : clrCursor, LOC(STR_SET_CURSOR_SIZE));
                             char desc[32]; std::snprintf(desc, sizeof(desc), "%.1fx", settings.cursorScale);
-                            drawText(textBuf, cx + 12.0f, cy + 20.0f, 0.35f, clr300, desc);
+                            drawText(textBuf, cx + 12.0f, cy + descYOff, 0.35f, clr300, desc);
                             float ratio = (settings.cursorScale - 0.5f) / 1.5f;
-                            Ui::sliderBar(cx + 230.0f, cy + 14.0f, 134.0f, 10.0f, 0.25f, ratio, sel ? clrCursor : clrPrimary, sel);
+                            Ui::sliderBar(cx + 230.0f, cy + sldYOff, 134.0f, 10.0f, 0.25f, ratio, sel ? clrCursor : clrPrimary, sel);
                         } else if (optIdx == 18) { // Oscurecimiento Fondo
-                            drawText(textBuf, cx + 12.0f, cy + 4.0f, 0.44f, sel ? clrWhite : clrCursor, "Oscurecimiento de Fondo (Bg Dim)");
+                            drawText(textBuf, cx + 12.0f, cy + titleYOff, 0.44f, sel ? clrWhite : clrCursor, LOC(STR_SET_BG_DIM));
                             char desc[32]; std::snprintf(desc, sizeof(desc), "%d%%", settings.bgDim);
-                            drawText(textBuf, cx + 12.0f, cy + 20.0f, 0.35f, clr300, desc);
+                            drawText(textBuf, cx + 12.0f, cy + descYOff, 0.35f, clr300, desc);
                             float ratio = (settings.bgDim - 20) / 80.0f;
-                            Ui::sliderBar(cx + 230.0f, cy + 14.0f, 134.0f, 10.0f, 0.25f, ratio, sel ? clrCursor : clrPrimary, sel);
+                            Ui::sliderBar(cx + 230.0f, cy + sldYOff, 134.0f, 10.0f, 0.25f, ratio, sel ? clrCursor : clrPrimary, sel);
                         } else if (optIdx == 19) { // Videos de Fondo
-                            drawText(textBuf, cx + 12.0f, cy + 4.0f, 0.44f, sel ? clrWhite : clrCursor, "Reproducir Videos de Fondo");
-                            drawText(textBuf, cx + 12.0f, cy + 20.0f, 0.35f, clrMuted, "Formato optimizado .3dsv / .mjpg");
-                            Ui::toggleSwitch(cx + 312.0f, cy + 11.0f, 48.0f, 18.0f, 0.25f, settings.enableVideo, clr100);
+                            drawText(textBuf, cx + 12.0f, cy + titleYOff, 0.44f, sel ? clrWhite : clrCursor, LOC(STR_SET_VIDEOS));
+                            drawText(textBuf, cx + 12.0f, cy + descYOff, 0.35f, clrMuted, LOC(STR_SET_VIDEOS_DESC));
+                            Ui::toggleSwitch(cx + 312.0f, cy + swYOff, 48.0f, 18.0f, 0.25f, settings.enableVideo, clr100);
+                        } else if (optIdx == 21) { // Descargas Multijugador
+                            drawText(textBuf, cx + 12.0f, cy + titleYOff, 0.44f, sel ? clrWhite : clrCursor, LOC(STR_SET_MULTI_DL));
+                            drawText(textBuf, cx + 12.0f, cy + descYOff, 0.35f, clrMuted, LOC(STR_SET_MULTI_DL_DESC));
+                            u32 dClr = (settings.multiDlOption == 1) ? Ui::rgba(45, 130, 215) : Ui::rgba(110, 95, 140);
+                            Ui::pill(cx + 185.0f, cy + ctrlYOff, 180.0f, 22.0f, 0.25f, dClr);
+                            drawCenteredText(textBuf, cx + 275.0f, cy + ctrlYOff + 11.0f, 0.34f, clrWhite, settings.getMultiDlOptionName(), 0.85f);
                         }
                     }
                 }
@@ -2071,7 +2328,7 @@ int main(int argc, char* argv[]) {
                 }
 
                 Ui::gradV(0.0f, 212.0f, 400.0f, 28.0f, 0.3f, Ui::rgba(18, 15, 32, 170), Ui::rgba(18, 15, 32, 250));
-                drawText(textBuf, 8.0f, 219.0f, 0.37f, clr300, "Arr/Abj: Item | Izq/Der: Ajustar/Modo | L/R: Pestana | B: Guardar");
+                drawText(textBuf, 8.0f, 219.0f, 0.37f, clr300, LOC(STR_SET_HELP_BAR));
 
                 float testR = 6.0f * settings.cursorScale;
                 float dCur = eyeSign * slider3D * 4.5f;
@@ -2092,12 +2349,26 @@ int main(int argc, char* argv[]) {
             }
 
             // Botones de pestañas táctiles arriba (5 pestañas)
-            const char* bTabLabels[5] = { "TABLET", "TECLAS", "AUDIO", "JUEGO", "VISUAL" };
+            const char* tabNames[5] = {
+                LOC(STR_TAB_TABLET),
+                LOC(STR_TAB_CONTROLS),
+                LOC(STR_TAB_AUDIO),
+                LOC(STR_TAB_GAME),
+                LOC(STR_TAB_VISUAL)
+            };
             for (int t = 0; t < 5; ++t) {
                 float tx = 7.0f + t * 62.0f;
+                float tw = 58.0f;
+                float th = 22.0f;
                 bool isTab = (activeTab == t);
-                Ui::slantRectGrad(tx, 6.0f, 58.0f, 24.0f, 4.0f, 0.2f, isTab ? clrPrimary : Ui::rgba(35, 30, 52), isTab ? Ui::rgba(85, 30, 95) : Ui::rgba(20, 16, 30));
-                drawCenteredText(textBuf, tx + 29.0f, 18.0f, 0.30f, isTab ? clrWhite : clrMuted, bTabLabels[t], 0.85f);
+                u32 tabBg = isTab ? clrPrimary : Ui::rgba(24, 20, 36, 235);
+                Ui::panel(tx, 6.0f, tw, th, 0.20f, tabBg, isTab ? Ui::rgba(255, 255, 255) : 0);
+                if (isTab) {
+                    Ui::glow(tx + tw * 0.5f, 17.0f, 0.18f, tw * 0.45f, Ui::withAlpha(clrPrimary, 90), 2);
+                }
+                const char* tLbl = tabNames[t];
+                if (tLbl[0] >= '1' && tLbl[0] <= '5' && tLbl[1] == '.') tLbl += 3;
+                drawCenteredTextWithShadow(textBuf, tx + tw * 0.5f, 17.0f, 0.32f, isTab ? clrWhite : Ui::rgba(180, 175, 205), tLbl, 0.25f);
             }
 
             // Contenido central interactivo
@@ -2301,16 +2572,24 @@ int main(int argc, char* argv[]) {
                 Ui::pill(180.0f, 176.0f, 24.0f, 9.0f, 0.16f, clrStr);
                 drawCenteredTextWithShadow(textBuf, 192.0f, 180.5f, 0.28f, clrWhite, "STR", 0.85f);
             } else { // Pestañas Audio (2), Juego (3) o Visual (4): tarjetas táctiles para ajustar con stylus
-                int startOpt = activeTab * 4;
-                for (int i = 0; i < 4; ++i) {
-                    int optIdx = startOpt + i;
-                    if (optIdx >= numSettings) break;
-                    float cy = 36.0f + i * 41.0f;
+                int count = tabItemCounts[activeTab];
+                float bCardH = (count == 6) ? 25.0f : ((count == 5) ? 30.0f : 37.0f);
+                float bCardStep = (count == 6) ? 28.0f : ((count == 5) ? 33.0f : 41.0f);
+                float bStartY = (count == 6) ? 32.0f : ((count == 5) ? 33.0f : 36.0f);
+                float bTitleYOff = (count == 6) ? 1.0f : ((count == 5) ? 2.0f : 5.0f);
+                float bDescYOff  = (count == 6) ? 13.5f : ((count == 5) ? 15.5f : 20.0f);
+                float bSwYOff    = (count == 6) ? 3.5f : ((count == 5) ? 6.0f : 10.0f);
+                float bSldYOff   = (count == 6) ? 8.0f : ((count == 5) ? 10.0f : 14.0f);
+                float bPillYOff  = (count == 6) ? 3.5f : ((count == 5) ? 5.0f : 8.0f);
+
+                for (int i = 0; i < count; ++i) {
+                    int optIdx = tabItems[activeTab][i];
+                    float cy = bStartY + i * bCardStep;
                     bool sel = (settingsOption == optIdx);
-                    Ui::panel(10.0f, cy, 300.0f, 37.0f, 0.15f, sel ? Ui::rgba(42, 34, 70, 240) : Ui::rgba(22, 19, 36, 220), sel ? clrCursor : 0);
+                    Ui::panel(10.0f, cy, 300.0f, bCardH, 0.15f, sel ? Ui::rgba(42, 34, 70, 240) : Ui::rgba(22, 19, 36, 220), sel ? clrCursor : 0);
 
                     // Detección de toque en la fila
-                    if (isTouching && touch.px >= 10 && touch.px <= 310 && touch.py >= cy && touch.py <= cy + 37.0f) {
+                    if (isTouching && touch.px >= 10 && touch.px <= 310 && touch.py >= cy && touch.py <= cy + bCardH) {
                         settingsOption = optIdx;
                         if (optIdx == 8) { // Música
                             settings.musicVolume = std::max(0, std::min(100, (int)(((touch.px - 180.0f) / 115.0f) * 100.0f)));
@@ -2322,6 +2601,11 @@ int main(int argc, char* argv[]) {
                             settings.audioOffsetMs = std::max(-150, std::min(150, (int)(((touch.px - 180.0f) / 115.0f) * 300.0f - 150.0f)));
                         } else if (optIdx == 11 && touchJustDown) { // Hitsounds Beatmap
                             settings.beatmapHitsounds = !settings.beatmapHitsounds;
+                        } else if (optIdx == 22 && touchJustDown) { // Idioma / Language
+                            settings.language = (settings.language + 1) % LANG_COUNT;
+                            Localization::setLanguage(static_cast<AppLanguage>(settings.language));
+                            settings.save();
+                            audio.playHitSound(2);
                         } else if (optIdx == 12 && touchJustDown) { // Modo de Juego
                             settings.gameMode = static_cast<GameMode>((settings.gameMode + 1) % 4);
                             settings.save();
@@ -2332,6 +2616,9 @@ int main(int argc, char* argv[]) {
                             settings.snakingSliders = !settings.snakingSliders;
                         } else if (optIdx == 15 && touchJustDown) { // Combo Bursts
                             settings.comboBursts = !settings.comboBursts;
+                        } else if (optIdx == 20 && touchJustDown) { // Efecto Golpes 300
+                            settings.showHit300 = !settings.showHit300;
+                            audio.playHitSound(0);
                         } else if (optIdx == 16 && touchJustDown) { // Fondo Taiko
                             settings.taikoBgMode = (settings.taikoBgMode + 1) % 3;
                             settings.save();
@@ -2341,73 +2628,93 @@ int main(int argc, char* argv[]) {
                             settings.bgDim = std::max(20, std::min(100, (int)(20 + ((touch.px - 180.0f) / 115.0f) * 80.0f)));
                         } else if (optIdx == 19 && touchJustDown) { // Videos
                             settings.enableVideo = !settings.enableVideo;
+                        } else if (optIdx == 21 && touchJustDown) { // Descargas Multijugador
+                            settings.multiDlOption = (settings.multiDlOption + 1) % 2;
+                            multiMgr.enableBgDownload = (settings.multiDlOption != 0);
+                            settings.save();
                         }
                         settings.clampValues();
                     }
 
                     if (optIdx == 8) {
-                        drawText(textBuf, 20.0f, cy + 5.0f, 0.40f, clrWhite, "Volumen Musica");
+                        drawText(textBuf, 20.0f, cy + bTitleYOff, 0.40f, clrWhite, LOC(STR_SET_MUSIC_VOL));
                         char desc[32]; std::snprintf(desc, sizeof(desc), "%d%%", settings.musicVolume);
-                        drawText(textBuf, 20.0f, cy + 20.0f, 0.33f, clr300, desc);
-                        Ui::sliderBar(180.0f, cy + 14.0f, 115.0f, 9.0f, 0.25f, settings.musicVolume / 100.0f, clrCursor, sel);
+                        drawText(textBuf, 20.0f, cy + bDescYOff, 0.33f, clr300, desc);
+                        Ui::sliderBar(180.0f, cy + bSldYOff, 115.0f, 9.0f, 0.25f, settings.musicVolume / 100.0f, clrCursor, sel);
                     } else if (optIdx == 9) {
-                        drawText(textBuf, 20.0f, cy + 5.0f, 0.40f, clrWhite, "Volumen Hitsounds");
+                        drawText(textBuf, 20.0f, cy + bTitleYOff, 0.40f, clrWhite, LOC(STR_SET_SFX_VOL));
                         char desc[32]; std::snprintf(desc, sizeof(desc), "%d%%", settings.sfxVolume);
-                        drawText(textBuf, 20.0f, cy + 20.0f, 0.33f, clr300, desc);
-                        Ui::sliderBar(180.0f, cy + 14.0f, 115.0f, 9.0f, 0.25f, settings.sfxVolume / 100.0f, clrCursor, sel);
+                        drawText(textBuf, 20.0f, cy + bDescYOff, 0.33f, clr300, desc);
+                        Ui::sliderBar(180.0f, cy + bSldYOff, 115.0f, 9.0f, 0.25f, settings.sfxVolume / 100.0f, clrCursor, sel);
                     } else if (optIdx == 10) {
-                        drawText(textBuf, 20.0f, cy + 5.0f, 0.40f, clrWhite, "Offset de Audio");
+                        drawText(textBuf, 20.0f, cy + bTitleYOff, 0.40f, clrWhite, LOC(STR_SET_OFFSET));
                         char desc[32]; std::snprintf(desc, sizeof(desc), "%+d ms", settings.audioOffsetMs);
-                        drawText(textBuf, 20.0f, cy + 20.0f, 0.33f, clr100, desc);
+                        drawText(textBuf, 20.0f, cy + bDescYOff, 0.33f, clr100, desc);
                         float r = (settings.audioOffsetMs + 150) / 300.0f;
-                        Ui::sliderBar(180.0f, cy + 14.0f, 115.0f, 9.0f, 0.25f, r, clr300, sel);
+                        Ui::sliderBar(180.0f, cy + bSldYOff, 115.0f, 9.0f, 0.25f, r, clr300, sel);
                     } else if (optIdx == 11) {
-                        drawText(textBuf, 20.0f, cy + 5.0f, 0.40f, clrWhite, "Hitsounds del Mapa");
-                        drawText(textBuf, 20.0f, cy + 20.0f, 0.33f, clrMuted, settings.beatmapHitsounds ? "USAR DEL MAPA" : "FORZAR SKIN");
-                        Ui::toggleSwitch(245.0f, cy + 10.0f, 48.0f, 18.0f, 0.25f, settings.beatmapHitsounds, clr100);
+                        drawText(textBuf, 20.0f, cy + bTitleYOff, 0.40f, clrWhite, LOC(STR_SET_MAP_HITSOUNDS));
+                        drawText(textBuf, 20.0f, cy + bDescYOff, 0.33f, clrMuted, settings.beatmapHitsounds ? LOC(STR_ON) : LOC(STR_OFF));
+                        Ui::toggleSwitch(245.0f, cy + bSwYOff, 48.0f, 18.0f, 0.25f, settings.beatmapHitsounds, clr100);
+                    } else if (optIdx == 22) {
+                        drawText(textBuf, 20.0f, cy + bTitleYOff, 0.40f, clrWhite, LOC(STR_SET_LANGUAGE));
+                        drawText(textBuf, 20.0f, cy + bDescYOff, 0.33f, clr300, settings.getLanguageName());
+                        u32 lPill = Ui::rgba(45, 115, 215);
+                        Ui::pill(232.0f, cy + bPillYOff, 68.0f, (count == 6) ? 18.0f : 20.0f, 0.25f, lPill);
+                        drawCenteredText(textBuf, 266.0f, cy + bPillYOff + ((count == 6) ? 9.0f : 10.0f), 0.33f, clrWhite, settings.getLanguageName(), 0.85f);
                     } else if (optIdx == 12) {
-                        drawText(textBuf, 20.0f, cy + 5.0f, 0.40f, clrWhite, "Modo de Juego (Toca cambiar)");
-                        drawText(textBuf, 20.0f, cy + 20.0f, 0.33f, clr300, settings.getGameModeName());
+                        drawText(textBuf, 20.0f, cy + bTitleYOff, 0.40f, clrWhite, LOC(STR_SET_MAIN_MODE));
+                        drawText(textBuf, 20.0f, cy + bDescYOff, 0.33f, clr300, settings.getGameModeName());
                         u32 mPill = (settings.gameMode == MODE_TAIKO) ? Ui::rgba(180, 45, 45) : ((settings.gameMode == MODE_CATCH) ? Ui::rgba(35, 160, 85) : ((settings.gameMode == MODE_MANIA) ? Ui::rgba(140, 35, 175) : Ui::rgba(55, 40, 95)));
-                        Ui::pill(232.0f, cy + 8.0f, 68.0f, 20.0f, 0.25f, mPill);
-                        drawCenteredText(textBuf, 266.0f, cy + 18.0f, 0.33f, clrWhite, settings.getGameModeShortName(), 0.85f);
+                        Ui::pill(232.0f, cy + bPillYOff, 68.0f, 20.0f, 0.25f, mPill);
+                        drawCenteredText(textBuf, 266.0f, cy + bPillYOff + 10.0f, 0.33f, clrWhite, settings.getGameModeShortName(), 0.85f);
                     } else if (optIdx == 13) {
-                        drawText(textBuf, 20.0f, cy + 5.0f, 0.40f, clrWhite, "Skin Activo (Toca cambiar)");
-                        drawText(textBuf, 20.0f, cy + 20.0f, 0.33f, clr300, truncateString(activeSkin.name, 20).c_str());
+                        drawText(textBuf, 20.0f, cy + bTitleYOff, 0.40f, clrWhite, LOC(STR_SET_ACTIVE_SKIN));
+                        drawText(textBuf, 20.0f, cy + bDescYOff, 0.33f, clr300, truncateString(activeSkin.name, 20).c_str());
                         for (size_t c = 0; c < std::min((size_t)4, activeSkin.comboColors.size()); ++c) {
                             u32 cc = C2D_Color32(activeSkin.comboColors[c].r, activeSkin.comboColors[c].g, activeSkin.comboColors[c].b, 255);
-                            C2D_DrawCircleSolid(225.0f + c * 18.0f, cy + 18.0f, 0.25f, 6.0f, cc);
+                            C2D_DrawCircleSolid(225.0f + c * 18.0f, cy + bPillYOff + 10.0f, 0.25f, 6.0f, cc);
                         }
                     } else if (optIdx == 14) {
-                        drawText(textBuf, 20.0f, cy + 5.0f, 0.40f, clrWhite, "Sliders Serpiente");
-                        drawText(textBuf, 20.0f, cy + 20.0f, 0.33f, clrMuted, settings.snakingSliders ? "ACTIVADO" : "DESACTIVADO");
-                        Ui::toggleSwitch(245.0f, cy + 10.0f, 48.0f, 18.0f, 0.25f, settings.snakingSliders, clr100);
+                        drawText(textBuf, 20.0f, cy + bTitleYOff, 0.40f, clrWhite, LOC(STR_SET_SNAKING));
+                        drawText(textBuf, 20.0f, cy + bDescYOff, 0.33f, clrMuted, settings.snakingSliders ? LOC(STR_ON) : LOC(STR_OFF));
+                        Ui::toggleSwitch(245.0f, cy + bSwYOff, 48.0f, 18.0f, 0.25f, settings.snakingSliders, clr100);
                     } else if (optIdx == 15) {
-                        drawText(textBuf, 20.0f, cy + 5.0f, 0.40f, clrWhite, "Combo Bursts (Mascota)");
-                        drawText(textBuf, 20.0f, cy + 20.0f, 0.33f, clrMuted, settings.comboBursts ? "ACTIVADO" : "DESACTIVADO");
-                        Ui::toggleSwitch(245.0f, cy + 10.0f, 48.0f, 18.0f, 0.25f, settings.comboBursts, clr100);
+                        drawText(textBuf, 20.0f, cy + bTitleYOff, 0.40f, clrWhite, LOC(STR_SET_BURSTS));
+                        drawText(textBuf, 20.0f, cy + bDescYOff, 0.33f, clrMuted, settings.comboBursts ? LOC(STR_ON) : LOC(STR_OFF));
+                        Ui::toggleSwitch(245.0f, cy + bSwYOff, 48.0f, 18.0f, 0.25f, settings.comboBursts, clr100);
+                    } else if (optIdx == 20) {
+                        drawText(textBuf, 20.0f, cy + bTitleYOff, 0.40f, clrWhite, LOC(STR_SET_HIT300));
+                        drawText(textBuf, 20.0f, cy + bDescYOff, 0.33f, clrMuted, settings.showHit300 ? LOC(STR_ON) : LOC(STR_OFF));
+                        Ui::toggleSwitch(245.0f, cy + bSwYOff, 48.0f, 18.0f, 0.25f, settings.showHit300, clr100);
                     } else if (optIdx == 16) {
-                        drawText(textBuf, 20.0f, cy + 5.0f, 0.40f, clrWhite, "Fondo en Taiko");
-                        drawText(textBuf, 20.0f, cy + 20.0f, 0.33f, clr300, settings.getTaikoBgModeName());
+                        drawText(textBuf, 20.0f, cy + bTitleYOff, 0.40f, clrWhite, LOC(STR_SET_TAIKO_BG));
+                        drawText(textBuf, 20.0f, cy + bDescYOff, 0.33f, clr300, settings.getTaikoBgModeName());
                         u32 bClr = (settings.taikoBgMode == 0) ? Ui::rgba(225, 145, 25) : ((settings.taikoBgMode == 1) ? Ui::rgba(45, 130, 215) : Ui::rgba(165, 55, 185));
-                        Ui::pill(180.0f, cy + 9.0f, 115.0f, 20.0f, 0.25f, bClr);
-                        drawCenteredText(textBuf, 237.5f, cy + 19.0f, 0.32f, clrWhite, settings.getTaikoBgModeName(), 0.35f);
+                        Ui::pill(180.0f, cy + bPillYOff + 1.0f, 115.0f, 20.0f, 0.25f, bClr);
+                        drawCenteredText(textBuf, 237.5f, cy + bPillYOff + 11.0f, 0.32f, clrWhite, settings.getTaikoBgModeName(), 0.35f);
                     } else if (optIdx == 17) {
-                        drawText(textBuf, 20.0f, cy + 5.0f, 0.40f, clrWhite, "Tamano Cursor");
+                        drawText(textBuf, 20.0f, cy + bTitleYOff, 0.40f, clrWhite, LOC(STR_SET_CURSOR_SIZE));
                         char desc[32]; std::snprintf(desc, sizeof(desc), "%.1fx", settings.cursorScale);
-                        drawText(textBuf, 20.0f, cy + 20.0f, 0.33f, clr300, desc);
+                        drawText(textBuf, 20.0f, cy + bDescYOff, 0.33f, clr300, desc);
                         float r = (settings.cursorScale - 0.5f) / 1.5f;
-                        Ui::sliderBar(180.0f, cy + 14.0f, 115.0f, 9.0f, 0.25f, r, clrCursor, sel);
+                        Ui::sliderBar(180.0f, cy + bSldYOff, 115.0f, 9.0f, 0.25f, r, clrCursor, sel);
                     } else if (optIdx == 18) {
-                        drawText(textBuf, 20.0f, cy + 5.0f, 0.40f, clrWhite, "Oscurecimiento Fondo");
+                        drawText(textBuf, 20.0f, cy + bTitleYOff, 0.40f, clrWhite, LOC(STR_SET_BG_DIM));
                         char desc[32]; std::snprintf(desc, sizeof(desc), "%d%%", settings.bgDim);
-                        drawText(textBuf, 20.0f, cy + 20.0f, 0.33f, clr300, desc);
+                        drawText(textBuf, 20.0f, cy + bDescYOff, 0.33f, clr300, desc);
                         float r = (settings.bgDim - 20) / 80.0f;
-                        Ui::sliderBar(180.0f, cy + 14.0f, 115.0f, 9.0f, 0.25f, r, clrPrimary, sel);
+                        Ui::sliderBar(180.0f, cy + bSldYOff, 115.0f, 9.0f, 0.25f, r, clrPrimary, sel);
                     } else if (optIdx == 19) {
-                        drawText(textBuf, 20.0f, cy + 5.0f, 0.40f, clrWhite, "Videos de Fondo");
-                        drawText(textBuf, 20.0f, cy + 20.0f, 0.33f, clrMuted, settings.enableVideo ? "ACTIVADO" : "DESACTIVADO");
-                        Ui::toggleSwitch(245.0f, cy + 10.0f, 48.0f, 18.0f, 0.25f, settings.enableVideo, clr100);
+                        drawText(textBuf, 20.0f, cy + bTitleYOff, 0.40f, clrWhite, LOC(STR_SET_VIDEOS));
+                        drawText(textBuf, 20.0f, cy + bDescYOff, 0.33f, clrMuted, settings.enableVideo ? LOC(STR_ON) : LOC(STR_OFF));
+                        Ui::toggleSwitch(245.0f, cy + bSwYOff, 48.0f, 18.0f, 0.25f, settings.enableVideo, clr100);
+                    } else if (optIdx == 21) {
+                        drawText(textBuf, 20.0f, cy + bTitleYOff, 0.40f, clrWhite, LOC(STR_SET_MULTI_DL));
+                        drawText(textBuf, 20.0f, cy + bDescYOff, 0.33f, clr300, settings.getMultiDlOptionName());
+                        u32 dClr = (settings.multiDlOption == 1) ? Ui::rgba(45, 130, 215) : Ui::rgba(110, 95, 140);
+                        Ui::pill(175.0f, cy + bPillYOff + 1.0f, 120.0f, 20.0f, 0.25f, dClr);
+                        drawCenteredText(textBuf, 235.0f, cy + bPillYOff + 11.0f, 0.30f, clrWhite, settings.getMultiDlOptionName(), 0.35f);
                     }
                 }
             }
@@ -2417,25 +2724,31 @@ int main(int argc, char* argv[]) {
                 Ui::panel(20.0f, 50.0f, 280.0f, 140.0f, 0.90f, Ui::rgba(26, 20, 44, 250), clrCursor);
                 const char* capNames[4] = { "TECLA 1 (K1)", "TECLA 2 (K2)", "HUMO (SMOKE)", "REINICIO RAPIDO" };
                 int cIdx = std::max(0, std::min(3, capturingKeyIndex - 4));
-                drawCenteredText(textBuf, 160.0f, 72.0f, 0.48f, clrCursor, "ASIGNANDO BOTON FISICO", 0.95f);
+                drawCenteredText(textBuf, 160.0f, 72.0f, 0.48f, clrCursor, LOC(STR_CTRL_ASSIGN_KEY_TITLE), 0.95f);
                 drawCenteredText(textBuf, 160.0f, 96.0f, 0.42f, clrWhite, capNames[cIdx], 0.95f);
-                drawCenteredText(textBuf, 160.0f, 126.0f, 0.36f, clr100, "Pulsa cualquier boton de la consola...", 0.95f);
-                drawCenteredText(textBuf, 160.0f, 154.0f, 0.32f, clrMuted, "B o Toca aqui para Cancelar", 0.95f);
+                drawCenteredText(textBuf, 160.0f, 126.0f, 0.36f, clr100, LOC(STR_CTRL_PRESS_ANY), 0.95f);
+                drawCenteredText(textBuf, 160.0f, 154.0f, 0.32f, clrMuted, LOC(STR_CTRL_CANCEL_HINT), 0.95f);
                 if (touchJustDown) {
                     capturingKeyIndex = -1;
                     audio.playHitSound(0);
                 }
             }
 
-            // Barra inferior con 3 botones de acción
-            Ui::slantRectGrad(10.0f, 204.0f, 96.0f, 28.0f, 6.0f, 0.2f, Ui::rgba(45, 95, 135), Ui::rgba(25, 55, 85));
-            drawCenteredText(textBuf, 58.0f, 218.0f, 0.36f, clrWhite, (activeTab == 1) ? "DEFECTO (X)" : "CALIBRAR (X)", 0.85f);
+            // Barra inferior con 3 botones de acción estilo multijugador
+            Ui::button(10.0f, 204.0f, 96.0f, 28.0f, 0.20f, Ui::rgba(20, 36, 60, 240), Ui::rgba(40, 180, 240), false);
+            Ui::pill(15.0f, 209.0f, 18.0f, 18.0f, 0.24f, Ui::rgba(40, 180, 240));
+            drawCenteredText(textBuf, 24.0f, 218.0f, 0.30f, Ui::rgba(0, 0, 0, 240), "X", 0.28f);
+            drawTextWithShadow(textBuf, 37.0f, 211.0f, 0.33f, clrWhite, (activeTab == 1) ? LOC(STR_DEFAULT) : LOC(STR_CALIBRATE), 0.28f);
 
-            Ui::slantRectGrad(112.0f, 204.0f, 96.0f, 28.0f, 6.0f, 0.2f, Ui::rgba(85, 65, 30), Ui::rgba(55, 40, 20));
-            drawCenteredText(textBuf, 160.0f, 218.0f, 0.36f, clrWhite, "RESET (Y)", 0.85f);
+            Ui::button(112.0f, 204.0f, 96.0f, 28.0f, 0.20f, Ui::rgba(45, 35, 20, 240), Ui::rgba(255, 180, 40), false);
+            Ui::pill(117.0f, 209.0f, 18.0f, 18.0f, 0.24f, Ui::rgba(255, 180, 40));
+            drawCenteredText(textBuf, 126.0f, 218.0f, 0.30f, Ui::rgba(0, 0, 0, 240), "Y", 0.28f);
+            drawTextWithShadow(textBuf, 140.0f, 211.0f, 0.34f, clrWhite, LOC(STR_RESET), 0.28f);
 
-            Ui::slantRectGrad(214.0f, 204.0f, 96.0f, 28.0f, 6.0f, 0.2f, clrPrimary, Ui::rgba(110, 45, 135));
-            drawCenteredText(textBuf, 262.0f, 218.0f, 0.36f, clrWhite, "GUARDAR (B)", 0.85f);
+            Ui::button(214.0f, 204.0f, 96.0f, 28.0f, 0.20f, Ui::rgba(42, 20, 52, 240), clrPrimary, true);
+            Ui::pill(219.0f, 209.0f, 18.0f, 18.0f, 0.24f, clrPrimary);
+            drawCenteredText(textBuf, 228.0f, 218.0f, 0.30f, clrWhite, "B", 0.28f);
+            drawTextWithShadow(textBuf, 242.0f, 211.0f, 0.34f, clrWhite, LOC(STR_SAVE), 0.28f);
 
             if (isTouching) {
                 Ui::glow(touch.px, touch.py, 0.75f, 11.0f, Ui::withAlpha(clr300, 140), 3);
@@ -2454,12 +2767,25 @@ int main(int argc, char* argv[]) {
             audio.update();
             float beatPulse = getBpmPulse();
 
-            // Debounce: solo cargar audio/fondo cuando el jugador deja de pasar canciones
-            if (previewDelay > 0 && --previewDelay == 0) updateSongPreview();
+            // Debounce inteligente: solo cargar fondo y audio cuando el carrusel se ha detenido visualmente
+            // y el usuario ha dejado de desplazarse entre canciones
+            bool carouselSettled = (std::fabs(carouselPos - static_cast<float>(selectedSet)) < 0.05f);
+            if (!carouselSettled) {
+                // Mientras el carrusel se está moviendo con suavidad, aplazamos la carga
+                // para que el hilo de renderizado fluya a 60 FPS continuos sin competir por I/O
+                if (previewDelay < (isNew3DS ? 10 : 16)) {
+                    previewDelay = isNew3DS ? 10 : 16;
+                }
+            } else if (previewDelay > 0) {
+                if (--previewDelay == 0) {
+                    updateSongPreview();
+                }
+            }
+
             // Subir a GPU el fondo decodificado en segundo plano (si ya esta listo)
             if (bgLoader.poll(bgTex)) bgFade = 0.0f;
             bgFade = Ui::approach(bgFade, 255.0f, 0.12f);
-            if (settings.songPreview && audio.isSongFinished()) {
+            if (settings.songPreview && audio.isSongFinished() && !audio.isPreviewLoading()) {
                 updateSongPreview();
             }
 
@@ -2488,11 +2814,23 @@ int main(int argc, char* argv[]) {
                 audio.playHitSound(0);
             }
             if (touchJustDown && !modMenuOpen && !deleteConfirmOpen && !searchKeyboardOpen) {
-                // Tocar botón pequeño [BORRAR] en el header (x: 246..312, y: 6..28)
+                // Tocar botón pequeño [BORRAR] en el header (x: 246..312, y: 6..28) (Deshabilitado en multijugador)
                 if (touch.py >= 6 && touch.py <= 28 && touch.px >= 246 && touch.px <= 312) {
-                    if (!songMgr.sets.empty()) {
+                    if (!multiMgr.inMultiplayer && !songMgr.sets.empty()) {
                         deleteConfirmOpen = true;
                         audio.playHitSound(0);
+                    }
+                }
+                // Tocar la dificultad / estrellas para alternar a la siguiente dificultad del mapa
+                else if (touch.py >= 32 && touch.py <= 54 && touch.px >= 8 && touch.px <= 148) {
+                    if (!songMgr.sets.empty()) {
+                        const auto& curSet = songMgr.sets[selectedSet];
+                        if (curSet.difficulties.size() > 1) {
+                            selectedDiff = (selectedDiff + 1) % curSet.difficulties.size();
+                            audio.playHitSound(0);
+                            previewDelay = isNew3DS ? 6 : 10;
+                            updateSongPreview();
+                        }
                     }
                 }
                 // Tocar pestañas [ RESUMEN ] / [ RANKING LOCAL ] o el botón de acción
@@ -2537,9 +2875,11 @@ int main(int argc, char* argv[]) {
                         if (touch.px >= bx && touch.px <= bx + 56.0f && touch.py >= 136 && touch.py <= 236) {
                             footerCardLift[k] = 1.0f;
                             if (k == 0) { // Alternar Modo Táctil / Tablet en la misma tarjeta
-                                settings.playOnBottomScreen = !settings.playOnBottomScreen;
-                                settings.save();
-                                audio.playHitSound(2);
+                                if (!multiMgr.inMultiplayer) {
+                                    settings.playOnBottomScreen = !settings.playOnBottomScreen;
+                                    settings.save();
+                                    audio.playHitSound(2);
+                                }
                             } else if (k == 1) { // Buscar
                                 openSearchKeyboard();
                                 touchJustDown = false;
@@ -2557,12 +2897,14 @@ int main(int argc, char* argv[]) {
                                 audio.playHitSound(2);
                                 updateSongPreview();
                             } else if (k == 4) { // Modo de Juego (STD / TAIKO / CATCH / MANIA)
-                                if (settings.gameMode == MODE_STD) settings.gameMode = MODE_TAIKO;
-                                else if (settings.gameMode == MODE_TAIKO) settings.gameMode = MODE_CATCH;
-                                else if (settings.gameMode == MODE_CATCH) settings.gameMode = MODE_MANIA;
-                                else settings.gameMode = MODE_STD;
-                                settings.save();
-                                audio.playHitSound(2);
+                                if (!multiMgr.inMultiplayer) {
+                                    if (settings.gameMode == MODE_STD) settings.gameMode = MODE_TAIKO;
+                                    else if (settings.gameMode == MODE_TAIKO) settings.gameMode = MODE_CATCH;
+                                    else if (settings.gameMode == MODE_CATCH) settings.gameMode = MODE_MANIA;
+                                    else settings.gameMode = MODE_STD;
+                                    settings.save();
+                                    audio.playHitSound(2);
+                                }
                             }
                             break;
                         }
@@ -2640,6 +2982,11 @@ int main(int argc, char* argv[]) {
                 }
                 if (kDown & KEY_Y) {
                     settings.activeMods = MOD_NONE;
+                    if (multiMgr.inMultiplayer) {
+                        multiMgr.players[multiMgr.localSlot].activeMods = MOD_NONE;
+                        if (!multiMgr.isHost()) multiMgr.sendPlayerUpdate();
+                        else multiMgr.broadcastLobbyState();
+                    }
                     settings.save();
                     audio.playHitSound(0);
                     updateSongPreview();
@@ -2664,6 +3011,11 @@ int main(int argc, char* argv[]) {
                     // Botón Limpiar (esquina superior derecha) o volver
                     if (touch.px >= 220 && touch.px <= 312 && touch.py >= 6 && touch.py <= 36) {
                         settings.activeMods = MOD_NONE;
+                        if (multiMgr.inMultiplayer) {
+                            multiMgr.players[multiMgr.localSlot].activeMods = MOD_NONE;
+                            if (!multiMgr.isHost()) multiMgr.sendPlayerUpdate();
+                            else multiMgr.broadcastLobbyState();
+                        }
                         settings.save();
                         audio.playHitSound(0);
                         updateSongPreview();
@@ -2729,7 +3081,7 @@ int main(int argc, char* argv[]) {
                         rankingScroll = 0;
                         carouselPos = static_cast<float>(selectedSet);
                         audio.playHitSound(0);
-                        previewDelay = 12;
+                        previewDelay = isNew3DS ? 10 : 16;
                     }
                 }
 
@@ -2974,7 +3326,16 @@ int main(int argc, char* argv[]) {
                             continue;
                         }
                         audio.playHitSound(0);
-                        appState = STATE_MAIN_MENU;
+                        if (multiMgr.inMultiplayer) {
+                            if (multiMgr.isHost()) {
+                                multiMgr.hostChangingSong = false;
+                                multiMgr.broadcastLobbyState();
+                            }
+                            appState = STATE_MULTI_LOBBY;
+                        } else {
+                            audio.setLoop(false);
+                            appState = STATE_MAIN_MENU;
+                        }
                         continue;
                     }
                 }
@@ -2994,7 +3355,7 @@ int main(int argc, char* argv[]) {
                     openSearchKeyboard();
                 }
 
-                if (kDown & KEY_X) {
+                if (kDown & KEY_X && !multiMgr.inMultiplayer) {
                     audio.playHitSound(0);
                     settingsReturnState = STATE_SONG_SELECT;
                     calibrationMode = false;
@@ -3002,9 +3363,10 @@ int main(int argc, char* argv[]) {
                     continue;
                 }
 
-                if (kDown & KEY_Y) {
+                if (kDown & KEY_Y && !multiMgr.inMultiplayer) {
                     audio.stopMusic();
                     audio.playHitSound(2);
+                    multiMgr.stop();
                     wifiReturnState = STATE_SONG_SELECT;
                     wifiServer.start();
                     appState = STATE_WIFI_TRANSFER;
@@ -3033,7 +3395,7 @@ int main(int argc, char* argv[]) {
                         selectedDiff = 0;
                         rankingScroll = 0;
                         audio.playHitSound(0);
-                        previewDelay = isNew3DS ? 6 : 14;
+                        previewDelay = isNew3DS ? 10 : 16;
                     }
 
                     const auto& curSet = songMgr.sets[selectedSet];
@@ -3050,12 +3412,34 @@ int main(int argc, char* argv[]) {
                             selectedDiff = (selectedDiff + diffDelta + numDiffs) % numDiffs;
                             rankingScroll = 0;
                             audio.playHitSound(0);
-                            previewDelay = isNew3DS ? 4 : 8;
+                            previewDelay = isNew3DS ? 6 : 10;
                         }
 
                         if (kDown & KEY_A) {
-                            startSelectedBeatmap();
-                            continue;
+                            if (multiMgr.inMultiplayer) {
+                                const auto& s = songMgr.sets[selectedSet];
+                                if (!s.difficulties.empty()) {
+                                    int dIdx = std::max(0, std::min(selectedDiff, static_cast<int>(s.difficulties.size()) - 1));
+                                    const auto& d = s.difficulties[dIdx];
+                                    QueuedBeatmap qm(s.title, s.artist, d.version, d.creator, s.folderPath, d.osuPath, d.audioPath, d.starRating, d.getBPM(), 90, multiMgr.localSlot);
+                                    if (multiMgr.isHost()) {
+                                        multiMgr.hostChangingSong = false;
+                                        if (multiPickerAction == PICKER_ACTION_QUEUE) {
+                                            multiMgr.enqueueBeatmap(qm);
+                                        } else {
+                                            multiMgr.setActiveBeatmap(qm);
+                                        }
+                                    } else {
+                                        multiMgr.requestQueueMap(qm);
+                                    }
+                                    audio.playHitSound(2);
+                                    appState = STATE_MULTI_LOBBY;
+                                    continue;
+                                }
+                            } else {
+                                startSelectedBeatmap();
+                                continue;
+                            }
                         }
                     }
                 }
@@ -3092,19 +3476,26 @@ int main(int argc, char* argv[]) {
 
                 Ui::pill(10.0f, 6.0f, 42.0f, 18.0f, 0.32f, Ui::rgba(255, 102, 171, 230));
                 drawCenteredText(textBuf, 31.0f, 15.0f, 0.37f, clrWhite, "osu!", 0.9f);
-                drawText(textBuf, 58.0f, 7.5f, 0.44f, clrWhite, "SELECCION DE CANCION", 0.9f);
+                if (multiMgr.inMultiplayer) {
+                    const char* sTitle = (multiPickerAction == PICKER_ACTION_QUEUE)
+                        ? "SALA MULTI: ENCOLAR CANCION"
+                        : "SALA MULTI: ELEGIR MAPA ACTIVO";
+                    drawText(textBuf, 58.0f, 7.5f, 0.44f, clrCursor, sTitle, 0.9f);
+                } else {
+                    drawText(textBuf, 58.0f, 7.5f, 0.44f, clrWhite, LOC(STR_SONG_SELECT_TITLE), 0.9f);
+                }
 
                 if (searchKeyboardOpen) {
                     std::string fBadge = songMgr.searchQuery.empty() ? "Buscador..." : truncateString(songMgr.searchQuery, 12);
                     Ui::pill(210.0f, 6.0f, 130.0f, 18.0f, 0.32f, Ui::rgba(255, 102, 171, 230));
                     drawCenteredTextWithShadow(textBuf, 275.0f, 15.0f, 0.34f, clrWhite, fBadge.c_str(), 0.9f);
                 } else if (!songMgr.searchQuery.empty()) {
-                    std::string fBadge = "Filtro: " + truncateString(songMgr.searchQuery, 10);
+                    std::string fBadge = std::string(LOC(STR_SONG_FILTER_BADGE)) + ": " + truncateString(songMgr.searchQuery, 10);
                     Ui::pill(236.0f, 6.0f, 104.0f, 18.0f, 0.32f, Ui::rgba(0, 180, 220, 230));
                     drawCenteredTextWithShadow(textBuf, 288.0f, 15.0f, 0.34f, clrWhite, fBadge.c_str(), 0.9f);
                 } else {
                     char sortBadge[64];
-                    std::snprintf(sortBadge, sizeof(sortBadge), "Orden: %s", SongManager::getSortModeName(songMgr.sortMode));
+                    std::snprintf(sortBadge, sizeof(sortBadge), "%s: %s", LOC(STR_MODE), SongManager::getSortModeName(songMgr.sortMode));
                     Ui::pill(236.0f, 6.0f, 104.0f, 18.0f, 0.32f, Ui::rgba(45, 38, 72, 230));
                     drawCenteredTextWithShadow(textBuf, 288.0f, 15.0f, 0.34f, clrCursor, sortBadge, 0.9f);
                 }
@@ -3120,9 +3511,9 @@ int main(int argc, char* argv[]) {
                     float dEmpty = depthShift(2.5f);
                     Ui::panel(40.0f + dEmpty, 70.0f, 320.0f, 100.0f, 0.3f, Ui::rgba(30, 27, 44, 235), clrMiss);
                     if (!songMgr.searchQuery.empty()) {
-                        drawText(textBuf, 56.0f + dEmpty, 82.0f, 0.48f, clrCursor, "Sin resultados para la busqueda:");
+                        drawText(textBuf, 56.0f + dEmpty, 82.0f, 0.48f, clrCursor, LOC(STR_SONG_NO_SEARCH_RESULTS));
                         drawText(textBuf, 56.0f + dEmpty, 108.0f, 0.46f, clrWhite, truncateString("\"" + songMgr.searchQuery + "\"", 34).c_str());
-                        drawText(textBuf, 56.0f + dEmpty, 134.0f, 0.40f, clr300, "Toca BUSCAR en la pantalla inferior para limpiar");
+                        drawText(textBuf, 56.0f + dEmpty, 134.0f, 0.40f, clr300, LOC(STR_SONG_TAP_SEARCH_CLEAR));
                     } else {
                         drawText(textBuf, 56.0f + dEmpty, 82.0f, 0.5f, clrMiss, "No se encontraron beatmaps (.osu / .osz)");
                         drawText(textBuf, 56.0f + dEmpty, 110.0f, 0.43f, clrWhite, "Coloca carpetas o archivos .osz en:");
@@ -3131,7 +3522,7 @@ int main(int argc, char* argv[]) {
                 } else {
                     const int nSets = static_cast<int>(songMgr.sets.size());
 
-                    // ---- Carrusel de canciones (derecha), con profundidad 3D escalonada y latido BPM ----
+                    // ---- Carrusel de canciones (derecha), estilo tarjetas de sala multijugador ----
                     for (int off = -4; off <= 4; ++off) {
                         int idx = selectedSet + off;
                         if (idx < 0 || idx >= nSets) continue;
@@ -3144,41 +3535,53 @@ int main(int argc, char* argv[]) {
                         bool sel = (idx == selectedSet);
                         float focus = std::max(0.0f, 1.0f - dist);
                         float dCard = depthShift(0.8f + focus * 3.2f - dist * 0.45f);
-                        float cardH = 36.0f + focus * 12.0f;
-                        float cy = 122.0f + rel * 44.0f;
-                        float cx = 214.0f - focus * 40.0f - (sel ? beatPulse * 4.5f : 0.0f) + std::max(0.0f, dist - 1.0f) * 6.0f + dCard;
+                        float cardH = 38.0f + focus * 12.0f;
+                        float cy = 122.0f + rel * 46.0f;
+                        float cx = 206.0f - focus * 36.0f - (sel ? beatPulse * 4.0f : 0.0f) + std::max(0.0f, dist - 1.0f) * 6.0f + dCard;
                         float cardY = cy - cardH * 0.5f;
-                        float cardW = 400.0f - (cx - dCard) + 14.0f;
+                        float cardW = 400.0f - (cx - dCard) + 10.0f;
                         if (cardY > 240.0f || cardY + cardH < 30.0f) continue;
 
                         float maxStars = cs.difficulties.back().starRating;
                         u32 starClr = getStarRatingColor(getModAdjustedStars(maxStars, settings.activeMods));
                         u8 fade = static_cast<u8>(255.0f * std::max(0.35f, 1.0f - dist * 0.18f));
 
-                        u32 leftC  = sel ? Ui::withAlpha(Ui::brighten(starClr, 0.82f + beatPulse * 0.18f), 245) : Ui::rgba(36, 32, 56, fade);
-                        u32 rightC = sel ? Ui::rgba(52, 40, 86, 245) : Ui::rgba(22, 19, 36, fade);
-                        C2D_DrawTriangle(cx + 14.0f + 2.0f, cardY + 3.0f, Ui::rgba(0, 0, 0, 80), cx + cardW + 2.0f, cardY + 3.0f, Ui::rgba(0, 0, 0, 80), cx + 2.0f, cardY + cardH + 3.0f, Ui::rgba(0, 0, 0, 80), 0.09f);
-                        Ui::slantRectGrad(cx, cardY, cardW, cardH, 14.0f, 0.1f, leftC, rightC);
-                        // borde de acento
-                        C2D_DrawLine(cx + 14.0f, cardY, starClr, cx, cardY + cardH, starClr, sel ? 3.0f : 2.0f, 0.12f);
+                        u32 bgClr = sel ? Ui::rgba(36, 26, 54, 250) : Ui::rgba(22, 19, 36, fade);
+                        u32 borderClr = sel ? starClr : Ui::rgba(50, 44, 72, fade);
+
+                        // Sombra suave proyectada estilo tarjeta multijugador
+                        C2D_DrawRectSolid(cx + 2.0f, cardY + 3.0f, 0.08f, cardW, cardH, Ui::rgba(0, 0, 0, 85));
+
+                        // Tarjeta rectangular con degradado, sombra y borde superior
+                        Ui::panel(cx, cardY, cardW, cardH, 0.10f, bgClr, borderClr);
+
                         if (sel) {
-                            C2D_DrawLine(cx + 14.0f, cardY, Ui::rgba(255, 255, 255, 220), cx + cardW, cardY, Ui::rgba(255, 255, 255, 220), 1.5f, 0.12f);
-                            C2D_DrawLine(cx, cardY + cardH, Ui::rgba(255, 255, 255, 120), cx + cardW - 14.0f, cardY + cardH, Ui::rgba(255, 255, 255, 120), 1.5f, 0.12f);
+                            // Brillo suave y pastilla vertical de acento iluminada como en salas multi
+                            Ui::glow(cx + 10.0f, cardY + cardH * 0.5f, 0.09f, 26.0f, Ui::withAlpha(starClr, 100), 3);
+                            Ui::pill(cx + 4.0f, cardY + 4.0f, 4.0f, cardH - 8.0f, 0.14f, starClr);
+                        } else {
+                            // Barra vertical de acento sutil
+                            C2D_DrawRectSolid(cx, cardY, 0.12f, 3.5f, cardH, Ui::withAlpha(starClr, fade));
                         }
 
                         u32 titleClr = sel ? clrWhite : Ui::rgba(215, 210, 235, fade);
-                        drawText(textBuf, cx + 22.0f, cardY + 4.0f, sel ? 0.50f : 0.43f, titleClr, truncateString(cs.title, sel ? 26 : 24).c_str(), 0.6f);
-                        drawText(textBuf, cx + 22.0f, cardY + (sel ? 22.0f : 19.0f), 0.34f, Ui::rgba(190, 185, 215, fade), truncateString(cs.artist, 26).c_str(), 0.6f);
+                        drawTextWithShadow(textBuf, cx + 14.0f, cardY + 4.0f, sel ? 0.46f : 0.40f, titleClr, truncateString(cs.title, sel ? 24 : 22).c_str(), 0.15f);
+                        drawText(textBuf, cx + 14.0f, cardY + (sel ? 21.0f : 18.0f), 0.32f, Ui::rgba(185, 180, 210, fade), truncateString(cs.artist, 26).c_str(), 0.15f);
+
                         if (sel) {
-                            drawText(textBuf, cx + 22.0f, cardY + 34.0f, 0.30f, Ui::rgba(255, 224, 120, 255),
-                                     truncateString("mapeado por " + cs.difficulties[std::min(selectedDiff, (int)cs.difficulties.size() - 1)].creator, 30).c_str(), 0.6f);
+                            int dIdx = std::min(selectedDiff, (int)cs.difficulties.size() - 1);
+                            std::string diffName = cs.difficulties[dIdx].version;
+                            std::string creatorName = cs.difficulties[dIdx].creator;
+                            drawText(textBuf, cx + 14.0f, cardY + 33.0f, 0.28f, Ui::rgba(255, 224, 120, 255),
+                                     truncateString("[" + diffName + "] por " + creatorName, 28).c_str(), 0.15f);
                         }
 
+                        // Pastilla de estrellas a la derecha estilo tarjeta de sala multijugador
                         char sTag[16];
                         std::snprintf(sTag, sizeof(sTag), "*%.2f", getModAdjustedStars(maxStars, settings.activeMods));
-                        float pw = 40.0f;
-                        Ui::pill(400.0f - pw - 6.0f + dCard, cardY + cardH * 0.5f - 7.0f, pw, 14.0f, 0.5f, Ui::withAlpha(starClr, fade));
-                        drawCenteredText(textBuf, 400.0f - pw * 0.5f - 6.0f + dCard, cardY + cardH * 0.5f, 0.32f, Ui::rgba(20, 16, 30), sTag, 0.7f);
+                        float pw = 42.0f;
+                        Ui::pill(400.0f - pw - 8.0f + dCard, cardY + cardH * 0.5f - 7.5f, pw, 15.0f, 0.16f, Ui::withAlpha(starClr, fade));
+                        drawCenteredText(textBuf, 400.0f - pw * 0.5f - 8.0f + dCard, cardY + cardH * 0.5f, 0.28f, Ui::rgba(0, 0, 0, 245), sTag, 0.18f);
                     }
 
                     // ---- Panel de informacion (izquierda) flotando hacia adelante en 3D ----
@@ -3239,19 +3642,32 @@ int main(int argc, char* argv[]) {
                             std::snprintf(sl, sizeof(sl), "%.0f pp", rec->bestPP);
                             drawText(textBuf, 68.0f + dInfo, 186.0f, 0.34f, clr300, sl, 0.6f);
                         } else {
-                            drawText(textBuf, 68.0f + dInfo, 174.0f, 0.34f, clrMuted, "Sin record", 0.6f);
+                            drawText(textBuf, 68.0f + dInfo, 174.0f, 0.34f, clrMuted, LOC(STR_SONG_NO_RECORD), 0.6f);
                         }
                     }
                 }
 
-                // Barra inferior de atajos
-                Ui::gradV(0.0f, 212.0f, 400.0f, 28.0f, 0.3f, Ui::rgba(18, 15, 32, 170), Ui::rgba(18, 15, 32, 250));
+                // Barra inferior de atajos estilo multijugador
+                Ui::gradV(0.0f, 212.0f, 400.0f, 28.0f, 0.3f, Ui::rgba(14, 11, 26, 140), Ui::rgba(14, 11, 26, 250));
                 if (searchKeyboardOpen) {
-                    drawTextWithShadow(textBuf, 6.0f, 220.0f, 0.35f, clrCursor,
-                        "BUSCADOR EN VIVO: Toca letras abajo | B: Listo | X: Limpiar | Y: Borrar");
+                    float byY = 219.0f;
+                    drawKeyBadge(textBuf, 10.0f, byY, "B", LOC(STR_DONE), Ui::rgba(50, 165, 255));
+                    drawKeyBadge(textBuf, 76.0f, byY, "X", LOC(STR_CLEAR), Ui::rgba(255, 180, 40));
+                    drawKeyBadge(textBuf, 152.0f, byY, "Y", LOC(STR_DELETE), Ui::rgba(255, 75, 80));
+                    drawTextWithShadow(textBuf, 224.0f, byY, 0.33f, clrCursor, LOC(STR_SEARCH_KEYBOARD_HINT), 0.35f);
+                } else if (multiMgr.inMultiplayer) {
+                    float byY = 219.0f;
+                    drawKeyBadge(textBuf, 10.0f, byY, "A", LOC(STR_MULTI_JOIN), Ui::rgba(50, 165, 255));
+                    drawKeyBadge(textBuf, 78.0f, byY, "B", LOC(STR_BACK), Ui::rgba(255, 75, 80));
+                    drawKeyBadge(textBuf, 146.0f, byY, "SELECT", "Mods", Ui::rgba(255, 102, 171));
+                    drawKeyBadge(textBuf, 230.0f, byY, "< >", LOC(STR_DIFFICULTY), Ui::rgba(50, 215, 115));
                 } else {
-                    drawTextWithShadow(textBuf, 6.0f, 220.0f, 0.35f, clr300,
-                        "A: Jugar | START: Orden | SELECT: Mods | Y: Wi-Fi | X: Config");
+                    float byY = 219.0f;
+                    drawKeyBadge(textBuf, 8.0f, byY, "A", LOC(STR_MENU_PLAY), Ui::rgba(50, 165, 255));
+                    drawKeyBadge(textBuf, 76.0f, byY, "START", LOC(STR_MODE), Ui::rgba(165, 120, 255));
+                    drawKeyBadge(textBuf, 156.0f, byY, "SELECT", "Mods", Ui::rgba(255, 102, 171));
+                    drawKeyBadge(textBuf, 238.0f, byY, "Y", "Wi-Fi", Ui::rgba(255, 180, 40));
+                    drawKeyBadge(textBuf, 308.0f, byY, "X", LOC(STR_MENU_SETTINGS), Ui::rgba(50, 215, 115));
                 }
                 Ui::drawTransition(400.0f, 240.0f, screenFade, clrPrimary);
             }
@@ -3294,7 +3710,7 @@ int main(int argc, char* argv[]) {
 
                 // Botón Listo [LISTO]
                 Ui::panel(262.0f, 3.0f, 54.0f, 28.0f, 0.55f, Ui::rgba(22, 68, 42, 255), clr100);
-                drawCenteredTextWithShadow(textBuf, 289.0f, 17.0f, 0.36f, clrWhite, "LISTO", 0.62f);
+                drawCenteredTextWithShadow(textBuf, 289.0f, 17.0f, 0.36f, clrWhite, LOC(STR_DONE), 0.62f);
 
                 // =========================================================
                 // 2. FILA DE FILTROS RÁPIDOS / CHIPS (y: 34..52)
@@ -3377,7 +3793,7 @@ int main(int argc, char* argv[]) {
                     float kx = 4.0f + i * 26.5f;
                     drawSearchKey(i, kx, 54.0f, 24.5f, 32.0f, numLabels[i], 0.44f);
                 }
-                drawSearchKey(10, 271.0f, 54.0f, 45.0f, 32.0f, "BORR", 0.32f, Ui::rgba(56, 24, 42, 255), Ui::rgba(255, 100, 130));
+                drawSearchKey(10, 271.0f, 54.0f, 45.0f, 32.0f, LOC(STR_DELETE), 0.32f, Ui::rgba(56, 24, 42, 255), Ui::rgba(255, 100, 130));
 
                 // Fila 1: Q W E R T Y U I O P (y: 89..121)
                 const char* r1Labels[] = {"Q","W","E","R","T","Y","U","I","O","P"};
@@ -3401,9 +3817,9 @@ int main(int argc, char* argv[]) {
                 }
 
                 // Fila 4: Acciones inferiores (y: 194..236)
-                drawSearchKey(40, 4.0f, 194.0f, 56.0f, 42.0f, "LIMPIAR", 0.30f, Ui::rgba(52, 22, 38, 255), Ui::rgba(255, 90, 110));
+                drawSearchKey(40, 4.0f, 194.0f, 56.0f, 42.0f, LOC(STR_CLEAR), 0.30f, Ui::rgba(52, 22, 38, 255), Ui::rgba(255, 90, 110));
                 drawSearchKey(41, 63.0f, 194.0f, 142.0f, 42.0f, "ESPACIO", 0.35f, Ui::rgba(36, 30, 56, 255), Ui::rgba(90, 80, 125));
-                drawSearchKey(42, 208.0f, 194.0f, 52.0f, 42.0f, "BORRAR", 0.30f, Ui::rgba(56, 24, 42, 255), Ui::rgba(255, 120, 140));
+                drawSearchKey(42, 208.0f, 194.0f, 52.0f, 42.0f, LOC(STR_DELETE), 0.30f, Ui::rgba(56, 24, 42, 255), Ui::rgba(255, 120, 140));
                 drawSearchKey(43, 263.0f, 194.0f, 53.0f, 42.0f, "OK", 0.36f, Ui::rgba(22, 68, 42, 255), clr100);
             } else if (modMenuOpen) {
                 Ui::panel(6.0f, 6.0f, 308.0f, 228.0f, 0.10f, Ui::rgba(22, 18, 34, 250), clrPrimary);
@@ -3411,7 +3827,7 @@ int main(int argc, char* argv[]) {
                 // Cabecera del menú de Mods
                 Ui::pill(12.0f, 10.0f, 44.0f, 15.0f, 0.14f, Ui::rgba(255, 102, 171, 220));
                 drawCenteredText(textBuf, 34.0f, 17.5f, 0.35f, clrWhite, "MODS", 0.16f);
-                drawText(textBuf, 60.0f, 10.0f, 0.42f, clrWhite, "Modificadores de Juego", 0.16f);
+                drawText(textBuf, 60.0f, 10.0f, 0.42f, clrWhite, LOC(STR_MODS_INFO), 0.16f);
 
                 // Multiplicador total de score
                 float mult = getModsScoreMultiplier(settings.activeMods);
@@ -3433,21 +3849,24 @@ int main(int argc, char* argv[]) {
                     int row = m / 5;
                     float mx = 8.0f + col * 62.0f;
                     float my = 43.0f + row * 43.0f;
-                    bool active = (settings.activeMods & modTable[m].bit) != 0;
+                    bool isDisallowedInMulti = multiMgr.inMultiplayer && (modTable[m].bit == MOD_AUTO || modTable[m].bit == MOD_RX || modTable[m].bit == MOD_AP);
+                    bool active = !isDisallowedInMulti && ((settings.activeMods & modTable[m].bit) != 0);
                     bool cursorOn = (modCursor == m);
-                    u32 mClr = modTable[m].color;
+                    u32 mClr = isDisallowedInMulti ? Ui::rgba(80, 70, 95) : modTable[m].color;
 
-                    u32 cardBg = active
-                        ? Ui::lerpColor(Ui::rgba(26, 22, 40, 245), mClr, 0.38f)
-                        : (cursorOn ? Ui::rgba(42, 36, 62, 240) : Ui::rgba(28, 24, 42, 230));
+                    u32 cardBg = isDisallowedInMulti
+                        ? Ui::rgba(18, 14, 24, 210)
+                        : (active
+                            ? Ui::lerpColor(Ui::rgba(26, 22, 40, 245), mClr, 0.38f)
+                            : (cursorOn ? Ui::rgba(42, 36, 62, 240) : Ui::rgba(28, 24, 42, 230)));
 
                     Ui::panel(mx, my, 56.0f, 39.0f, 0.20f, cardBg, cursorOn ? clrCursor : (active ? mClr : Ui::rgba(55, 48, 80)));
                     if (active) {
                         C2D_DrawRectSolid(mx + 2.0f, my, 0.22f, 52.0f, 2.5f, mClr);
                     }
                     drawRectOutline(mx, my, 56.0f, 39.0f, cursorOn ? 1.8f : 1.0f, cursorOn ? clrCursor : (active ? mClr : Ui::rgba(55, 48, 80)), 0.24f);
-                    drawCenteredText(textBuf, mx + 28.0f, my + 13.0f, 0.48f, active ? clrWhite : Ui::brighten(mClr, 1.25f), modTable[m].code, 0.25f);
-                    drawCenteredText(textBuf, mx + 28.0f, my + 28.0f, 0.29f, active ? clrWhite : clrMuted, modTable[m].shortName, 0.25f);
+                    drawCenteredText(textBuf, mx + 28.0f, my + 13.0f, 0.48f, isDisallowedInMulti ? clrMiss : (active ? clrWhite : Ui::brighten(mClr, 1.25f)), modTable[m].code, 0.25f);
+                    drawCenteredText(textBuf, mx + 28.0f, my + 28.0f, 0.29f, isDisallowedInMulti ? clrMiss : (active ? clrWhite : clrMuted), isDisallowedInMulti ? "NO DISP" : modTable[m].shortName, 0.25f);
                 }
 
                 // Panel inferior con descripción enriquecida del mod seleccionado
@@ -3464,12 +3883,17 @@ int main(int argc, char* argv[]) {
                 drawText(textBuf, 46.0f, 179.0f, 0.40f, clrWhite, curDef.fullName, 0.26f);
 
                 // Insignia de estado ACTIVO / INACTIVO
-                Ui::pill(242.0f, 179.0f, 62.0f, 14.0f, 0.24f, curActive ? Ui::rgba(25, 75, 45, 235) : Ui::rgba(35, 30, 50, 235));
-                drawCenteredText(textBuf, 273.0f, 186.0f, 0.29f, curActive ? clr100 : clrMuted, curActive ? "ACTIVO" : "INACTIVO", 0.26f);
+                bool isSelDisallowed = multiMgr.inMultiplayer && (curDef.bit == MOD_AUTO || curDef.bit == MOD_RX || curDef.bit == MOD_AP);
+                Ui::pill(242.0f, 179.0f, 62.0f, 14.0f, 0.24f, isSelDisallowed ? Ui::rgba(60, 20, 25, 235) : (curActive ? Ui::rgba(25, 75, 45, 235) : Ui::rgba(35, 30, 50, 235)));
+                drawCenteredText(textBuf, 273.0f, 186.0f, 0.29f, isSelDisallowed ? clrMiss : (curActive ? clr100 : clrMuted), isSelDisallowed ? "NO DISP" : (curActive ? "ACTIVO" : "INACTIVO"), 0.26f);
 
                 // Texto descriptivo del efecto del mod
                 drawText(textBuf, 14.0f, 196.0f, 0.33f, Ui::rgba(220, 215, 240), curDef.desc, 0.26f);
-                drawText(textBuf, 14.0f, 213.0f, 0.28f, clr300, "Pulsa A o toca para activar/desactivar este mod", 0.26f);
+                if (isSelDisallowed) {
+                    drawText(textBuf, 14.0f, 213.0f, 0.28f, clrMiss, LOC(STR_MODS_NOT_ONLINE), 0.26f);
+                } else {
+                    drawText(textBuf, 14.0f, 213.0f, 0.28f, clr300, LOC(STR_MODS_CONTROLS_HINT), 0.26f);
+                }
             } else {
                 if (!songMgr.sets.empty() && !songMgr.sets[selectedSet].difficulties.empty()) {
                     const auto& curSet = songMgr.sets[selectedSet];
@@ -3505,7 +3929,7 @@ int main(int argc, char* argv[]) {
                     // Botón pequeño [ BORRAR ] en el header (x: 250, y: 8.5, w: 56, h: 14)
                     Ui::pill(250.0f, 8.5f, 56.0f, 14.0f, 0.22f, Ui::rgba(140, 25, 38, 230));
                     drawRectOutline(250.0f, 8.5f, 56.0f, 14.0f, 1.0f, Ui::rgba(255, 75, 95), 0.24f);
-                    drawCenteredText(textBuf, 278.0f, 15.5f, 0.28f, Ui::rgba(255, 220, 225), "BORRAR", 0.32f);
+                    drawCenteredText(textBuf, 278.0f, 15.5f, 0.28f, Ui::rgba(255, 220, 225), LOC(STR_DELETE), 0.32f);
 
                     // Artista y Creador
                     std::string artistCreator = curSet.artist + "  //  " + d.creator;
@@ -3528,7 +3952,15 @@ int main(int argc, char* argv[]) {
                     // =========================================================================
                     // 2. PESTAÑAS: RESUMEN / RANKING LOCAL (y: 56..70)
                     // =========================================================================
-                    std::vector<ScoreRecord> mapRecords = scoreMgr.getTopRecords(d.osuPath, 10, curDiffMode);
+                    static std::vector<ScoreRecord> cachedMapRecords;
+                    static std::string cachedMapOsuPath = "";
+                    static int cachedMapMode = -999;
+                    if (d.osuPath != cachedMapOsuPath || curDiffMode != cachedMapMode) {
+                        cachedMapOsuPath = d.osuPath;
+                        cachedMapMode = curDiffMode;
+                        cachedMapRecords = scoreMgr.getTopRecords(d.osuPath, 10, curDiffMode);
+                    }
+                    const std::vector<ScoreRecord>& mapRecords = cachedMapRecords;
                     int numRecs = static_cast<int>(mapRecords.size());
                     if (rankingScroll >= numRecs && numRecs > 0) rankingScroll = numRecs - 1;
                     if (rankingScroll < 0) rankingScroll = 0;
@@ -3538,7 +3970,7 @@ int main(int argc, char* argv[]) {
                     u32 tab0Bg = tab0Active ? Ui::rgba(55, 30, 75, 245) : Ui::rgba(22, 18, 32, 220);
                     u32 tab0Border = tab0Active ? clrPrimary : Ui::rgba(45, 38, 62);
                     Ui::panel(8.0f, 56.0f, 110.0f, 15.0f, 0.22f, tab0Bg, tab0Border);
-                    drawCenteredTextWithShadow(textBuf, 63.0f, 62.5f, 0.30f, tab0Active ? clrWhite : Ui::rgba(210, 205, 230), "RESUMEN");
+                    drawCenteredTextWithShadow(textBuf, 63.0f, 62.5f, 0.30f, tab0Active ? clrWhite : Ui::rgba(210, 205, 230), LOC(STR_SUMMARY));
 
                     // Tab 1: [ 🏆 RANKING LOCAL (N) ] (x: 122..244)
                     bool tab1Active = (songSelectTab == 1);
@@ -3546,14 +3978,14 @@ int main(int argc, char* argv[]) {
                     u32 tab1Border = tab1Active ? clrCursor : Ui::rgba(45, 38, 62);
                     Ui::panel(122.0f, 56.0f, 122.0f, 15.0f, 0.22f, tab1Bg, tab1Border);
                     char rnkTabStr[32];
-                    std::snprintf(rnkTabStr, sizeof(rnkTabStr), "RANKING (%d)", numRecs);
+                    std::snprintf(rnkTabStr, sizeof(rnkTabStr), "%s (%d)", LOC(STR_LOCAL_RANKING), numRecs);
                     drawCenteredTextWithShadow(textBuf, 183.0f, 62.5f, 0.30f, tab1Active ? clrCursor : Ui::rgba(210, 205, 230), rnkTabStr);
 
                     // Botón de acción lateral (x: 248..312)
                     if (songSelectTab == 1) {
                         u32 btnBg = rankingExpanded ? Ui::rgba(180, 40, 60, 230) : Ui::rgba(45, 75, 135, 230);
                         Ui::pill(248.0f, 56.0f, 64.0f, 15.0f, 0.23f, btnBg);
-                        drawCenteredTextWithShadow(textBuf, 280.0f, 62.5f, 0.28f, clrWhite, rankingExpanded ? "✕ REDUCIR" : "⛶ VER MAS");
+                        drawCenteredTextWithShadow(textBuf, 280.0f, 62.5f, 0.28f, clrWhite, rankingExpanded ? LOC(STR_COLLAPSE) : LOC(STR_EXPAND));
                     } else {
                         Ui::pill(248.0f, 56.0f, 64.0f, 15.0f, 0.22f, Ui::rgba(45, 32, 60, 220));
                         drawCenteredTextWithShadow(textBuf, 280.0f, 62.5f, 0.28f, Ui::rgba(255, 175, 215), "Ver Top >");
@@ -3598,7 +4030,7 @@ int main(int argc, char* argv[]) {
                             drawCenteredTextWithShadow(textBuf, 277.0f, 89.0f, 0.46f, gClr, rec->bestGrade.c_str(), 0.32f);
                             drawCenteredTextWithShadow(textBuf, 277.0f, 102.0f, 0.22f, Ui::rgba(255, 180, 225), "GRADE");
                         } else {
-                            drawCenteredTextWithShadow(textBuf, 160.0f, 85.0f, 0.38f, clrWhite, "¡SIN RECORD REGISTRADO!");
+                            drawCenteredTextWithShadow(textBuf, 160.0f, 85.0f, 0.38f, clrWhite, LOC(STR_SONG_NO_RECORDS_YET));
                             char ssMaxStr[64];
                             std::snprintf(ssMaxStr, sizeof(ssMaxStr), "Max SS: %.0f pp  •  %d Objetos  •  ¡Juegala ahora!", maxSSPP, d.totalObjects());
                             drawCenteredTextWithShadow(textBuf, 160.0f, 99.0f, 0.30f, Ui::rgba(255, 225, 95), ssMaxStr);
@@ -3608,9 +4040,9 @@ int main(int argc, char* argv[]) {
                         // 2B. CURVA DE ESFUERZO / STRAIN GRAPH ESTILO OSU!LAZER (y: 114..142)
                         // =====================================================================
                         Ui::panel(8.0f, 114.0f, 304.0f, 28.0f, 0.18f, Ui::rgba(20, 16, 32, 240), starClr);
-                        drawTextWithShadow(textBuf, 14.0f, 115.5f, 0.29f, clrWhite, "DIFICULTAD / DENSIDAD", 0.28f);
+                        drawTextWithShadow(textBuf, 14.0f, 115.5f, 0.29f, clrWhite, LOC(STR_SONG_DIFF_DENSITY), 0.28f);
                         char objCntStr[32];
-                        std::snprintf(objCntStr, sizeof(objCntStr), "%d objetos", d.totalObjects());
+                        std::snprintf(objCntStr, sizeof(objCntStr), "%d %s", d.totalObjects(), LOC(STR_OBJECTS));
                         drawTextWithShadow(textBuf, 232.0f, 115.5f, 0.29f, Ui::rgba(225, 220, 245), objCntStr, 0.28f);
 
                         float playhead = -1.0f;
@@ -3628,8 +4060,8 @@ int main(int argc, char* argv[]) {
                         if (numRecs == 0) {
                             float emptyH = rankingExpanded ? 150.0f : 68.0f;
                             Ui::panel(8.0f, 74.0f, 304.0f, emptyH, 0.20f, Ui::rgba(24, 18, 38, 240), Ui::rgba(65, 40, 85));
-                            drawCenteredText(textBuf, 160.0f, 74.0f + emptyH * 0.40f, 0.38f, clrWhite, "¡SIN RECORDS REGISTRADOS!");
-                            drawCenteredText(textBuf, 160.0f, 74.0f + emptyH * 0.65f, 0.28f, clrCursor, "Juega este mapa para registrar tu puntuacion.");
+                            drawCenteredText(textBuf, 160.0f, 74.0f + emptyH * 0.40f, 0.38f, clrWhite, LOC(STR_SONG_NO_RECORDS_YET));
+                            drawCenteredText(textBuf, 160.0f, 74.0f + emptyH * 0.65f, 0.28f, clrCursor, LOC(STR_SONG_PLAY_TO_RECORD));
                         } else if (!rankingExpanded) {
                             // Modo compacto: 3 filas en y: 74..142
                             int displayCount = std::min(numRecs, 3);
@@ -3740,7 +4172,7 @@ int main(int argc, char* argv[]) {
 
                             // Barra de estado inferior en modo expandido
                             Ui::gradV(8.0f, 224.0f, 304.0f, 15.0f, 0.25f, Ui::rgba(18, 14, 28, 220), Ui::rgba(18, 14, 28, 250));
-                            drawText(textBuf, 12.0f, 225.5f, 0.26f, clrMuted, "B / Tocar para Cerrar  •  D-Pad: Subir/Bajar", 0.30f);
+                            drawText(textBuf, 12.0f, 225.5f, 0.26f, clrMuted, LOC(STR_SONG_CLOSE_HINT), 0.30f);
                             if (startIdx > 0) {
                                 drawText(textBuf, 276.0f, 225.5f, 0.28f, clrCursor, "[^]", 0.30f);
                             }
@@ -3779,12 +4211,20 @@ int main(int argc, char* argv[]) {
                     u32 subClr = clrMuted;
 
                     if (k == 0) { // MODO TACTIL / TABLET (TOGGLE UNIFICADO)
-                        bool bTactil = settings.playOnBottomScreen;
-                        accentClr = bTactil ? clr100 : clrPrimary;
-                        bgBase    = bTactil ? Ui::rgba(24, 52, 40, 245) : Ui::rgba(36, 26, 64, 245);
-                        cardTitle = bTactil ? "TACTIL" : "TABLET";
-                        std::snprintf(cardSub, sizeof(cardSub), "%s", bTactil ? "Abajo" : "Arriba");
-                        subClr = bTactil ? Ui::rgba(140, 245, 140) : Ui::rgba(195, 175, 255);
+                        if (multiMgr.inMultiplayer) {
+                            accentClr = clrCursor;
+                            bgBase    = Ui::rgba(22, 45, 65, 245);
+                            cardTitle = "SALA";
+                            std::snprintf(cardSub, sizeof(cardSub), "%s", multiMgr.isHost() ? "Host" : "Invitado");
+                            subClr = clrCursor;
+                        } else {
+                            bool bTactil = settings.playOnBottomScreen;
+                            accentClr = bTactil ? clr100 : clrPrimary;
+                            bgBase    = bTactil ? Ui::rgba(24, 52, 40, 245) : Ui::rgba(36, 26, 64, 245);
+                            cardTitle = bTactil ? "TACTIL" : "TABLET";
+                            std::snprintf(cardSub, sizeof(cardSub), "%s", bTactil ? "Abajo" : "Arriba");
+                            subClr = bTactil ? Ui::rgba(140, 245, 140) : Ui::rgba(195, 175, 255);
+                        }
                     } else if (k == 1) { // BUSCAR
                         bool hasFilter = !songMgr.searchQuery.empty();
                         accentClr = hasFilter ? clrCursor : Ui::rgba(0, 216, 240);
@@ -3820,28 +4260,36 @@ int main(int argc, char* argv[]) {
                         else                                         std::snprintf(cardSub, sizeof(cardSub), "Record");
                         subClr = Ui::rgba(205, 185, 255);
                     } else if (k == 4) { // MODOS DE JUEGO (STD / TAIKO / CATCH / MANIA)
-                        cardTitle = "MODO";
-                        int curM = settings.gameMode;
-                        if (curM == MODE_TAIKO) {
-                            accentClr = Ui::rgba(255, 75, 80);
-                            bgBase    = Ui::rgba(44, 18, 24, 245);
-                            std::snprintf(cardSub, sizeof(cardSub), "Taiko");
-                            subClr    = Ui::rgba(255, 150, 160);
-                        } else if (curM == MODE_CATCH) {
-                            accentClr = Ui::rgba(45, 215, 115);
-                            bgBase    = Ui::rgba(16, 42, 26, 245);
-                            std::snprintf(cardSub, sizeof(cardSub), "Catch");
-                            subClr    = Ui::rgba(130, 255, 180);
-                        } else if (curM == MODE_MANIA) {
-                            accentClr = Ui::rgba(70, 195, 255);
-                            bgBase    = Ui::rgba(18, 36, 52, 245);
-                            std::snprintf(cardSub, sizeof(cardSub), "Mania");
-                            subClr    = Ui::rgba(160, 230, 255);
+                        if (multiMgr.inMultiplayer) {
+                            accentClr = Ui::rgba(180, 80, 240);
+                            bgBase    = Ui::rgba(40, 20, 52, 245);
+                            cardTitle = "ONLINE";
+                            std::snprintf(cardSub, sizeof(cardSub), "Lobby");
+                            subClr    = Ui::rgba(215, 160, 255);
                         } else {
-                            accentClr = Ui::rgba(255, 102, 171);
-                            bgBase    = Ui::rgba(48, 18, 38, 245);
-                            std::snprintf(cardSub, sizeof(cardSub), "Standard");
-                            subClr    = Ui::rgba(255, 180, 215);
+                            cardTitle = "MODO";
+                            int curM = settings.gameMode;
+                            if (curM == MODE_TAIKO) {
+                                accentClr = Ui::rgba(255, 75, 80);
+                                bgBase    = Ui::rgba(44, 18, 24, 245);
+                                std::snprintf(cardSub, sizeof(cardSub), "Taiko");
+                                subClr    = Ui::rgba(255, 150, 160);
+                            } else if (curM == MODE_CATCH) {
+                                accentClr = Ui::rgba(45, 215, 115);
+                                bgBase    = Ui::rgba(16, 42, 26, 245);
+                                std::snprintf(cardSub, sizeof(cardSub), "Catch");
+                                subClr    = Ui::rgba(130, 255, 180);
+                            } else if (curM == MODE_MANIA) {
+                                accentClr = Ui::rgba(70, 195, 255);
+                                bgBase    = Ui::rgba(18, 36, 52, 245);
+                                std::snprintf(cardSub, sizeof(cardSub), "Mania");
+                                subClr    = Ui::rgba(160, 230, 255);
+                            } else {
+                                accentClr = Ui::rgba(255, 102, 171);
+                                bgBase    = Ui::rgba(48, 18, 38, 245);
+                                std::snprintf(cardSub, sizeof(cardSub), "Standard");
+                                subClr    = Ui::rgba(255, 180, 215);
+                            }
                         }
                     }
 
@@ -3851,14 +4299,9 @@ int main(int argc, char* argv[]) {
                         Ui::glow(cx, by + (cardH * 0.5f), 0.18f, 32.0f, Ui::withAlpha(accentClr, static_cast<u8>(90 * lift)), 3);
                     }
 
-                    // Fondo de la tarjeta con brillo según elevación
+                    // Fondo de la tarjeta con estilo button multijugador
                     u32 finalBg = (lift > 0.05f) ? Ui::brighten(bgBase, 1.0f + lift * 0.35f) : bgBase;
-                    Ui::panel(bx, by, cardW, cardH, cz, finalBg, (lift > 0.1f) ? accentClr : Ui::rgba(50, 42, 70));
-
-                    // Barra neón superior iluminada
-                    float barThick = 2.0f + lift * 1.5f;
-                    u32 neonClr = (lift > 0.05f) ? Ui::brighten(accentClr, 1.3f) : Ui::withAlpha(accentClr, 180);
-                    C2D_DrawRectSolid(bx + 1.0f, by, cz + 0.02f, cardW - 2.0f, barThick, neonClr);
+                    Ui::button(bx, by, cardW, cardH, cz, finalBg, accentClr, lift > 0.05f);
 
                     // =====================================================================
                     // DIBUJADO DE ICONOS VECTORIALES PROCEDURALES (GRANDES Y CENTRADOS)
@@ -3975,21 +4418,25 @@ int main(int argc, char* argv[]) {
                 C2D_DrawRectSolid(0.0f, 0.0f, 0.85f, 320.0f, 240.0f, Ui::rgba(8, 6, 14, 235));
                 Ui::panel(16.0f, 38.0f, 288.0f, 156.0f, 0.88f, Ui::rgba(26, 18, 34, 252), Ui::rgba(255, 64, 96));
                 Ui::pill(24.0f, 46.0f, 96.0f, 18.0f, 0.90f, Ui::rgba(180, 30, 55, 230));
-                drawCenteredText(textBuf, 72.0f, 55.0f, 0.36f, clrWhite, "CONFIRMAR", 0.95f);
+                drawCenteredText(textBuf, 72.0f, 55.0f, 0.36f, clrWhite, LOC(STR_DELETE), 0.95f);
 
                 std::string delTitle = (!songMgr.sets.empty() && selectedSet >= 0 && selectedSet < static_cast<int>(songMgr.sets.size()))
                     ? songMgr.sets[selectedSet].title : "";
                 drawCenteredText(textBuf, 160.0f, 82.0f, 0.44f, clrWhite, truncateString(delTitle, 28).c_str(), 0.95f);
-                drawCenteredText(textBuf, 160.0f, 108.0f, 0.35f, Ui::rgba(255, 160, 175), "Se borrara la carpeta y records de la SD.", 0.95f);
-                drawCenteredText(textBuf, 160.0f, 126.0f, 0.32f, clrMuted, "Esta accion no se puede deshacer.", 0.95f);
+                drawCenteredText(textBuf, 160.0f, 108.0f, 0.35f, Ui::rgba(255, 160, 175), LOC(STR_DELETE_CONFIRM_TITLE), 0.95f);
+                drawCenteredText(textBuf, 160.0f, 126.0f, 0.32f, clrMuted, LOC(STR_DELETE_CONFIRM_DESC), 0.95f);
 
                 // Boton Cancelar
-                Ui::panel(28.0f, 148.0f, 126.0f, 34.0f, 0.90f, Ui::rgba(42, 38, 56, 250), Ui::rgba(85, 75, 110));
-                drawCenteredText(textBuf, 91.0f, 165.0f, 0.39f, clrWhite, "CANCELAR (B)", 0.95f);
+                Ui::button(28.0f, 148.0f, 126.0f, 34.0f, 0.90f, Ui::rgba(36, 32, 50, 250), Ui::rgba(85, 75, 110), false);
+                Ui::pill(34.0f, 155.0f, 22.0f, 20.0f, 0.92f, Ui::rgba(65, 58, 85));
+                drawCenteredText(textBuf, 45.0f, 165.0f, 0.32f, clrWhite, "B", 0.95f);
+                drawTextWithShadow(textBuf, 62.0f, 157.0f, 0.38f, clrWhite, LOC(STR_BACK), 0.95f);
 
                 // Boton Borrar
-                Ui::panel(166.0f, 148.0f, 126.0f, 34.0f, 0.90f, Ui::rgba(185, 35, 55, 250), Ui::rgba(255, 80, 110));
-                drawCenteredText(textBuf, 229.0f, 165.0f, 0.40f, clrWhite, "BORRAR (A)", 0.95f);
+                Ui::button(166.0f, 148.0f, 126.0f, 34.0f, 0.90f, Ui::rgba(165, 28, 48, 250), Ui::rgba(255, 80, 110), true);
+                Ui::pill(172.0f, 155.0f, 22.0f, 20.0f, 0.92f, Ui::rgba(255, 80, 110));
+                drawCenteredText(textBuf, 183.0f, 165.0f, 0.32f, clrWhite, "A", 0.95f);
+                drawTextWithShadow(textBuf, 200.0f, 157.0f, 0.38f, clrWhite, LOC(STR_DELETE), 0.95f);
             }
             Ui::drawTransition(320.0f, 240.0f, screenFade, clrPrimary);
 
@@ -4001,6 +4448,10 @@ int main(int argc, char* argv[]) {
         // 4. PANTALLA DE RESULTADOS (Ranking Final + PP + Récords)
         // =========================================================
         if (appState == STATE_RESULTS) {
+            if (multiMgr.inMultiplayer) {
+                appState = STATE_MULTI_RESULTS;
+                continue;
+            }
             if (kDown & KEY_A) {
                 startSelectedBeatmap();
                 continue;
@@ -4018,10 +4469,27 @@ int main(int argc, char* argv[]) {
                 resultsBottomTab = 1 - resultsBottomTab;
                 audio.playHitSound(0);
             }
-            if (touchJustDown && touch.py >= 46 && touch.py <= 68) {
-                if (touch.px < 160) resultsBottomTab = 0;
-                else resultsBottomTab = 1;
-                audio.playHitSound(0);
+            if (touchJustDown) {
+                if (touch.py >= 46 && touch.py <= 68) {
+                    if (touch.px < 160) resultsBottomTab = 0;
+                    else resultsBottomTab = 1;
+                    audio.playHitSound(0);
+                } else if (touch.py >= 200 && touch.py <= 236) {
+                    if (touch.px >= 8 && touch.px <= 106) {
+                        resultsBottomTab = 1 - resultsBottomTab;
+                        audio.playHitSound(0);
+                    } else if (touch.px >= 111 && touch.px <= 211) {
+                        audio.playHitSound(2);
+                        startSelectedBeatmap();
+                        continue;
+                    } else if (touch.px >= 216 && touch.px <= 314) {
+                        audio.playHitSound(0);
+                        applyActiveSkinAudio();
+                        appState = STATE_SONG_SELECT;
+                        updateSongPreview();
+                        continue;
+                    }
+                }
             }
 
             bool isTaikoPlay = (settings.gameMode == MODE_TAIKO || beatmap.mode == 1);
@@ -4080,7 +4548,7 @@ int main(int argc, char* argv[]) {
 
                 Ui::gradV(0.0f, 0.0f, 400.0f, 30.0f, 0.3f, Ui::rgba(18, 15, 32, 245), Ui::rgba(18, 15, 32, 150));
                 C2D_DrawRectSolid(0.0f, 29.0f, 0.31f, 400.0f, 1.5f, Ui::withAlpha(gradeClr, 220));
-                const char* resTitle = stageFailed ? "PARTIDA FALLIDA" : (newRecordAchieved ? "RESULTADOS - NUEVO RECORD!" : "RESULTADOS");
+                const char* resTitle = stageFailed ? LOC(STR_RESULTS_FAILED) : (newRecordAchieved ? LOC(STR_RESULTS_NEW_RECORD) : LOC(STR_RESULTS_TITLE));
                 if (isTaikoPlay) {
                     if (stageFailed || hp < 0.70f) resTitle = "FALLIDA... (ざんねん...)";
                     else if (countMiss == 0) resTitle = "DON-DERFUL! FULL COMBO! (フルコンボ!)";
@@ -4153,7 +4621,7 @@ int main(int argc, char* argv[]) {
 
                 // Panel de resultados
                 Ui::panel(158.0f + dPanel, 38.0f, 234.0f, 62.0f, 0.3f, Ui::rgba(24, 21, 40, 230), gradeClr);
-                drawText(textBuf, 168.0f + dPanel, 42.0f, 0.36f, clrMuted, "PUNTUACION");
+                drawText(textBuf, 168.0f + dPanel, 42.0f, 0.36f, clrMuted, LOC(STR_SCORE));
 
                 float rollProgress = std::min(1.0f, static_cast<float>(animTick) / 30.0f);
                 int displayScore = static_cast<int>(score * rollProgress);
@@ -4169,9 +4637,9 @@ int main(int argc, char* argv[]) {
 
                 // Precision con barra
                 Ui::panel(158.0f + dPanel, 106.0f, 234.0f, 34.0f, 0.3f, Ui::rgba(24, 21, 40, 230));
-                std::snprintf(buf, sizeof(buf), "Precision %.2f%%", acc);
+                std::snprintf(buf, sizeof(buf), "%s %.2f%%", LOC(STR_ACCURACY), acc);
                 drawText(textBuf, 168.0f + dPanel, 109.0f, 0.40f, clr300, buf);
-                std::snprintf(buf, sizeof(buf), "Combo %dx", maxCombo);
+                std::snprintf(buf, sizeof(buf), "%s %dx", LOC(STR_MAX_COMBO), maxCombo);
                 drawText(textBuf, 320.0f + dPanel, 109.0f, 0.40f, clrCursor, buf);
                 Ui::statBar(168.0f + dPanel, 128.0f, 214.0f, 6.0f, 0.4f, (acc / 100.0f) * rollProgress, clr300);
 
@@ -4217,7 +4685,7 @@ int main(int argc, char* argv[]) {
                 drawText(textBuf, 160.0f + dPanel, 196.0f, 0.35f, clrMuted, urLine);
 
                 Ui::gradV(0.0f, 212.0f, 400.0f, 28.0f, 0.3f, Ui::rgba(18, 15, 32, 170), Ui::rgba(18, 15, 32, 250));
-                drawCenteredText(textBuf, 200.0f, 227.0f, 0.42f, clr300, "A: Reintentar | B: Volver a Canciones");
+                drawCenteredText(textBuf, 200.0f, 227.0f, 0.42f, clr300, LOC(STR_RESULTS_RETRY_HINT));
                 Ui::drawTransition(400.0f, 240.0f, screenFade, gradeClr);
             }
 
@@ -4252,10 +4720,10 @@ int main(int argc, char* argv[]) {
             u32 tab1Brd = (resultsBottomTab == 1) ? clrCursor : Ui::rgba(55, 45, 80);
 
             Ui::panel(8.0f, 48.0f, tabW, 19.0f, 0.18f, tab0Bg, tab0Brd);
-            drawCenteredText(textBuf, 8.0f + tabW * 0.5f, 57.5f, 0.30f, (resultsBottomTab == 0) ? clrWhite : clrMuted, "1. CURVA ESFUERZO", 0.22f);
+            drawCenteredText(textBuf, 8.0f + tabW * 0.5f, 57.5f, 0.30f, (resultsBottomTab == 0) ? clrWhite : clrMuted, LOC(STR_RESULTS_TAB_STRAIN), 0.22f);
 
             Ui::panel(164.0f, 48.0f, tabW, 19.0f, 0.18f, tab1Bg, tab1Brd);
-            drawCenteredText(textBuf, 164.0f + tabW * 0.5f, 57.5f, 0.30f, (resultsBottomTab == 1) ? clrWhite : clrMuted, "2. RANKING LOCAL (SD)", 0.22f);
+            drawCenteredText(textBuf, 164.0f + tabW * 0.5f, 57.5f, 0.30f, (resultsBottomTab == 1) ? clrWhite : clrMuted, LOC(STR_RESULTS_TAB_RANKING), 0.22f);
 
             if (resultsBottomTab == 0) {
                 // VISTA 1: CURVA DE ESFUERZO (Strain Graph) + Historial de Fallos
@@ -4320,7 +4788,7 @@ int main(int argc, char* argv[]) {
                 auto topScores = scoreMgr.getTopRecords(beatmap.filePath, 5, currentPlayMode);
 
                 if (topScores.empty()) {
-                    drawCenteredText(textBuf, 160.0f, 118.0f, 0.36f, clrMuted, "¡Aun no hay puntuaciones guardadas en la SD!", 0.25f);
+                    drawCenteredText(textBuf, 160.0f, 118.0f, 0.36f, clrMuted, LOC(STR_RESULTS_NO_SCORES_SD), 0.25f);
                 } else {
                     for (size_t s = 0; s < topScores.size() && s < 5; ++s) {
                         const auto& r = topScores[s];
@@ -4364,31 +4832,1810 @@ int main(int argc, char* argv[]) {
             // 3. Tarjeta inferior de Logro / Estado
             if (newRecordAchieved) {
                 float flash = 0.70f + 0.30f * std::sin(animTick * 0.18f);
-                Ui::gradH(8.0f, 172.0f, 304.0f, 44.0f, 0.20f,
+                Ui::gradH(8.0f, 168.0f, 304.0f, 32.0f, 0.20f,
                           Ui::rgba(90, 32, 110, static_cast<u8>(240.0f * flash)),
                           Ui::rgba(30, 18, 55, 245));
-                drawRectOutline(8.0f, 172.0f, 304.0f, 44.0f, 1.2f, Ui::withAlpha(clrCursor, static_cast<u8>(255.0f * flash)), 0.25f);
-                Ui::pill(16.0f, 177.0f, 140.0f, 16.0f, 0.26f, Ui::rgba(255, 102, 171, 230));
-                drawCenteredText(textBuf, 86.0f, 185.0f, 0.34f, clrWhite, "¡NUEVO RECORD PERSONAL!", 0.28f);
+                drawRectOutline(8.0f, 168.0f, 304.0f, 32.0f, 1.2f, Ui::withAlpha(clrCursor, static_cast<u8>(255.0f * flash)), 0.25f);
+                Ui::pill(14.0f, 172.0f, 126.0f, 15.0f, 0.26f, Ui::rgba(255, 102, 171, 230));
+                drawCenteredText(textBuf, 77.0f, 179.5f, 0.30f, clrWhite, LOC(STR_RESULTS_NEW_RECORD), 0.28f);
 
                 char recSub[64];
-                std::snprintf(recSub, sizeof(recSub), "Guardado en leaderboard local  •  %d combo max", maxCombo);
-                drawText(textBuf, 16.0f, 199.0f, 0.28f, clr100, recSub, 0.28f);
+                std::snprintf(recSub, sizeof(recSub), "%s: %d  •  UR: %.1f", LOC(STR_MAX_COMBO), maxCombo, lastUnstableRate);
+                drawTextWithShadow(textBuf, 148.0f, 173.0f, 0.30f, clr100, recSub, 0.28f);
             } else {
-                Ui::panel(8.0f, 172.0f, 304.0f, 44.0f, 0.20f, Ui::rgba(22, 18, 34, 240));
+                Ui::panel(8.0f, 168.0f, 304.0f, 32.0f, 0.20f, Ui::rgba(22, 18, 34, 240), gradeClr);
                 char statSummary[96];
-                std::snprintf(statSummary, sizeof(statSummary), "Combo Maximo: %d / %d   •   UR: %.1f",
-                              maxCombo, beatmap.maxPossibleCombo, lastUnstableRate);
-                drawText(textBuf, 16.0f, 179.0f, 0.34f, clrWhite, statSummary, 0.25f);
-                drawText(textBuf, 16.0f, 198.0f, 0.28f, clrMuted,
-                         stageFailed ? "Partida no completada. ¡Vuelve a intentarlo!" : "Partida completada con exito.", 0.25f);
+                std::snprintf(statSummary, sizeof(statSummary), "%s: %d / %d   •   UR: %.1f",
+                              LOC(STR_MAX_COMBO), maxCombo, beatmap.maxPossibleCombo, lastUnstableRate);
+                drawTextWithShadow(textBuf, 16.0f, 172.0f, 0.32f, clrWhite, statSummary, 0.25f);
+                drawTextWithShadow(textBuf, 16.0f, 186.0f, 0.26f, clrMuted,
+                         stageFailed ? LOC(STR_RESULTS_FAILED_DESC) : LOC(STR_RESULTS_CLEARED_DESC), 0.25f);
             }
 
-            // Atajos
-            Ui::gradV(0.0f, 220.0f, 320.0f, 20.0f, 0.22f, Ui::rgba(14, 11, 24, 0), Ui::rgba(14, 11, 24, 240));
-            drawCenteredText(textBuf, 160.0f, 230.0f, 0.30f, clr300, "X: Cambiar Vista  |  A: Reintentar  |  B: Canciones", 0.28f);
+            // 4. Tres botones de acción interactivos estilo multijugador (táctiles y con atajo físico)
+            // Botón 1: Vista [X]
+            Ui::button(8.0f, 204.0f, 96.0f, 30.0f, 0.22f, Ui::rgba(20, 36, 60, 240), Ui::rgba(40, 180, 240), false);
+            Ui::pill(14.0f, 210.0f, 18.0f, 18.0f, 0.24f, Ui::rgba(40, 180, 240));
+            drawCenteredText(textBuf, 23.0f, 219.0f, 0.28f, Ui::rgba(0, 0, 0, 240), "X", 0.28f);
+            drawTextWithShadow(textBuf, 36.0f, 211.0f, 0.32f, clrWhite, (resultsBottomTab == 0) ? "VER TOP" : "CURVA", 0.28f);
+
+            // Botón 2: Reintentar [A] (resaltado con brillo verde como en multijugador)
+            Ui::button(111.0f, 204.0f, 98.0f, 30.0f, 0.22f, Ui::rgba(22, 52, 32, 245), Ui::rgba(30, 200, 85), true);
+            Ui::pill(117.0f, 210.0f, 18.0f, 18.0f, 0.24f, Ui::rgba(30, 200, 85));
+            drawCenteredText(textBuf, 126.0f, 219.0f, 0.28f, Ui::rgba(0, 0, 0, 240), "A", 0.28f);
+            drawTextWithShadow(textBuf, 140.0f, 211.0f, 0.32f, clrWhite, LOC(STR_RETRY), 0.28f);
+
+            // Botón 3: Salir a Canciones [B]
+            Ui::button(216.0f, 204.0f, 96.0f, 30.0f, 0.22f, Ui::rgba(42, 20, 52, 240), clrPrimary, false);
+            Ui::pill(222.0f, 210.0f, 18.0f, 18.0f, 0.24f, clrPrimary);
+            drawCenteredText(textBuf, 231.0f, 219.0f, 0.28f, clrWhite, "B", 0.28f);
+            drawTextWithShadow(textBuf, 244.0f, 211.0f, 0.32f, clrWhite, LOC(STR_SONGS), 0.28f);
 
             Ui::drawTransition(320.0f, 240.0f, screenFade, gradeClr);
+            C3D_FrameEnd(0);
+            continue;
+        }
+
+        auto findLocalMapFile = [&](const std::string& folder, const std::string& file) -> std::string {
+            std::string res = resolveFilePath(folder, file);
+            if (!res.empty()) return res;
+
+            std::string bFile = extractBaseFilename(file);
+            std::string bFolder = extractFolderName(folder);
+
+            // 1. Probar rutas alternativas estándar directas y en subcarpetas
+            const char* testDirs[] = {
+                "sdmc:/3ds/osu-3ds/songs/",
+                "sdmc:/osu-3ds/songs/",
+                "sdmc:/3ds/osu/Songs/",
+                "sdmc:/3ds/osu/songs/",
+                "romfs:/songs/",
+                "romfs:/"
+            };
+            for (const char* dir : testDirs) {
+                std::string p1 = std::string(dir) + bFolder + "/" + bFile;
+                FILE* f1 = std::fopen(p1.c_str(), "rb");
+                if (f1) { std::fclose(f1); return p1; }
+
+                std::string p2 = std::string(dir) + bFile;
+                FILE* f2 = std::fopen(p2.c_str(), "rb");
+                if (f2) { std::fclose(f2); return p2; }
+            }
+
+            // 1b. Si en la subcarpeta existe algún archivo .osu, intentar abrirlo
+            if (!bFolder.empty()) {
+                for (const char* dir : testDirs) {
+                    std::string fullDir = std::string(dir) + bFolder;
+                    DIR* d = opendir(fullDir.c_str());
+                    if (d) {
+                        struct dirent* ent;
+                        while ((ent = readdir(d)) != nullptr) {
+                            std::string fn = ent->d_name;
+                            if (fn.size() >= 5 && fn.substr(fn.size() - 4) == ".osu") {
+                                if (fn == bFile) {
+                                    std::string cand = fullDir + "/" + fn;
+                                    closedir(d);
+                                    return cand;
+                                }
+                            }
+                        }
+                        closedir(d);
+                    }
+                }
+            }
+
+            // 2. Buscar en la biblioteca de SongManager por nombre de archivo exacto
+            if (!bFile.empty()) {
+                for (const auto& s : songMgr.sets) {
+                    for (const auto& d : s.difficulties) {
+                        if (extractBaseFilename(d.osuPath) == bFile) {
+                            return d.osuPath;
+                        }
+                    }
+                }
+            }
+
+            // 3. Buscar en la biblioteca por Título y Dificultad/Versión exacta
+            if (!multiMgr.activeBeatmap.title.empty() && !multiMgr.activeBeatmap.version.empty()) {
+                for (const auto& s : songMgr.sets) {
+                    if (s.title == multiMgr.activeBeatmap.title) {
+                        for (const auto& d : s.difficulties) {
+                            if (d.version == multiMgr.activeBeatmap.version) {
+                                return d.osuPath;
+                            }
+                        }
+                    }
+                }
+            }
+
+            return "";
+        };
+
+        // =========================================================
+        // 4. BROWSER DE SALAS MULTIJUGADOR LOCAL (LISTA LAN)
+        // =========================================================
+        if (appState == STATE_MULTI_BROWSER) {
+            audio.update();
+            if (settings.songPreview && !audio.isPreviewLoading() && audio.isSongFinished()) {
+                rotateMenuSong();
+            }
+            multiMgr.updateBrowser();
+
+            // 1. Controles Físicos
+            if (kDown & KEY_B) {
+                audio.playHitSound(0);
+                audio.setLoop(false);
+                multiMgr.stop();
+                appState = STATE_MAIN_MENU;
+                continue;
+            }
+            if (kDown & KEY_SELECT) {
+                audio.playHitSound(1);
+                multiMgr.toggleNetworkMode();
+            }
+            if (kDown & KEY_Y) {
+                audio.playHitSound(1);
+                multiMgr.refreshBrowser();
+            }
+            if (kDown & KEY_X) {
+                audio.playHitSound(2);
+                QueuedBeatmap initMap;
+                if (!songMgr.sets.empty()) {
+                    const auto& s = songMgr.sets[selectedSet % songMgr.sets.size()];
+                    if (!s.difficulties.empty()) {
+                        const auto& d = s.difficulties[selectedDiff % s.difficulties.size()];
+                        initMap = QueuedBeatmap(s.title, s.artist, d.version, d.creator, s.folderPath, d.osuPath, d.audioPath, d.starRating, d.getBPM(), 90, 0);
+                    }
+                }
+                multiMgr.startHost(sysUser, initMap);
+                appState = STATE_MULTI_LOBBY;
+                continue;
+            }
+            if (kDown & (KEY_DUP | KEY_CPAD_UP)) {
+                if (multiMgr.selectedRoomIndex > 0) {
+                    multiMgr.selectedRoomIndex--;
+                    audio.playHitSound(0);
+                }
+            }
+            if (kDown & (KEY_DDOWN | KEY_CPAD_DOWN)) {
+                if (multiMgr.selectedRoomIndex + 1 < static_cast<int>(multiMgr.discoveredRooms.size())) {
+                    multiMgr.selectedRoomIndex++;
+                    audio.playHitSound(0);
+                }
+            }
+            if (kDown & KEY_A) {
+                if (!multiMgr.discoveredRooms.empty()) {
+                    if (multiMgr.joinSelectedRoom()) {
+                        audio.playHitSound(2);
+                        appState = STATE_MULTI_LOBBY;
+                        continue;
+                    }
+                }
+            }
+
+            // 2. Entradas Táctiles
+            if (touchJustDown) {
+                // Botón Modo de Red (UDS vs LAN) en la barra superior táctil
+                if (touch.px >= 135.0f && touch.px <= 220.0f && touch.py >= 4.0f && touch.py <= 28.0f) {
+                    audio.playHitSound(1);
+                    multiMgr.toggleNetworkMode();
+                }
+
+                // Botón Refrescar en la esquina superior derecha
+                if (touch.px >= 225.0f && touch.px <= 312.0f && touch.py >= 4.0f && touch.py <= 28.0f) {
+                    audio.playHitSound(1);
+                    multiMgr.refreshBrowser();
+                }
+
+                // Tocar tarjetas de salas en la lista
+                int startIdx = 0;
+                if (multiMgr.selectedRoomIndex >= 3) startIdx = multiMgr.selectedRoomIndex - 2;
+                for (int k = 0; k < 3 && (startIdx + k) < static_cast<int>(multiMgr.discoveredRooms.size()); ++k) {
+                    float cy = 34.0f + k * 48.0f;
+                    if (touch.px >= 10.0f && touch.px <= 310.0f && touch.py >= cy && touch.py <= cy + 44.0f) {
+                        int idx = startIdx + k;
+                        if (multiMgr.selectedRoomIndex == idx) {
+                            if (multiMgr.joinSelectedRoom()) {
+                                audio.playHitSound(2);
+                                appState = STATE_MULTI_LOBBY;
+                                break;
+                            }
+                        } else {
+                            multiMgr.selectedRoomIndex = idx;
+                            audio.playHitSound(1);
+                        }
+                    }
+                }
+                if (appState == STATE_MULTI_LOBBY) continue;
+
+                // Botón Volver [B] (inferior izquierdo)
+                if (touch.px >= 10.0f && touch.px <= 74.0f && touch.py >= 186.0f && touch.py <= 234.0f) {
+                    audio.playHitSound(0);
+                    multiMgr.stop();
+                    appState = STATE_MAIN_MENU;
+                    continue;
+                }
+
+                // Botón + CREAR SALA NUEVA [X] (inferior derecho)
+                if (touch.px >= 82.0f && touch.px <= 310.0f && touch.py >= 186.0f && touch.py <= 234.0f) {
+                    audio.playHitSound(2);
+                    QueuedBeatmap initMap;
+                    if (!songMgr.sets.empty()) {
+                        const auto& s = songMgr.sets[selectedSet % songMgr.sets.size()];
+                        if (!s.difficulties.empty()) {
+                            const auto& d = s.difficulties[selectedDiff % s.difficulties.size()];
+                            initMap = QueuedBeatmap(s.title, s.artist, d.version, d.creator, s.folderPath, d.osuPath, d.audioPath, d.starRating, d.getBPM(), 90, 0);
+                        }
+                    }
+                    multiMgr.startHost(sysUser, initMap);
+                    appState = STATE_MULTI_LOBBY;
+                    continue;
+                }
+            }
+
+            // 3. Renderizado Gráfico (Top & Bottom Screens)
+            C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
+
+            for (int eye = 0; eye < (stereoActive ? 2 : 1); ++eye) {
+                C3D_RenderTarget* curTop = (eye == 0) ? topScreen : topScreenRight;
+                float eyeSign = stereoActive ? ((eye == 0) ? 1.0f : -1.0f) : 0.0f;
+                C2D_TargetClear(curTop, clrBgDark);
+                C2D_SceneBegin(curTop);
+                auto depthShift = [&](float px) { return eyeSign * slider3D * px; };
+
+                Ui::backdrop(400.0f, 240.0f, static_cast<float>(animTick), Ui::rgba(18, 14, 30), Ui::rgba(10, 8, 18), clrPrimary, 0.01f);
+
+                // Barra Superior
+                float dBar = depthShift(1.8f);
+                Ui::pill(10.0f + dBar, 8.0f, 62.0f, 18.0f, 0.25f, Ui::rgba(255, 102, 170));
+                drawCenteredText(textBuf, 41.0f + dBar, 16.0f, 0.36f, clrWhite, "osu!3DS", 0.30f);
+
+                const char* topTitle = (multiMgr.netMode == MultiNetworkMode::NET_MODE_UDS)
+                    ? LOC(STR_MULTI_ROOMS_UDS)
+                    : LOC(STR_MULTI_ROOMS_LAN);
+                drawText(textBuf, 78.0f + dBar, 10.0f, 0.44f, clrWhite, topTitle, 0.30f);
+
+                char roomBadge[32];
+                std::snprintf(roomBadge, sizeof(roomBadge), "[%d Salas]", static_cast<int>(multiMgr.discoveredRooms.size()));
+                Ui::pill(280.0f + dBar, 8.0f, 58.0f, 18.0f, 0.25f, Ui::rgba(40, 215, 235));
+                drawCenteredText(textBuf, 309.0f + dBar, 16.0f, 0.30f, Ui::rgba(0, 0, 0, 240), roomBadge, 0.30f);
+
+                Ui::pill(344.0f + dBar, 8.0f, 48.0f, 18.0f, 0.25f, Ui::rgba(30, 25, 45, 220));
+                renderWifiBars(358.0f + dBar, 10.0f, 3, Ui::rgba(40, 215, 235), Ui::rgba(80, 80, 100));
+
+                // Si no hay salas descubiertas
+                if (multiMgr.discoveredRooms.empty()) {
+                    float radAnim = 16.0f + 12.0f * (0.5f + 0.5f * std::sin(animTick * 0.08f));
+                    float cx = 200.0f + depthShift(1.5f);
+                    float cy = 88.0f;
+                    Ui::glow(cx, cy, 0.15f, radAnim * 2.2f, Ui::rgba(40, 215, 235, 60), 4);
+                    Ui::panel(cx - 24.0f, cy - 24.0f, 48.0f, 48.0f, 0.20f, Ui::rgba(25, 22, 42, 235), Ui::rgba(40, 215, 235));
+                    renderWifiBars(cx - 9.0f, cy - 6.0f, 3, Ui::rgba(40, 215, 235), Ui::rgba(70, 70, 95));
+
+                    if (multiMgr.netMode == MultiNetworkMode::NET_MODE_UDS) {
+                        drawCenteredText(textBuf, cx, 126.0f, 0.42f, clrWhite, "Buscando 3DS cercanas por UDS Inalambrico...", 0.25f);
+                        drawCenteredText(textBuf, cx, 146.0f, 0.32f, clrMuted, "No se requiere conexion a internet ni router Wi-Fi.", 0.25f);
+                        drawCenteredText(textBuf, cx, 166.0f, 0.33f, Ui::rgba(255, 195, 45), "Pulsa [X] o toca el boton inferior para CREAR UNA SALA.", 0.25f);
+                        drawCenteredText(textBuf, cx, 182.0f, 0.29f, clrMuted, "Cualquier otra 3DS podra unirse y auto-descargar mapas.", 0.25f);
+                    } else {
+                        drawCenteredText(textBuf, cx, 126.0f, 0.42f, clrWhite, "Buscando salas en la red local LAN...", 0.25f);
+                        drawCenteredText(textBuf, cx, 146.0f, 0.32f, clrMuted, "No hay partidas activas transmitiendo por ahora.", 0.25f);
+                        drawCenteredText(textBuf, cx, 166.0f, 0.33f, Ui::rgba(255, 195, 45), "Pulsa [X] o toca el boton inferior para CREAR UNA SALA.", 0.25f);
+                        drawCenteredText(textBuf, cx, 182.0f, 0.29f, clrMuted, "Tu sala aparecera al instante a los demas jugadores.", 0.25f);
+                    }
+                } else {
+                    // Columna Izquierda: Tarjetas de Salas (hasta 3 visibles)
+                    int startIdx = 0;
+                    if (multiMgr.selectedRoomIndex >= 3) startIdx = multiMgr.selectedRoomIndex - 2;
+                    for (int r = 0; r < 3 && (startIdx + r) < static_cast<int>(multiMgr.discoveredRooms.size()); ++r) {
+                        int idx = startIdx + r;
+                        const auto& rm = multiMgr.discoveredRooms[idx];
+                        bool isSel = (idx == multiMgr.selectedRoomIndex);
+                        float ry = 32.0f + r * 56.0f;
+                        float rx = 10.0f + depthShift(isSel ? 3.0f : 1.5f);
+                        float rw = 224.0f;
+                        float rh = 52.0f;
+
+                        u32 borderClr = isSel ? Ui::rgba(255, 102, 170) : Ui::rgba(50, 44, 72);
+                        u32 bgClr = isSel ? Ui::rgba(36, 26, 54, 245) : Ui::rgba(22, 19, 36, 230);
+                        Ui::panel(rx, ry, rw, rh, 0.20f, bgClr, borderClr);
+
+                        if (isSel) {
+                            Ui::pill(rx + 4.0f, ry + 6.0f, 4.0f, rh - 12.0f, 0.25f, Ui::rgba(255, 102, 170));
+                        }
+
+                        drawText(textBuf, rx + 14.0f, ry + 6.0f, 0.38f, clrWhite, truncateString(rm.roomTitle, 22).c_str(), 0.25f);
+
+                        char subLine[64];
+                        std::snprintf(subLine, sizeof(subLine), "Host: %s . %s", rm.hostName.c_str(), truncateString(rm.mapTitle, 16).c_str());
+                        drawText(textBuf, rx + 14.0f, ry + 22.0f, 0.30f, clrMuted, subLine, 0.25f);
+
+                        char starsBuf[16];
+                        std::snprintf(starsBuf, sizeof(starsBuf), "%.2f*", rm.mapStars);
+                        u32 sClr = getStarRatingColor(rm.mapStars);
+                        Ui::pill(rx + 14.0f, ry + 36.0f, 40.0f, 11.0f, 0.26f, sClr);
+                        drawCenteredText(textBuf, rx + 34.0f, ry + 40.0f, 0.24f, Ui::rgba(0, 0, 0, 240), starsBuf, 0.28f);
+
+                        char plyBuf[16];
+                        std::snprintf(plyBuf, sizeof(plyBuf), "%d/%d", rm.playerCount, rm.maxPlayers);
+                        u32 pClr = (rm.playerCount >= rm.maxPlayers) ? Ui::rgba(215, 50, 60) : Ui::rgba(30, 195, 80);
+                        Ui::pill(rx + rw - 44.0f, ry + 10.0f, 36.0f, 15.0f, 0.26f, pClr);
+                        drawCenteredText(textBuf, rx + rw - 26.0f, ry + 16.5f, 0.28f, clrWhite, plyBuf, 0.28f);
+                    }
+
+                    // Columna Derecha: Panel de Detalles de la Sala Seleccionada
+                    float px = 240.0f + depthShift(2.0f);
+                    float py = 32.0f;
+                    float pw = 150.0f;
+                    float ph = 168.0f;
+                    Ui::panel(px, py, pw, ph, 0.20f, Ui::rgba(22, 19, 36, 245), Ui::rgba(40, 215, 235));
+
+                    const auto& selRm = multiMgr.discoveredRooms[multiMgr.selectedRoomIndex];
+                    drawText(textBuf, px + 8.0f, py + 8.0f, 0.36f, Ui::rgba(40, 215, 235), "DETALLES", 0.25f);
+                    drawText(textBuf, px + 8.0f, py + 26.0f, 0.30f, clrWhite, ("Host: " + truncateString(selRm.hostName, 12)).c_str(), 0.25f);
+
+                    const char* wcStr = (selRm.winCondition == WIN_SCORE) ? "Puntos" :
+                                        ((selRm.winCondition == WIN_ACCURACY) ? "Precision" : "Combo");
+                    drawText(textBuf, px + 8.0f, py + 42.0f, 0.28f, clrMuted, ("Regla: " + std::string(wcStr)).c_str(), 0.25f);
+
+                    const char* mmStr = (selRm.modMode == MODS_HOST_ONLY) ? "Host Only" : "FreeMod";
+                    drawText(textBuf, px + 8.0f, py + 56.0f, 0.28f, clrMuted, ("Mods: " + std::string(mmStr)).c_str(), 0.25f);
+
+                    drawText(textBuf, px + 8.0f, py + 74.0f, 0.30f, Ui::rgba(255, 195, 45), "Mapa:", 0.25f);
+                    drawText(textBuf, px + 8.0f, py + 88.0f, 0.29f, clrWhite, truncateString(selRm.mapTitle, 15).c_str(), 0.25f);
+                    drawText(textBuf, px + 8.0f, py + 102.0f, 0.26f, clrMuted, truncateString(selRm.mapArtist, 17).c_str(), 0.25f);
+                    drawText(textBuf, px + 8.0f, py + 116.0f, 0.26f, clrMuted, truncateString(selRm.mapVersion, 17).c_str(), 0.25f);
+
+                    char pingStr[24];
+                    std::snprintf(pingStr, sizeof(pingStr), (selRm.mode == MultiNetworkMode::NET_MODE_UDS) ? "Ping UDS: %d ms" : "Ping LAN: %d ms", selRm.pingMs);
+                    drawText(textBuf, px + 8.0f, py + 138.0f, 0.27f, Ui::rgba(70, 220, 120), pingStr, 0.25f);
+
+                    const char* joinHint = (selRm.playerCount >= selRm.maxPlayers) ? LOC(STR_MULTI_ROOM_FULL) : LOC(STR_MULTI_JOIN);
+                    u32 hintClr = (selRm.playerCount >= selRm.maxPlayers) ? Ui::rgba(215, 50, 60) : Ui::rgba(40, 215, 235);
+                    drawCenteredText(textBuf, px + pw * 0.5f, py + 154.0f, 0.30f, hintClr, joinHint, 0.25f);
+                }
+
+                // Barra Inferior de Atajos o Toast
+                if (multiMgr.hasToastNotice()) {
+                    float dToast = depthShift(4.0f);
+                    Ui::glow(200.0f + dToast, 218.0f, 0.88f, 160.0f, Ui::rgba(255, 60, 80, 110), 3);
+                    Ui::pill(30.0f + dToast, 206.0f, 340.0f, 24.0f, 0.90f, Ui::rgba(35, 12, 22, 245));
+                    drawRectOutline(30.0f + dToast, 206.0f, 340.0f, 24.0f, 1.2f, Ui::rgba(255, 80, 100), 0.92f);
+                    drawCenteredTextWithShadow(textBuf, 200.0f + dToast, 217.0f, 0.35f, Ui::rgba(255, 230, 230), multiMgr.toastNotice.c_str(), 0.95f);
+                } else {
+                    float byY = 219.0f;
+                    drawKeyBadge(textBuf, 12.0f + dBar, byY, "A", LOC(STR_MULTI_JOIN), Ui::rgba(50, 165, 255));
+                    drawKeyBadge(textBuf, 88.0f + dBar, byY, "X", LOC(STR_MULTI_CREATE_ROOM), Ui::rgba(50, 215, 115));
+                    drawKeyBadge(textBuf, 156.0f + dBar, byY, "Y", LOC(STR_SEARCH), Ui::rgba(255, 180, 40));
+                    drawKeyBadge(textBuf, 228.0f + dBar, byY, "B", LOC(STR_BACK), Ui::rgba(255, 75, 80));
+                }
+            }
+
+            // Renderizado Pantalla Inferior (Táctil)
+            C2D_TargetClear(bottomScreen, clrBgDark);
+            C2D_SceneBegin(bottomScreen);
+
+            Ui::backdrop(320.0f, 240.0f, static_cast<float>(animTick), Ui::rgba(18, 14, 30), Ui::rgba(10, 8, 18), clrPrimary, 0.01f);
+
+            const char* bottomTitle = (multiMgr.netMode == MultiNetworkMode::NET_MODE_UDS)
+                ? LOC(STR_MULTI_ROOMS_UDS)
+                : LOC(STR_MULTI_ROOMS_LAN);
+            drawText(textBuf, 10.0f, 8.0f, 0.36f, clrWhite, bottomTitle, 0.25f);
+
+            // Botón Alternar Modo (UDS / LAN)
+            bool isModeUds = (multiMgr.netMode == MultiNetworkMode::NET_MODE_UDS);
+            Ui::panel(148.0f, 4.0f, 74.0f, 22.0f, 0.20f, Ui::rgba(28, 24, 44, 240), isModeUds ? Ui::rgba(40, 215, 235) : Ui::rgba(255, 150, 40));
+            drawCenteredText(textBuf, 185.0f, 13.0f, 0.28f, isModeUds ? Ui::rgba(40, 215, 235) : Ui::rgba(255, 150, 40), isModeUds ? "MODO: UDS" : "MODO: LAN", 0.25f);
+
+            // Botón Refrescar
+            Ui::panel(226.0f, 4.0f, 84.0f, 22.0f, 0.20f, Ui::rgba(30, 26, 46, 240), Ui::rgba(40, 215, 235));
+            drawCenteredText(textBuf, 268.0f, 13.0f, 0.29f, Ui::rgba(40, 215, 235), "/ BUSCAR", 0.25f);
+
+            // Contenedor de la lista de salas
+            if (multiMgr.discoveredRooms.empty()) {
+                Ui::panel(10.0f, 36.0f, 300.0f, 138.0f, 0.20f, Ui::rgba(22, 19, 36, 240), Ui::rgba(45, 40, 65));
+                drawCenteredText(textBuf, 160.0f, 75.0f, 0.38f, clrWhite, "Ninguna sala encontrada", 0.25f);
+                drawCenteredText(textBuf, 160.0f, 98.0f, 0.31f, clrMuted, "Crea tu sala tocando el boton verde inferior.", 0.25f);
+                drawCenteredText(textBuf, 160.0f, 116.0f, 0.31f, Ui::rgba(40, 215, 235), "Cualquier 3DS conectada podra unirse al instante.", 0.25f);
+            } else {
+                int startIdx = 0;
+                if (multiMgr.selectedRoomIndex >= 3) startIdx = multiMgr.selectedRoomIndex - 2;
+                for (int k = 0; k < 3 && (startIdx + k) < static_cast<int>(multiMgr.discoveredRooms.size()); ++k) {
+                    int idx = startIdx + k;
+                    const auto& rm = multiMgr.discoveredRooms[idx];
+                    bool isSel = (idx == multiMgr.selectedRoomIndex);
+                    float cy = 34.0f + k * 48.0f;
+                    float cx = 10.0f;
+                    float cw = 300.0f;
+                    float ch = 44.0f;
+
+                    u32 bClr = isSel ? Ui::rgba(255, 102, 170) : Ui::rgba(50, 44, 72);
+                    u32 bg = isSel ? Ui::rgba(38, 28, 56, 245) : Ui::rgba(22, 19, 36, 230);
+                    Ui::panel(cx, cy, cw, ch, 0.20f, bg, bClr);
+
+                    if (isSel) {
+                        Ui::pill(cx + 4.0f, cy + 5.0f, 4.0f, ch - 10.0f, 0.25f, Ui::rgba(255, 102, 170));
+                    }
+
+                    drawText(textBuf, cx + 14.0f, cy + 5.0f, 0.38f, clrWhite, truncateString(rm.roomTitle, 24).c_str(), 0.25f);
+
+                    char subTxt[64];
+                    std::snprintf(subTxt, sizeof(subTxt), "%s Host: %s . %s", (rm.mode == MultiNetworkMode::NET_MODE_UDS) ? "[UDS]" : "[LAN]", rm.hostName.c_str(), truncateString(rm.mapTitle, 16).c_str());
+                    drawText(textBuf, cx + 14.0f, cy + 22.0f, 0.30f, clrMuted, subTxt, 0.25f);
+
+                    char pTxt[16];
+                    std::snprintf(pTxt, sizeof(pTxt), "%d/%d", rm.playerCount, rm.maxPlayers);
+                    Ui::pill(cx + cw - 52.0f, cy + 12.0f, 42.0f, 20.0f, 0.26f, isSel ? Ui::rgba(255, 102, 170) : Ui::rgba(40, 215, 235));
+                    drawCenteredText(textBuf, cx + cw - 31.0f, cy + 20.0f, 0.30f, isSel ? clrWhite : Ui::rgba(0, 0, 0, 240), isSel ? LOC(STR_MULTI_JOIN) : pTxt, 0.28f);
+                }
+            }
+
+            // Barra de Acción Inferior: VOLVER y + CREAR SALA NUEVA estilo multijugador
+            Ui::button(10.0f, 186.0f, 68.0f, 44.0f, 0.20f, Ui::rgba(32, 26, 44, 240), Ui::rgba(65, 55, 85), false);
+            Ui::pill(16.0f, 192.0f, 18.0f, 18.0f, 0.24f, Ui::rgba(65, 55, 85));
+            drawCenteredText(textBuf, 25.0f, 201.0f, 0.28f, clrWhite, "B", 0.28f);
+            drawTextWithShadow(textBuf, 38.0f, 193.0f, 0.32f, clrMuted, LOC(STR_BACK), 0.28f);
+            drawTextWithShadow(textBuf, 38.0f, 207.0f, 0.26f, clrMuted, "Menu", 0.28f);
+
+            Ui::button(84.0f, 186.0f, 226.0f, 44.0f, 0.20f, Ui::rgba(25, 140, 65, 250), Ui::rgba(140, 255, 180), true);
+            Ui::pill(92.0f, 196.0f, 24.0f, 22.0f, 0.25f, Ui::rgba(140, 255, 180));
+            drawCenteredText(textBuf, 104.0f, 207.0f, 0.34f, Ui::rgba(10, 45, 20, 245), "X", 0.30f);
+            drawTextWithShadow(textBuf, 124.0f, 197.0f, 0.44f, clrWhite, LOC(STR_MULTI_CREATE_ROOM), 0.30f);
+
+            Ui::drawTransition(320.0f, 240.0f, screenFade, clrPrimary);
+            C3D_FrameEnd(0);
+            continue;
+        }
+
+        // =========================================================
+        // 4A. SALA MULTIJUGADOR LOCAL (LOBBY HASTA 4 JUGADORES)
+        // =========================================================
+        if (appState == STATE_MULTI_LOBBY) {
+            audio.update();
+            if (settings.songPreview && !audio.isPreviewLoading() && audio.isSongFinished()) {
+                rotateMenuSong();
+            }
+            multiMgr.update(false);
+
+            if (!multiMgr.inMultiplayer) {
+                multiMgr.startBrowser(sysUser);
+                appState = STATE_MULTI_BROWSER;
+                continue;
+            }
+
+            // Verificación y estado del beatmap para jugadores locales (con caché para evitar lecturas de SD cada frame)
+            static std::string s_lastCheckedSongKey = "";
+            static bool s_cachedHasLocalMap = true;
+
+            // Si se acaba de descargar un mapa por UDS o TCP, indexarlo de inmediato en SongManager
+            if (!multiMgr.lastDownloadedOsuPath.empty()) {
+                songMgr.addSingleBeatmap(multiMgr.lastDownloadedOsuPath, false, &scoreMgr);
+                multiMgr.lastDownloadedOsuPath.clear();
+                s_lastCheckedSongKey = "";
+            }
+
+            std::string curSongKey = multiMgr.activeBeatmap.folderPath + "::" + multiMgr.activeBeatmap.osuFilename + "::" + multiMgr.activeBeatmap.version;
+            if (curSongKey != s_lastCheckedSongKey || 
+                ((multiMgr.players[multiMgr.localSlot].status == STATUS_NOT_READY || multiMgr.players[multiMgr.localSlot].status == STATUS_MISSING_MAP) && !s_cachedHasLocalMap)) {
+                s_lastCheckedSongKey = curSongKey;
+                if (!multiMgr.activeBeatmap.osuFilename.empty()) {
+                    std::string existingPath = findLocalMapFile(multiMgr.activeBeatmap.folderPath, multiMgr.activeBeatmap.osuFilename);
+                    s_cachedHasLocalMap = !existingPath.empty();
+                } else {
+                    s_cachedHasLocalMap = true;
+                }
+            }
+            bool hasLocalMap = s_cachedHasLocalMap;
+
+            if (!multiMgr.activeBeatmap.osuFilename.empty()) {
+                if (!hasLocalMap) {
+                    if (multiMgr.players[multiMgr.localSlot].status != STATUS_DOWNLOADING &&
+                        multiMgr.players[multiMgr.localSlot].status != STATUS_MISSING_MAP) {
+                        multiMgr.players[multiMgr.localSlot].status = STATUS_MISSING_MAP;
+                        if (multiMgr.isHost()) {
+                            multiMgr.broadcastLobbyState();
+                        } else {
+                            multiMgr.sendPlayerUpdate();
+                        }
+                    }
+                } else {
+                    if (multiMgr.players[multiMgr.localSlot].status == STATUS_MISSING_MAP) {
+                        multiMgr.players[multiMgr.localSlot].status = multiMgr.isHost() ? STATUS_READY : STATUS_NOT_READY;
+                        if (multiMgr.isHost()) {
+                            multiMgr.broadcastLobbyState();
+                        } else {
+                            multiMgr.sendPlayerUpdate();
+                        }
+                    }
+                }
+            }
+
+            // Inicio de partida sincronizado: transición al estado de sincronización y carga
+            if (multiMgr.matchStarted) {
+                multiSyncLoaded = false;
+                multiMgr.matchGo = false;
+                appState = STATE_MULTI_SYNC;
+                continue;
+            }
+
+            // Controles físicos
+            if (kDown & KEY_B) {
+                if (multiQueuePickerOpen) {
+                    multiQueuePickerOpen = false;
+                    audio.playHitSound(0);
+                } else {
+                    audio.playHitSound(0);
+                    if (multiMgr.isHost()) {
+                        multiMgr.notifyRoomClosed();
+                    } else {
+                        multiMgr.notifyPlayerLeave();
+                    }
+                    multiMgr.stop();
+                    multiMgr.startBrowser(sysUser);
+                    appState = STATE_MULTI_BROWSER;
+                    continue;
+                }
+            }
+            if (kDown & KEY_A) {
+                audio.playHitSound(2);
+                if (multiQueuePickerOpen) {
+                    if (!songMgr.sets.empty()) {
+                        const auto& s = songMgr.sets[multiQueuePickerIndex % songMgr.sets.size()];
+                        if (!s.difficulties.empty()) {
+                            int diffIdx = multiQueuePickerDiff % s.difficulties.size();
+                            const auto& d = s.difficulties[diffIdx];
+                            QueuedBeatmap qm(s.title, s.artist, d.version, d.creator, s.folderPath, d.osuPath, d.audioPath, d.starRating, d.getBPM(), 90, multiMgr.localSlot);
+                            if (multiMgr.isHost()) {
+                                if (multiPickerAction == PICKER_ACTION_QUEUE) {
+                                    multiMgr.enqueueBeatmap(qm);
+                                } else {
+                                    multiMgr.setActiveBeatmap(qm);
+                                }
+                            } else {
+                                multiMgr.requestQueueMap(qm);
+                            }
+                        }
+                    }
+                    multiQueuePickerOpen = false;
+                } else {
+                    if (!hasLocalMap || multiMgr.players[multiMgr.localSlot].status == STATUS_MISSING_MAP) {
+                        if (multiMgr.players[multiMgr.localSlot].status != STATUS_DOWNLOADING) {
+                            multiMgr.startMapDownload(multiMgr.connectedHostIp);
+                        }
+                    } else if (multiMgr.isHost()) {
+                        if (multiMgr.areAllPlayersReady()) {
+                            multiMgr.sendStartMatch();
+                        }
+                    } else {
+                        multiMgr.toggleLocalReady();
+                    }
+                }
+            }
+            if (kDown & KEY_Y) {
+                audio.playHitSound(0);
+                appState = STATE_MODS_SELECT;
+                continue;
+            }
+            if (kDown & KEY_X) {
+                audio.playHitSound(0);
+                multiPickerAction = PICKER_ACTION_QUEUE;
+                appState = STATE_SONG_SELECT;
+                continue;
+            }
+            // Roles fijos: KEY_SELECT no alterna roles para garantizar estabilidad absoluta de conexión
+            if (multiQueuePickerOpen) {
+                if (kDown & (KEY_DUP | KEY_CPAD_UP)) {
+                    if (multiQueuePickerIndex > 0) {
+                        multiQueuePickerIndex--;
+                        multiQueuePickerDiff = 0;
+                    }
+                    audio.playHitSound(0);
+                }
+                if (kDown & (KEY_DDOWN | KEY_CPAD_DOWN)) {
+                    if (multiQueuePickerIndex + 1 < static_cast<int>(songMgr.sets.size())) {
+                        multiQueuePickerIndex++;
+                        multiQueuePickerDiff = 0;
+                    }
+                    audio.playHitSound(0);
+                }
+                if (kDown & (KEY_DLEFT | KEY_CPAD_LEFT)) {
+                    if (!songMgr.sets.empty()) {
+                        const auto& s = songMgr.sets[multiQueuePickerIndex % songMgr.sets.size()];
+                        if (multiQueuePickerDiff > 0) {
+                            multiQueuePickerDiff--;
+                            audio.playHitSound(0);
+                        } else if (!s.difficulties.empty()) {
+                            multiQueuePickerDiff = static_cast<int>(s.difficulties.size()) - 1;
+                            audio.playHitSound(0);
+                        }
+                    }
+                }
+                if (kDown & (KEY_DRIGHT | KEY_CPAD_RIGHT)) {
+                    if (!songMgr.sets.empty()) {
+                        const auto& s = songMgr.sets[multiQueuePickerIndex % songMgr.sets.size()];
+                        if (multiQueuePickerDiff + 1 < static_cast<int>(s.difficulties.size())) {
+                            multiQueuePickerDiff++;
+                            audio.playHitSound(0);
+                        } else {
+                            multiQueuePickerDiff = 0;
+                            audio.playHitSound(0);
+                        }
+                    }
+                }
+            }
+
+            // Entradas táctiles
+            if (touchJustDown) {
+                if (multiQueuePickerOpen) {
+                    bool touchedSong = false;
+                    for (int k = 0; k < 4; ++k) {
+                        float ry = 38.0f + k * 40.0f;
+                        if (touch.py >= ry && touch.py <= ry + 36.0f) {
+                            int targetIdx = multiQueuePickerIndex - (multiQueuePickerIndex % 4) + k;
+                            if (targetIdx < static_cast<int>(songMgr.sets.size())) {
+                                multiQueuePickerIndex = targetIdx;
+                                const auto& s = songMgr.sets[targetIdx];
+                                if (!s.difficulties.empty()) {
+                                    int diffIdx = (targetIdx == multiQueuePickerIndex) ? (multiQueuePickerDiff % s.difficulties.size()) : 0;
+                                    const auto& d = s.difficulties[diffIdx];
+                                    QueuedBeatmap qm(s.title, s.artist, d.version, d.creator, s.folderPath, d.osuPath, d.audioPath, d.starRating, d.getBPM(), 90, multiMgr.localSlot);
+                                    if (multiMgr.isHost()) {
+                                        multiMgr.hostChangingSong = false;
+                                        if (multiPickerAction == PICKER_ACTION_QUEUE) {
+                                            multiMgr.enqueueBeatmap(qm);
+                                        } else {
+                                            multiMgr.setActiveBeatmap(qm);
+                                        }
+                                    } else {
+                                        multiMgr.requestQueueMap(qm);
+                                    }
+                                    audio.playHitSound(2);
+                                }
+                            }
+                            multiQueuePickerOpen = false;
+                            touchedSong = true;
+                            break;
+                        }
+                    }
+                    if (!touchedSong && touch.py >= 196.0f && touch.py <= 234.0f) {
+                        if (!songMgr.sets.empty()) {
+                            const auto& s = songMgr.sets[multiQueuePickerIndex % songMgr.sets.size()];
+                            if (!s.difficulties.empty()) {
+                                int diffIdx = multiQueuePickerDiff % s.difficulties.size();
+                                const auto& d = s.difficulties[diffIdx];
+                                QueuedBeatmap qm(s.title, s.artist, d.version, d.creator, s.folderPath, d.osuPath, d.audioPath, d.starRating, d.getBPM(), 90, multiMgr.localSlot);
+
+                                if (multiMgr.isHost()) {
+                                    multiMgr.hostChangingSong = false;
+
+                                    if (touch.px >= 14.0f && touch.px <= 154.0f) {
+                                        // Tocar botón [A] CAMBIAR MAPA
+                                        multiMgr.setActiveBeatmap(qm);
+                                        audio.playHitSound(2);
+                                        multiQueuePickerOpen = false;
+                                    } else if (touch.px >= 164.0f && touch.px <= 306.0f) {
+                                        // Tocar botón [X] + A LA COLA
+                                        multiMgr.enqueueBeatmap(qm);
+                                        audio.playHitSound(2);
+                                        multiQueuePickerOpen = false;
+                                    }
+                                } else {
+                                    // Cliente: sugerir a la cola
+                                    multiMgr.requestQueueMap(qm);
+                                    audio.playHitSound(2);
+                                    multiQueuePickerOpen = false;
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    // Roles estrictamente fijos: no se permite alternar modo Host/Cliente tocando la pantalla
+
+                    // Pestañas de Criterio de Victoria (WinCondition)
+                    if (touch.py >= 46.0f && touch.py <= 72.0f) {
+                        if (touch.px >= 14.0f && touch.px <= 104.0f) {
+                            if (multiMgr.isHost()) multiMgr.setWinConditionExplicit(WIN_SCORE);
+                            audio.playHitSound(0);
+                        } else if (touch.px >= 112.0f && touch.px <= 202.0f) {
+                            if (multiMgr.isHost()) multiMgr.setWinConditionExplicit(WIN_ACCURACY);
+                            audio.playHitSound(0);
+                        } else if (touch.px >= 210.0f && touch.px <= 304.0f) {
+                            if (multiMgr.isHost()) multiMgr.setWinConditionExplicit(WIN_COMBO);
+                            audio.playHitSound(0);
+                        }
+                    }
+
+                    if (multiMgr.isHost()) {
+                        // Tarjeta 1: Modificadores (x: 10..104, y: 82..150)
+                        if (touch.px >= 10.0f && touch.px <= 104.0f && touch.py >= 82.0f && touch.py <= 150.0f) {
+                            audio.playHitSound(0);
+                            appState = STATE_MODS_SELECT;
+                            continue;
+                        }
+                        // Tarjeta 2: Cambiar Canción Actual (x: 113..207, y: 82..150)
+                        if (touch.px >= 113.0f && touch.px <= 207.0f && touch.py >= 82.0f && touch.py <= 150.0f) {
+                            if (multiMgr.isAnyClientDownloading()) {
+                                audio.playHitSound(4); // Bloqueado: jugador descargando
+                                continue;
+                            }
+                            audio.playHitSound(0);
+                            multiPickerAction = PICKER_ACTION_ACTIVE;
+                            multiMgr.hostChangingSong = true;
+                            multiMgr.broadcastLobbyState();
+                            appState = STATE_SONG_SELECT;
+                            continue;
+                        }
+                        // Tarjeta 3: + Añadir a la Cola (x: 216..310, y: 82..150)
+                        if (touch.px >= 216.0f && touch.px <= 310.0f && touch.py >= 82.0f && touch.py <= 150.0f) {
+                            audio.playHitSound(0);
+                            multiPickerAction = PICKER_ACTION_QUEUE;
+                            appState = STATE_SONG_SELECT;
+                            continue;
+                        }
+                    } else {
+                        // Cliente: 2 tarjetas
+                        // Tarjeta 1: Modificadores (x: 12..154, y: 82..150)
+                        if (touch.px >= 12.0f && touch.px <= 154.0f && touch.py >= 82.0f && touch.py <= 150.0f) {
+                            audio.playHitSound(0);
+                            appState = STATE_MODS_SELECT;
+                            continue;
+                        }
+                        // Tarjeta 2: + Añadir Canción (Cola) (x: 166..308, y: 82..150)
+                        if (touch.px >= 166.0f && touch.px <= 308.0f && touch.py >= 82.0f && touch.py <= 150.0f) {
+                            audio.playHitSound(0);
+                            multiPickerAction = PICKER_ACTION_QUEUE;
+                            appState = STATE_SONG_SELECT;
+                            continue;
+                        }
+                    }
+
+                    // Botón Inferior Grande: LISTO / INICIAR PARTIDA / DESCARGAR MAPA
+                    if (touch.px >= 12.0f && touch.px <= 308.0f && touch.py >= 176.0f && touch.py <= 230.0f) {
+                        audio.playHitSound(2);
+                        if (!hasLocalMap || multiMgr.players[multiMgr.localSlot].status == STATUS_MISSING_MAP) {
+                            if (multiMgr.players[multiMgr.localSlot].status != STATUS_DOWNLOADING) {
+                                multiMgr.startMapDownload(multiMgr.connectedHostIp);
+                            }
+                        } else if (multiMgr.isHost()) {
+                            if (multiMgr.areAllPlayersReady()) {
+                                multiMgr.sendStartMatch();
+                            }
+                        } else {
+                            multiMgr.toggleLocalReady();
+                        }
+                    }
+                }
+            }
+
+            // RENDERIZADO DEL LOBBY (PANTALLA SUPERIOR E INFERIOR)
+            C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
+
+            for (int eye = 0; eye < (stereoActive ? 2 : 1); ++eye) {
+                C3D_RenderTarget* curTop = (eye == 0) ? topScreen : topScreenRight;
+                float eyeSign = stereoActive ? ((eye == 0) ? 1.0f : -1.0f) : 0.0f;
+                C2D_TargetClear(curTop, clrBgDark);
+                C2D_SceneBegin(curTop);
+                auto depthShift = [&](float px) { return eyeSign * slider3D * px; };
+
+                // float dBg = depthShift(-3.0f);
+                Ui::backdrop(400.0f, 240.0f, static_cast<float>(animTick), Ui::rgba(18, 14, 30), Ui::rgba(10, 8, 18), clrPrimary, 0.01f);
+
+                // 1. Barra Superior del Lobby
+                float dBar = depthShift(1.8f);
+                Ui::pill(10.0f + dBar, 9.0f, 62.0f, 18.0f, 0.25f, Ui::rgba(255, 102, 170));
+                drawCenteredText(textBuf, 41.0f + dBar, 17.0f, 0.36f, clrWhite, "osu!3DS", 0.30f);
+
+                const char* lobbyTitle = (multiMgr.netMode == MultiNetworkMode::NET_MODE_UDS)
+                    ? "SALA INALAMBRICA (UDS)"
+                    : "SALA MULTIJUGADOR (LAN)";
+                drawText(textBuf, 78.0f + dBar, 11.0f, 0.44f, clrWhite, lobbyTitle, 0.30f);
+
+                char slotBadge[16];
+                std::snprintf(slotBadge, sizeof(slotBadge), "[%d Slots]", multiMgr.getActivePlayerCount());
+                Ui::pill(240.0f + dBar, 9.0f, 52.0f, 18.0f, 0.25f, Ui::rgba(20, 160, 210, 220));
+                drawCenteredText(textBuf, 266.0f + dBar, 17.0f, 0.32f, clrWhite, slotBadge, 0.30f);
+
+                // Regla de sala en la esquina superior derecha
+                const char* ruleLabel = (multiMgr.winCondition == WIN_SCORE) ? "Regla: Puntuacion" :
+                                        ((multiMgr.winCondition == WIN_ACCURACY) ? "Regla: Precision (Acc %)" : "Regla: Max Combo");
+                Ui::pill(296.0f + dBar, 9.0f, 96.0f, 18.0f, 0.25f, Ui::rgba(45, 38, 20, 220));
+                drawRectOutline(296.0f + dBar, 9.0f, 96.0f, 18.0f, 1.2f, Ui::rgba(255, 195, 45), 0.26f);
+                drawCenteredText(textBuf, 344.0f + dBar, 17.0f, 0.30f, Ui::rgba(255, 205, 50), ruleLabel, 0.30f);
+
+                // 2. Columna Izquierda: 4 Tarjetas de Jugadores (Slots 0..3)
+                float dCards = depthShift(2.5f);
+                for (int i = 0; i < MULTI_MAX_PLAYERS; ++i) {
+                    float cy = 34.0f + i * 44.0f;
+                    float cx = 10.0f + dCards;
+                    float cw = 196.0f;
+                    float ch = 40.0f;
+
+                    const auto& p = multiMgr.players[i];
+                    if (p.active) {
+                        u32 borderClr = p.isHost ? Ui::rgba(255, 195, 45) :
+                                        (p.isLocal ? Ui::rgba(40, 215, 235) :
+                                        ((i == 2) ? Ui::rgba(180, 80, 240) : Ui::rgba(60, 200, 120)));
+
+                        Ui::panel(cx, cy, cw, ch, 0.20f, Ui::rgba(22, 19, 36, 240), borderClr);
+
+                        // Nombre de jugador
+                        drawText(textBuf, cx + 8.0f, cy + 5.0f, 0.44f, clrWhite, p.name, 0.25f);
+
+                        // Píldora de rol: HOST o TÚ
+                        if (p.isHost) {
+                            Ui::pill(cx + 96.0f, cy + 6.0f, 36.0f, 13.0f, 0.26f, Ui::rgba(255, 130, 20));
+                            drawCenteredText(textBuf, cx + 114.0f, cy + 12.0f, 0.28f, clrWhite, "HOST", 0.30f);
+                        } else if (p.isLocal) {
+                            Ui::pill(cx + 96.0f, cy + 6.0f, 26.0f, 13.0f, 0.26f, Ui::rgba(40, 215, 235));
+                            drawCenteredText(textBuf, cx + 109.0f, cy + 12.0f, 0.28f, Ui::rgba(0, 0, 0, 240), "TU", 0.30f);
+                        }
+
+                        // Subtítulo: Mods equipados y Ping
+                        char subStr[48];
+                        std::string modStr = (p.activeMods != MOD_NONE) ? formatModsString(p.activeMods) : "Sin Mods";
+                        std::snprintf(subStr, sizeof(subStr), "+%s . %ums", modStr.c_str(), p.pingMs);
+                        drawText(textBuf, cx + 8.0f, cy + 22.0f, 0.32f, clrMuted, subStr, 0.25f);
+
+                        // Píldora de estado en la derecha de la tarjeta
+                        if (p.status == STATUS_READY) {
+                            Ui::pill(cx + cw - 52.0f, cy + 12.0f, 44.0f, 17.0f, 0.26f, Ui::rgba(30, 165, 80));
+                            drawCenteredText(textBuf, cx + cw - 30.0f, cy + 20.0f, 0.32f, clrWhite, "LISTO", 0.30f);
+                        } else if (p.status == STATUS_DOWNLOADING) {
+                            char dlPill[16];
+                            std::snprintf(dlPill, sizeof(dlPill), "%d%%", p.downloadProgress);
+                            Ui::pill(cx + cw - 62.0f, cy + 12.0f, 54.0f, 17.0f, 0.26f, Ui::rgba(220, 120, 20));
+                            drawCenteredText(textBuf, cx + cw - 35.0f, cy + 20.0f, 0.30f, clrWhite, dlPill, 0.30f);
+                        } else if (p.status == STATUS_MISSING_MAP) {
+                            Ui::pill(cx + cw - 62.0f, cy + 12.0f, 54.0f, 17.0f, 0.26f, Ui::rgba(215, 50, 60));
+                            drawCenteredText(textBuf, cx + cw - 35.0f, cy + 20.0f, 0.30f, clrWhite, "NO MAP", 0.30f);
+                        } else {
+                            Ui::pill(cx + cw - 62.0f, cy + 12.0f, 54.0f, 17.0f, 0.26f, Ui::rgba(45, 40, 60));
+                            drawCenteredText(textBuf, cx + cw - 35.0f, cy + 20.0f, 0.30f, clrMuted, "ESPERANDO", 0.30f);
+                        }
+                    } else {
+                        Ui::panel(cx, cy, cw, ch, 0.18f, Ui::rgba(16, 14, 26, 170));
+                        drawRectOutline(cx, cy, cw, ch, 1.0f, Ui::rgba(40, 36, 56), 0.20f);
+                        drawCenteredText(textBuf, cx + cw * 0.5f, cy + 19.0f, 0.34f, clrMuted, "Ranura Disponible", 0.25f);
+                    }
+                }
+
+                // 3. Columna Derecha: Mapa Actual y Fila de Canciones (Map Queue)
+                float dRight = depthShift(2.0f);
+                float rx = 214.0f + dRight;
+                float rw = 176.0f;
+
+                // Tarjeta 1: SIGUIENTE MAPA
+                Ui::panel(rx, 34.0f, rw, 80.0f, 0.20f, Ui::rgba(20, 18, 34, 240), multiMgr.hostChangingSong ? Ui::rgba(255, 185, 45) : Ui::rgba(40, 215, 235));
+                if (multiMgr.hostChangingSong) {
+                    Ui::glow(rx + rw * 0.5f, 42.0f, 0.22f, 70.0f, Ui::rgba(255, 185, 45, 90), 2);
+                    drawText(textBuf, rx + 8.0f, 38.0f, 0.32f, Ui::rgba(255, 195, 45), "CAMBIANDO MAPA...", 0.25f);
+                    drawCenteredTextWithShadow(textBuf, rx + rw * 0.5f, 62.0f, 0.38f, Ui::rgba(255, 215, 60), "El anfitrion esta", 0.25f);
+                    drawCenteredTextWithShadow(textBuf, rx + rw * 0.5f, 80.0f, 0.36f, clrWhite, "eligiendo cancion...", 0.25f);
+                } else {
+                    drawText(textBuf, rx + 8.0f, 38.0f, 0.32f, Ui::rgba(40, 215, 235), "SIGUIENTE MAPA", 0.25f);
+
+                    char lenStr[16];
+                    std::snprintf(lenStr, sizeof(lenStr), "%d:%02d", multiMgr.activeBeatmap.lengthSec / 60, multiMgr.activeBeatmap.lengthSec % 60);
+                    drawText(textBuf, rx + rw - 36.0f, 38.0f, 0.32f, clrMuted, lenStr, 0.25f);
+
+                    std::string dispTitle = multiMgr.activeBeatmap.title;
+                    drawText(textBuf, rx + 8.0f, 52.0f, 0.44f, clrWhite, truncateString(dispTitle, 16).c_str(), 0.25f);
+
+                    std::string dispArtist = multiMgr.activeBeatmap.artist;
+                    drawText(textBuf, rx + 8.0f, 68.0f, 0.34f, clrMuted, truncateString(dispArtist, 20).c_str(), 0.25f);
+
+                    char starsStr[24];
+                    std::snprintf(starsStr, sizeof(starsStr), "* %.2f", multiMgr.activeBeatmap.starRating);
+                    drawText(textBuf, rx + 8.0f, 86.0f, 0.36f, Ui::rgba(255, 205, 50), starsStr, 0.25f);
+
+                    char bpmStr[16];
+                    std::snprintf(bpmStr, sizeof(bpmStr), "%.0f BPM", multiMgr.activeBeatmap.bpm);
+                    drawText(textBuf, rx + rw - 54.0f, 86.0f, 0.34f, clrMuted, bpmStr, 0.25f);
+                }
+
+                // Tarjeta 2: EN COLA (Map Queue)
+                Ui::panel(rx, 120.0f, rw, 90.0f, 0.20f, Ui::rgba(18, 16, 30, 240), Ui::rgba(85, 75, 110));
+                char qHeader[24];
+                std::snprintf(qHeader, sizeof(qHeader), "EN COLA (%d)", static_cast<int>(multiMgr.mapQueue.size()));
+                drawText(textBuf, rx + 8.0f, 124.0f, 0.32f, Ui::rgba(160, 150, 190), qHeader, 0.25f);
+
+                if (multiMgr.mapQueue.empty()) {
+                    drawCenteredTextWithShadow(textBuf, rx + rw * 0.5f, 150.0f, 0.36f, Ui::rgba(220, 215, 240), "Cola vacia", 0.25f);
+                    Ui::pill(rx + 14.0f, 168.0f, rw - 28.0f, 22.0f, 0.24f, Ui::rgba(20, 50, 75, 240));
+                    drawRectOutline(rx + 14.0f, 168.0f, rw - 28.0f, 22.0f, 1.2f, Ui::rgba(40, 215, 235), 0.26f);
+                    Ui::pill(rx + 20.0f, 172.0f, 14.0f, 14.0f, 0.27f, Ui::rgba(40, 215, 235));
+                    drawCenteredText(textBuf, rx + 27.0f, 179.0f, 0.28f, Ui::rgba(0, 0, 0, 245), "X", 0.30f);
+                    drawTextWithShadow(textBuf, rx + 38.0f, 172.0f, 0.32f, Ui::rgba(180, 240, 255), "Pulsa para anadir", 0.30f);
+                } else {
+                    for (size_t q = 0; q < multiMgr.mapQueue.size() && q < 3; ++q) {
+                        float qy = 142.0f + q * 22.0f;
+                        Ui::panel(rx + 6.0f, qy, rw - 12.0f, 18.0f, 0.22f, Ui::rgba(26, 22, 42, 220));
+                        char qItemStr[48];
+                        std::snprintf(qItemStr, sizeof(qItemStr), "#%u %s", static_cast<unsigned int>(q + 2), multiMgr.mapQueue[q].title.c_str());
+                        drawTextWithShadow(textBuf, rx + 10.0f, qy + 2.0f, 0.32f, clrWhite, truncateString(qItemStr, 22).c_str(), 0.26f);
+                    }
+                }
+
+                // Barra inferior de atajos de control o Toast
+                Ui::gradV(0.0f, 214.0f, 400.0f, 26.0f, 0.3f, Ui::rgba(14, 11, 26, 120), Ui::rgba(14, 11, 26, 250));
+                if (multiMgr.hasToastNotice()) {
+                    float dToast = depthShift(4.0f);
+                    Ui::glow(200.0f + dToast, 224.0f, 0.88f, 160.0f, Ui::rgba(255, 60, 80, 110), 3);
+                    Ui::pill(30.0f + dToast, 212.0f, 340.0f, 24.0f, 0.90f, Ui::rgba(35, 12, 22, 245));
+                    drawRectOutline(30.0f + dToast, 212.0f, 340.0f, 24.0f, 1.2f, Ui::rgba(255, 80, 100), 0.92f);
+                    drawCenteredTextWithShadow(textBuf, 200.0f + dToast, 224.0f, 0.34f, Ui::rgba(255, 230, 230), multiMgr.toastNotice.c_str(), 0.95f);
+                } else {
+                    float byY = 219.0f;
+                    drawKeyBadge(textBuf, 10.0f + dBar, byY, "A", multiMgr.isHost() ? "Iniciar" : "Listo", Ui::rgba(255, 75, 80));
+                    drawKeyBadge(textBuf, 88.0f + dBar, byY, "Y", "Mods", Ui::rgba(50, 215, 115));
+                    drawKeyBadge(textBuf, 158.0f + dBar, byY, "X", "Cola", Ui::rgba(50, 165, 255));
+                    drawKeyBadge(textBuf, 226.0f + dBar, byY, "B", "Salir", Ui::rgba(255, 195, 45));
+
+                    Ui::pill(296.0f + dBar, byY - 1.0f, 32.0f, 15.0f, 0.30f, Ui::rgba(24, 60, 85));
+                    drawCenteredText(textBuf, 312.0f + dBar, byY + 6.5f, 0.28f, Ui::rgba(40, 215, 235), "ROL", 0.32f);
+                    drawTextWithShadow(textBuf, 334.0f + dBar, byY, 0.34f, clrWhite, multiMgr.isHost() ? "Host" : "Cliente", 0.32f);
+                }
+
+                Ui::drawTransition(400.0f, 240.0f, screenFade, clrPrimary);
+            }
+
+            // PANTALLA INFERIOR (PANEL TÁCTIL DEL LOBBY)
+            C2D_TargetClear(bottomScreen, clrTabletBg);
+            C2D_SceneBegin(bottomScreen);
+
+            Ui::backdrop(320.0f, 240.0f, static_cast<float>(animTick), Ui::rgba(18, 14, 30), Ui::rgba(10, 8, 18), clrPrimary, 0.02f);
+
+            if (multiQueuePickerOpen) {
+                Ui::panel(10.0f, 8.0f, 300.0f, 224.0f, 0.15f, Ui::rgba(16, 14, 28, 250), clrPrimary);
+                const char* pickerTitle = multiMgr.isHost()
+                    ? ((multiPickerAction == PICKER_ACTION_QUEUE) ? "ENCOLAR CANCION (HOST)" : "CAMBIAR CANCION ACTUAL (HOST)")
+                    : "SUGERIR CANCION PARA LA COLA";
+                drawCenteredText(textBuf, 160.0f, 18.0f, 0.40f, clrWhite, pickerTitle, 0.20f);
+
+                for (int k = 0; k < 4; ++k) {
+                    int idx = multiQueuePickerIndex - (multiQueuePickerIndex % 4) + k;
+                    float qy = 38.0f + k * 40.0f;
+                    if (idx < static_cast<int>(songMgr.sets.size())) {
+                        const auto& s = songMgr.sets[idx];
+                        bool isSel = (idx == multiQueuePickerIndex);
+                        u32 bgCard = isSel ? Ui::rgba(45, 38, 70, 255) : Ui::rgba(24, 20, 38, 230);
+                        Ui::panel(18.0f, qy, 284.0f, 36.0f, 0.20f, bgCard, isSel ? (multiMgr.isHost() ? Ui::rgba(255, 140, 20) : clrPrimary) : 0);
+                        drawText(textBuf, 24.0f, qy + 3.0f, 0.38f, clrWhite, truncateString(s.title, 26).c_str(), 0.25f);
+
+                        if (!s.difficulties.empty()) {
+                            int diffIdx = isSel ? (multiQueuePickerDiff % s.difficulties.size()) : 0;
+                            const auto& d = s.difficulties[diffIdx];
+                            char diffInfo[64];
+                            if (isSel && s.difficulties.size() > 1) {
+                                std::snprintf(diffInfo, sizeof(diffInfo), "< %s > (* %.2f)", d.version.c_str(), d.starRating);
+                            } else {
+                                std::snprintf(diffInfo, sizeof(diffInfo), "[%s] * %.2f", d.version.c_str(), d.starRating);
+                            }
+                            drawText(textBuf, 24.0f, qy + 19.0f, 0.30f, isSel ? Ui::rgba(255, 205, 50) : clrMuted, truncateString(diffInfo, 30).c_str(), 0.25f);
+                        }
+                    }
+                }
+
+                if (multiMgr.isHost()) {
+                    Ui::button(14.0f, 198.0f, 140.0f, 28.0f, 0.20f, Ui::rgba(255, 140, 20), Ui::rgba(255, 200, 100), true);
+                    drawCenteredTextWithShadow(textBuf, 84.0f, 212.0f, 0.34f, clrWhite, "[A] MAPA ACTUAL", 0.25f);
+
+                    Ui::button(166.0f, 198.0f, 140.0f, 28.0f, 0.20f, Ui::rgba(40, 180, 220), Ui::rgba(160, 230, 255), false);
+                    drawCenteredTextWithShadow(textBuf, 236.0f, 212.0f, 0.34f, clrWhite, "[X] + A LA COLA", 0.25f);
+                } else {
+                    Ui::button(20.0f, 198.0f, 280.0f, 28.0f, 0.20f, Ui::rgba(180, 80, 240), Ui::rgba(220, 160, 255), false);
+                    drawCenteredTextWithShadow(textBuf, 160.0f, 212.0f, 0.34f, clrWhite, "[A] / [X] SUGERIR A LA COLA", 0.25f);
+                }
+            } else {
+                drawTextWithShadow(textBuf, 12.0f, 10.0f, 0.42f, Ui::rgba(40, 215, 235), "PANEL TACTIL DE SALA MULTIJUGADOR", 0.20f);
+                if (multiMgr.isHost()) {
+                    Ui::pill(248.0f, 6.0f, 60.0f, 17.0f, 0.25f, Ui::rgba(255, 140, 20));
+                    drawCenteredText(textBuf, 278.0f, 14.5f, 0.30f, clrWhite, "HOST", 0.30f);
+                } else {
+                    Ui::pill(242.0f, 6.0f, 66.0f, 17.0f, 0.25f, Ui::rgba(40, 215, 235));
+                    drawCenteredText(textBuf, 275.0f, 14.5f, 0.30f, Ui::rgba(0, 0, 0, 240), "CLIENTE", 0.30f);
+                }
+
+                drawTextWithShadow(textBuf, 12.0f, 28.0f, 0.33f, Ui::rgba(215, 210, 235), "Criterio de Victoria del Podio:", 0.20f);
+                const char* critText = (multiMgr.winCondition == WIN_SCORE) ? "SCORE" :
+                                       ((multiMgr.winCondition == WIN_ACCURACY) ? "ACCURACY" : "MAX COMBO");
+                drawTextWithShadow(textBuf, 214.0f, 28.0f, 0.35f, Ui::rgba(40, 215, 235), critText, 0.20f);
+
+                // 3 Pestañas interactivas de regla de victoria
+                const char* tabNames[3] = { "Puntuacion", "Precision", "Max Combo" };
+                for (int t = 0; t < 3; ++t) {
+                    float tx = 14.0f + t * 98.0f;
+                    float ty = 46.0f;
+                    float tw = 92.0f;
+                    float th = 26.0f;
+                    bool activeTab = (static_cast<int>(multiMgr.winCondition) == t);
+
+                    u32 tabBg = activeTab ? Ui::rgba(40, 215, 235) : Ui::rgba(26, 22, 40, 240);
+                    u32 tabTxt = activeTab ? Ui::rgba(10, 8, 18, 255) : Ui::rgba(200, 195, 225);
+                    Ui::panel(tx, ty, tw, th, 0.20f, tabBg, activeTab ? Ui::rgba(255, 255, 255) : 0);
+                    if (activeTab) {
+                        Ui::glow(tx + tw * 0.5f, ty + th * 0.5f, 0.18f, tw * 0.45f, Ui::rgba(40, 215, 235, 80), 2);
+                    }
+                    drawCenteredTextWithShadow(textBuf, tx + tw * 0.5f, ty + th * 0.5f, 0.34f, tabTxt, tabNames[t], 0.25f);
+                }
+
+                if (multiMgr.isHost()) {
+                    // Tarjeta 1: Modificadores (x: 10..104, y: 82..148)
+                    Ui::panel(10.0f, 82.0f, 94.0f, 66.0f, 0.20f, Ui::rgba(22, 19, 36, 240), Ui::rgba(40, 215, 235));
+                    drawTextWithShadow(textBuf, 14.0f, 88.0f, 0.34f, clrWhite, "Modificadores", 0.25f);
+                    std::string myMods = (multiMgr.players[multiMgr.localSlot].activeMods != MOD_NONE)
+                        ? ("+" + formatModsString(multiMgr.players[multiMgr.localSlot].activeMods)) : "Sin Mods";
+                    Ui::pill(14.0f, 108.0f, 86.0f, 16.0f, 0.26f, Ui::rgba(40, 215, 235));
+                    drawCenteredText(textBuf, 57.0f, 116.0f, 0.28f, Ui::rgba(0, 0, 0, 240), truncateString(myMods, 10).c_str(), 0.30f);
+                    drawCenteredTextWithShadow(textBuf, 57.0f, 134.0f, 0.30f, Ui::rgba(215, 210, 235), "Toca: Mods", 0.25f);
+
+                    // Tarjeta 2: Cambiar Canción Actual (x: 113..207, y: 82..148)
+                    bool clientDownloading = multiMgr.isAnyClientDownloading();
+                    u32 c2Border = clientDownloading ? Ui::rgba(140, 50, 60) : Ui::rgba(255, 140, 20);
+                    Ui::panel(113.0f, 82.0f, 94.0f, 66.0f, 0.20f, Ui::rgba(22, 19, 36, 240), c2Border);
+                    drawTextWithShadow(textBuf, 117.0f, 88.0f, 0.34f, clientDownloading ? clrMiss : clrWhite, "Cambiar Mapa", 0.25f);
+                    Ui::pill(117.0f, 108.0f, 86.0f, 16.0f, 0.26f, c2Border);
+                    drawCenteredText(textBuf, 160.0f, 116.0f, 0.28f, clrWhite, clientDownloading ? "BLOQUEADO" : "MAPA ACTIVO", 0.30f);
+                    drawCenteredTextWithShadow(textBuf, 160.0f, 134.0f, 0.30f, clientDownloading ? clrMiss : Ui::rgba(215, 210, 235), clientDownloading ? "Descarga activa" : "Toca: Cambiar", 0.25f);
+
+                    // Tarjeta 3: + Añadir a la Cola (x: 216..310, y: 82..148)
+                    Ui::panel(216.0f, 82.0f, 94.0f, 66.0f, 0.20f, Ui::rgba(22, 19, 36, 240), Ui::rgba(180, 80, 240));
+                    drawTextWithShadow(textBuf, 220.0f, 88.0f, 0.34f, clrWhite, "+ A la Cola", 0.25f);
+                    Ui::pill(220.0f, 108.0f, 86.0f, 16.0f, 0.26f, Ui::rgba(180, 80, 240));
+                    drawCenteredText(textBuf, 263.0f, 116.0f, 0.28f, clrWhite, "ENCOLAR", 0.30f);
+                    drawCenteredTextWithShadow(textBuf, 263.0f, 134.0f, 0.30f, Ui::rgba(215, 210, 235), "Toca: Cola", 0.25f);
+                } else {
+                    // Tarjeta 1: Modificadores (Cliente)
+                    Ui::panel(12.0f, 82.0f, 142.0f, 66.0f, 0.20f, Ui::rgba(22, 19, 36, 240), Ui::rgba(40, 215, 235));
+                    drawText(textBuf, 20.0f, 88.0f, 0.36f, clrWhite, "Modificadores", 0.25f);
+                    std::string myMods = (multiMgr.players[multiMgr.localSlot].activeMods != MOD_NONE)
+                        ? ("+" + formatModsString(multiMgr.players[multiMgr.localSlot].activeMods)) : "Sin Mods";
+                    Ui::pill(92.0f, 86.0f, 56.0f, 15.0f, 0.26f, Ui::rgba(40, 215, 235));
+                    drawCenteredText(textBuf, 120.0f, 93.0f, 0.26f, Ui::rgba(0, 0, 0, 240), truncateString(myMods, 7).c_str(), 0.30f);
+                    drawTextWithShadow(textBuf, 20.0f, 114.0f, 0.30f, Ui::rgba(215, 210, 235), "Toca para abrir", 0.25f);
+                    drawTextWithShadow(textBuf, 20.0f, 128.0f, 0.30f, Ui::rgba(215, 210, 235), "Menu de Mods", 0.25f);
+
+                    // Tarjeta 2: + Añadir Canción (Cola Cliente)
+                    Ui::panel(166.0f, 82.0f, 142.0f, 66.0f, 0.20f, Ui::rgba(22, 19, 36, 240), Ui::rgba(180, 80, 240));
+                    drawTextWithShadow(textBuf, 174.0f, 88.0f, 0.36f, clrWhite, "+ Anadir Cancion", 0.25f);
+                    Ui::pill(268.0f, 86.0f, 34.0f, 15.0f, 0.26f, Ui::rgba(180, 80, 240));
+                    drawCenteredText(textBuf, 285.0f, 93.0f, 0.26f, clrWhite, "Cola", 0.30f);
+                    drawTextWithShadow(textBuf, 174.0f, 114.0f, 0.30f, Ui::rgba(215, 210, 235), "Sugerir beatmap", 0.25f);
+                    drawTextWithShadow(textBuf, 174.0f, 128.0f, 0.30f, Ui::rgba(215, 210, 235), "para la sala", 0.25f);
+                }
+
+                char statusSummary[64];
+                std::snprintf(statusSummary, sizeof(statusSummary), "Jugadores listos: %d/%d", multiMgr.getReadyPlayerCount(), multiMgr.getActivePlayerCount());
+                drawTextWithShadow(textBuf, 14.0f, 158.0f, 0.34f, clrWhite, statusSummary, 0.25f);
+
+                const char* subStat = (multiMgr.hostChangingSong) ? "El anfitrion esta cambiando mapa..." :
+                                      (!hasLocalMap || multiMgr.players[multiMgr.localSlot].status == STATUS_MISSING_MAP) ? "Cancion no disponible en tu SD" :
+                                      (multiMgr.players[multiMgr.localSlot].status == STATUS_DOWNLOADING) ? "Descargando cancion..." :
+                                      (multiMgr.areAllPlayersReady()) ? "Todos listos para jugar!" :
+                                      (multiMgr.isHost() ? "Esperando a los jugadores" : "Esperando al anfitrion");
+                drawTextWithShadow(textBuf, 168.0f, 158.0f, 0.30f, Ui::rgba(40, 215, 235), subStat, 0.25f);
+
+                float btnX = 12.0f;
+                float btnY = 176.0f;
+                float btnW = 296.0f;
+                float btnH = 50.0f;
+
+                if (!hasLocalMap || multiMgr.players[multiMgr.localSlot].status == STATUS_MISSING_MAP) {
+                    Ui::glow(btnX + btnW * 0.5f, btnY + btnH * 0.5f, 0.16f, btnW * 0.52f, Ui::rgba(20, 160, 230, 90), 3);
+                    Ui::panel(btnX, btnY, btnW, btnH, 0.20f, Ui::rgba(20, 135, 215, 255), Ui::rgba(160, 230, 255));
+                    drawCenteredText(textBuf, btnX + btnW * 0.5f, btnY + btnH * 0.5f, 0.46f, clrWhite, "v DESCARGAR MAPA (TOCA AQUI)", 0.30f);
+                } else if (multiMgr.players[multiMgr.localSlot].status == STATUS_DOWNLOADING) {
+                    Ui::panel(btnX, btnY, btnW, btnH, 0.20f, Ui::rgba(220, 110, 20, 255), Ui::rgba(255, 180, 60));
+                    float prog = multiMgr.players[multiMgr.localSlot].downloadProgress / 100.0f;
+                    if (prog > 0.02f) {
+                        C2D_DrawRectSolid(btnX + 4.0f, btnY + 4.0f, 0.22f, (btnW - 8.0f) * std::min(1.0f, prog), btnH - 8.0f, Ui::rgba(255, 155, 30, 200));
+                    }
+                    char dlTxt[48];
+                    std::snprintf(dlTxt, sizeof(dlTxt), "DESCARGANDO MAPA (%d%%)...", multiMgr.players[multiMgr.localSlot].downloadProgress);
+                    drawCenteredText(textBuf, btnX + btnW * 0.5f, btnY + btnH * 0.5f, 0.44f, clrWhite, dlTxt, 0.30f);
+                } else if (multiMgr.hostChangingSong && !multiMgr.isHost()) {
+                    Ui::panel(btnX, btnY, btnW, btnH, 0.20f, Ui::rgba(45, 38, 55, 240), Ui::rgba(180, 130, 40));
+                    drawCenteredText(textBuf, btnX + btnW * 0.5f, btnY + btnH * 0.5f, 0.42f, Ui::rgba(255, 205, 50), "CAMBIANDO MAPA...", 0.30f);
+                } else if (multiMgr.isHost()) {
+                    if (multiMgr.areAllPlayersReady()) {
+                        Ui::glow(btnX + btnW * 0.5f, btnY + btnH * 0.5f, 0.18f, btnW * 0.55f, Ui::rgba(30, 215, 90, 80), 4);
+                        Ui::panel(btnX, btnY, btnW, btnH, 0.20f, Ui::rgba(30, 195, 80, 255), Ui::rgba(180, 255, 200));
+                        drawCenteredText(textBuf, btnX + btnW * 0.5f, btnY + btnH * 0.5f, 0.52f, clrWhite, LOC(STR_MULTI_START_MATCH), 0.30f);
+                    } else {
+                        Ui::panel(btnX, btnY, btnW, btnH, 0.20f, Ui::rgba(45, 40, 60, 240), Ui::rgba(85, 75, 110));
+                        drawCenteredText(textBuf, btnX + btnW * 0.5f, btnY + btnH * 0.5f, 0.44f, clrMuted, LOC(STR_MULTI_WAITING_PLAYERS), 0.30f);
+                    }
+                } else if (multiMgr.players[multiMgr.localSlot].status == STATUS_READY) {
+                    Ui::panel(btnX, btnY, btnW, btnH, 0.20f, Ui::rgba(28, 75, 50, 240), Ui::rgba(40, 215, 120));
+                    drawCenteredText(textBuf, btnX + btnW * 0.5f, btnY + btnH * 0.5f, 0.46f, Ui::rgba(180, 255, 210), "/ DESMARCAR LISTO", 0.30f);
+                } else {
+                    Ui::panel(btnX, btnY, btnW, btnH, 0.20f, Ui::rgba(30, 160, 75, 240), Ui::rgba(100, 255, 160));
+                    drawCenteredText(textBuf, btnX + btnW * 0.5f, btnY + btnH * 0.5f, 0.46f, clrWhite, "/ LISTO (TOCA PARA MARCAR)", 0.30f);
+                }
+            }
+
+            Ui::drawTransition(320.0f, 240.0f, screenFade, clrPrimary);
+            C3D_FrameEnd(0);
+            continue;
+        }
+
+        // =========================================================
+        // 4B. SELECCIÓN DE MODIFICADORES (MODS HD, HR, EZ, NF)
+        // =========================================================
+        if (appState == STATE_MODS_SELECT) {
+            audio.update();
+            if (settings.songPreview && !audio.isPreviewLoading() && audio.isSongFinished()) {
+                rotateMenuSong();
+            }
+            multiMgr.update(false);
+
+            if (kDown & (KEY_B | KEY_START)) {
+                audio.playHitSound(0);
+                appState = STATE_MULTI_LOBBY;
+                continue;
+            }
+
+            float currentMult = getModsScoreMultiplier(settings.activeMods);
+
+            if (touchJustDown) {
+                // Fila 1: Reducción de Dificultad (NF, EZ)
+                if (touch.py >= 54.0f && touch.py <= 114.0f) {
+                    if (touch.px >= 14.0f && touch.px <= 152.0f) {
+                        settings.activeMods ^= MOD_NOFAIL;
+                        audio.playHitSound(2);
+                    } else if (touch.px >= 168.0f && touch.px <= 306.0f) {
+                        settings.activeMods ^= MOD_EASY;
+                        if (settings.activeMods & MOD_EASY) settings.activeMods &= ~MOD_HARDROCK;
+                        audio.playHitSound(2);
+                    }
+                }
+                // Fila 2: Aumento de Dificultad (HD, HR)
+                if (touch.py >= 132.0f && touch.py <= 192.0f) {
+                    if (touch.px >= 14.0f && touch.px <= 152.0f) {
+                        settings.activeMods ^= MOD_HIDDEN;
+                        audio.playHitSound(2);
+                    } else if (touch.px >= 168.0f && touch.px <= 306.0f) {
+                        settings.activeMods ^= MOD_HARDROCK;
+                        if (settings.activeMods & MOD_HARDROCK) settings.activeMods &= ~MOD_EASY;
+                        audio.playHitSound(2);
+                    }
+                }
+
+                if (touch.py >= 198.0f && touch.py <= 234.0f) {
+                    audio.playHitSound(0);
+                    appState = STATE_MULTI_LOBBY;
+                    continue;
+                }
+
+                multiMgr.players[multiMgr.localSlot].activeMods = settings.activeMods;
+                multiMgr.sendPlayerUpdate();
+            }
+
+            C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
+
+            for (int eye = 0; eye < (stereoActive ? 2 : 1); ++eye) {
+                C3D_RenderTarget* curTop = (eye == 0) ? topScreen : topScreenRight;
+                float eyeSign = stereoActive ? ((eye == 0) ? 1.0f : -1.0f) : 0.0f;
+                C2D_TargetClear(curTop, clrBgDark);
+                C2D_SceneBegin(curTop);
+                auto depthShift = [&](float px) { return eyeSign * slider3D * px; };
+
+                float dTop = depthShift(2.0f);
+                Ui::backdrop(400.0f, 240.0f, static_cast<float>(animTick), Ui::rgba(18, 14, 30), Ui::rgba(10, 8, 18), clrPrimary, 0.01f);
+
+                Ui::pill(12.0f + dTop, 10.0f, 54.0f, 18.0f, 0.25f, Ui::rgba(255, 102, 170));
+                drawCenteredText(textBuf, 39.0f + dTop, 18.0f, 0.36f, clrWhite, "MODS", 0.30f);
+
+                drawText(textBuf, 72.0f + dTop, 11.0f, 0.44f, clrWhite, "IMPACTO EN EL BEATMAP", 0.30f);
+
+                char multStr[32];
+                std::snprintf(multStr, sizeof(multStr), "Multiplicador Activo: %.2fx", currentMult);
+                drawText(textBuf, 230.0f + dTop, 12.0f, 0.36f, Ui::rgba(40, 215, 235), multStr, 0.30f);
+
+                Ui::panel(12.0f + dTop, 36.0f, 376.0f, 150.0f, 0.20f, Ui::rgba(20, 18, 34, 240), Ui::rgba(40, 215, 235));
+
+                std::string bTitle = multiMgr.activeBeatmap.title + " [" + multiMgr.activeBeatmap.version + "]";
+                drawText(textBuf, 22.0f + dTop, 44.0f, 0.46f, clrWhite, truncateString(bTitle, 36).c_str(), 0.25f);
+                drawText(textBuf, 22.0f + dTop, 62.0f, 0.32f, clrMuted, "Los modificadores alteran la dificultad y el multiplicador de puntuacion.", 0.25f);
+
+                float curCS = beatmap.diff.cs;
+                float curAR = beatmap.diff.ar;
+                float curOD = beatmap.diff.od;
+                float curHP = beatmap.diff.hp;
+
+                if (settings.activeMods & MOD_EASY) {
+                    curCS *= 0.5f; curAR *= 0.5f; curOD *= 0.5f; curHP *= 0.5f;
+                }
+                if (settings.activeMods & MOD_HARDROCK) {
+                    curCS = std::min(10.0f, curCS * 1.3f);
+                    curAR = std::min(10.0f, curAR * 1.4f);
+                    curOD = std::min(10.0f, curOD * 1.4f);
+                    curHP = std::min(10.0f, curHP * 1.4f);
+                }
+
+                drawStatBar(textBuf, 22.0f + dTop, 80.0f, "Circle Size (CS)", curCS, Ui::rgba(40, 215, 235), clrBgDark, clrWhite);
+                drawStatBar(textBuf, 206.0f + dTop, 80.0f, "Approach Rate (AR)", curAR, Ui::rgba(255, 185, 40), clrBgDark, clrWhite);
+
+                drawStatBar(textBuf, 22.0f + dTop, 108.0f, "Overall Diff (OD)", curOD, Ui::rgba(180, 80, 240), clrBgDark, clrWhite);
+                drawStatBar(textBuf, 206.0f + dTop, 108.0f, "HP Drain Rate", curHP, Ui::rgba(60, 215, 120), clrBgDark, clrWhite);
+
+                drawText(textBuf, 22.0f + dTop, 142.0f, 0.34f, clrMuted, "Mods Equipados:", 0.25f);
+                float pillX = 120.0f + dTop;
+                if (settings.activeMods & MOD_HIDDEN) {
+                    Ui::pill(pillX, 138.0f, 28.0f, 16.0f, 0.25f, Ui::rgba(255, 205, 50));
+                    drawCenteredText(textBuf, pillX + 14.0f, 146.0f, 0.30f, Ui::rgba(0, 0, 0, 240), "HD", 0.30f);
+                    pillX += 34.0f;
+                }
+                if (settings.activeMods & MOD_NOFAIL) {
+                    Ui::pill(pillX, 138.0f, 28.0f, 16.0f, 0.25f, Ui::rgba(40, 215, 235));
+                    drawCenteredText(textBuf, pillX + 14.0f, 146.0f, 0.30f, Ui::rgba(0, 0, 0, 240), "NF", 0.30f);
+                    pillX += 34.0f;
+                }
+                if (settings.activeMods & MOD_HARDROCK) {
+                    Ui::pill(pillX, 138.0f, 28.0f, 16.0f, 0.25f, Ui::rgba(240, 70, 70));
+                    drawCenteredText(textBuf, pillX + 14.0f, 146.0f, 0.30f, clrWhite, "HR", 0.30f);
+                    pillX += 34.0f;
+                }
+                if (settings.activeMods & MOD_EASY) {
+                    Ui::pill(pillX, 138.0f, 28.0f, 16.0f, 0.25f, Ui::rgba(80, 200, 110));
+                    drawCenteredText(textBuf, pillX + 14.0f, 146.0f, 0.30f, Ui::rgba(0, 0, 0, 240), "EZ", 0.30f);
+                    pillX += 34.0f;
+                }
+
+                Ui::gradV(0.0f, 214.0f, 400.0f, 26.0f, 0.3f, Ui::rgba(14, 11, 26, 120), Ui::rgba(14, 11, 26, 250));
+                drawText(textBuf, 12.0f, 221.0f, 0.34f, clrMuted, "Toca la pantalla inferior para activar o desactivar");
+                Ui::drawTransition(400.0f, 240.0f, screenFade, clrPrimary);
+            }
+
+            C2D_TargetClear(bottomScreen, clrTabletBg);
+            C2D_SceneBegin(bottomScreen);
+
+            Ui::backdrop(320.0f, 240.0f, static_cast<float>(animTick), Ui::rgba(18, 14, 30), Ui::rgba(10, 8, 18), clrPrimary, 0.02f);
+
+            drawTextWithShadow(textBuf, 14.0f, 8.0f, 0.40f, clrWhite, "SELECCION DE MODIFICADORES (MODS)", 0.20f);
+            char bMult[16];
+            std::snprintf(bMult, sizeof(bMult), "%.2fx", currentMult);
+            Ui::pill(252.0f, 6.0f, 54.0f, 18.0f, 0.25f, Ui::rgba(30, 80, 150));
+            drawCenteredText(textBuf, 279.0f, 14.0f, 0.34f, clrWhite, bMult, 0.30f);
+
+            drawTextWithShadow(textBuf, 14.0f, 36.0f, 0.32f, Ui::rgba(215, 210, 235), "REDUCCION DE DIFICULTAD", 0.20f);
+
+            bool nfOn = (settings.activeMods & MOD_NOFAIL) != 0;
+            Ui::button(14.0f, 54.0f, 138.0f, 58.0f, 0.20f, nfOn ? Ui::rgba(22, 42, 60, 245) : Ui::rgba(22, 19, 36, 240), Ui::rgba(40, 215, 235), nfOn);
+            Ui::pill(22.0f, 62.0f, 32.0f, 32.0f, 0.25f, Ui::rgba(40, 215, 235));
+            drawCenteredText(textBuf, 38.0f, 78.0f, 0.40f, Ui::rgba(0, 0, 0, 240), "NF", 0.30f);
+            drawTextWithShadow(textBuf, 60.0f, 60.0f, 0.38f, clrWhite, "No Fail", 0.25f);
+            drawTextWithShadow(textBuf, 60.0f, 74.0f, 0.30f, Ui::rgba(215, 210, 235), "-50% Puntos", 0.25f);
+            Ui::pill(60.0f, 88.0f, 48.0f, 16.0f, 0.26f, nfOn ? Ui::rgba(40, 215, 235) : Ui::rgba(45, 40, 60));
+            drawCenteredText(textBuf, 84.0f, 96.0f, 0.28f, nfOn ? Ui::rgba(0, 0, 0, 240) : clrMuted, nfOn ? "ACTIVO" : "OFF", 0.30f);
+
+            bool ezOn = (settings.activeMods & MOD_EASY) != 0;
+            Ui::button(168.0f, 54.0f, 138.0f, 58.0f, 0.20f, ezOn ? Ui::rgba(22, 48, 36, 245) : Ui::rgba(22, 19, 36, 240), Ui::rgba(80, 200, 110), ezOn);
+            Ui::pill(176.0f, 62.0f, 32.0f, 32.0f, 0.25f, ezOn ? Ui::rgba(80, 200, 110) : Ui::rgba(45, 40, 60));
+            drawCenteredText(textBuf, 192.0f, 78.0f, 0.40f, ezOn ? Ui::rgba(0, 0, 0, 240) : clrMuted, "EZ", 0.30f);
+            drawTextWithShadow(textBuf, 214.0f, 60.0f, 0.38f, clrWhite, "Easy", 0.25f);
+            drawTextWithShadow(textBuf, 214.0f, 74.0f, 0.30f, Ui::rgba(215, 210, 235), "-50% Puntos", 0.25f);
+            Ui::pill(214.0f, 88.0f, 48.0f, 16.0f, 0.26f, ezOn ? Ui::rgba(80, 200, 110) : Ui::rgba(45, 40, 60));
+            drawCenteredText(textBuf, 238.0f, 96.0f, 0.28f, ezOn ? Ui::rgba(0, 0, 0, 240) : clrMuted, ezOn ? "ACTIVO" : "OFF", 0.30f);
+
+            drawTextWithShadow(textBuf, 14.0f, 118.0f, 0.32f, Ui::rgba(215, 210, 235), "AUMENTO DE DIFICULTAD", 0.20f);
+
+            bool hdOn = (settings.activeMods & MOD_HIDDEN) != 0;
+            Ui::button(14.0f, 132.0f, 138.0f, 58.0f, 0.20f, hdOn ? Ui::rgba(48, 40, 22, 245) : Ui::rgba(22, 19, 36, 240), Ui::rgba(255, 205, 50), hdOn);
+            Ui::pill(22.0f, 140.0f, 32.0f, 32.0f, 0.25f, hdOn ? Ui::rgba(255, 205, 50) : Ui::rgba(45, 40, 60));
+            drawCenteredText(textBuf, 38.0f, 156.0f, 0.40f, hdOn ? Ui::rgba(0, 0, 0, 240) : clrMuted, "HD", 0.30f);
+            drawTextWithShadow(textBuf, 60.0f, 138.0f, 0.38f, clrWhite, "Hidden", 0.25f);
+            drawTextWithShadow(textBuf, 60.0f, 152.0f, 0.30f, Ui::rgba(215, 210, 235), "+6% Puntos", 0.25f);
+            Ui::pill(60.0f, 166.0f, 48.0f, 16.0f, 0.26f, hdOn ? Ui::rgba(255, 205, 50) : Ui::rgba(45, 40, 60));
+            drawCenteredText(textBuf, 84.0f, 174.0f, 0.28f, hdOn ? Ui::rgba(0, 0, 0, 240) : clrMuted, hdOn ? "ACTIVO" : "OFF", 0.30f);
+
+            bool hrOn = (settings.activeMods & MOD_HARDROCK) != 0;
+            Ui::button(168.0f, 132.0f, 138.0f, 58.0f, 0.20f, hrOn ? Ui::rgba(52, 24, 28, 245) : Ui::rgba(22, 19, 36, 240), Ui::rgba(240, 70, 70), hrOn);
+            Ui::pill(176.0f, 140.0f, 32.0f, 32.0f, 0.25f, hrOn ? Ui::rgba(240, 70, 70) : Ui::rgba(45, 40, 60));
+            drawCenteredText(textBuf, 192.0f, 156.0f, 0.40f, clrWhite, "HR", 0.30f);
+            drawTextWithShadow(textBuf, 214.0f, 138.0f, 0.38f, clrWhite, "Hard Rock", 0.25f);
+            drawTextWithShadow(textBuf, 214.0f, 152.0f, 0.30f, Ui::rgba(215, 210, 235), "+6% Puntos", 0.25f);
+            Ui::pill(214.0f, 166.0f, 48.0f, 16.0f, 0.26f, hrOn ? Ui::rgba(240, 70, 70) : Ui::rgba(45, 40, 60));
+            drawCenteredText(textBuf, 238.0f, 174.0f, 0.28f, hrOn ? clrWhite : clrMuted, hrOn ? "ACTIVO" : "OFF", 0.30f);
+
+            Ui::button(20.0f, 198.0f, 280.0f, 34.0f, 0.20f, Ui::rgba(42, 20, 52, 240), clrPrimary, true);
+            Ui::pill(28.0f, 204.0f, 22.0f, 22.0f, 0.25f, clrPrimary);
+            drawCenteredText(textBuf, 39.0f, 215.0f, 0.32f, clrWhite, "B", 0.28f);
+            drawCenteredTextWithShadow(textBuf, 160.0f, 215.0f, 0.42f, clrWhite, "VOLVER A LA SALA", 0.28f);
+
+            Ui::drawTransition(320.0f, 240.0f, screenFade, clrPrimary);
+            C3D_FrameEnd(0);
+            continue;
+        }
+
+        // =========================================================
+        // 4C. RESULTADOS MULTIJUGADOR (PODIO Y ESTADÍSTICAS 1V1)
+        // =========================================================
+        if (appState == STATE_MULTI_RESULTS) {
+            audio.update();
+            multiMgr.update(false);
+
+            if (!multiMgr.inMultiplayer) {
+                multiMgr.startBrowser(sysUser);
+                appState = STATE_MULTI_BROWSER;
+                continue;
+            }
+
+            // Si el anfitrión envió la señal de retorno a la sala sincronizada
+            if (!multiMgr.isHost() && multiMgr.shouldReturnToLobby) {
+                multiMgr.shouldReturnToLobby = false;
+                multiMgr.matchStarted = false;
+                multiMgr.matchInProgressFlag = false;
+                multiMgr.players[multiMgr.localSlot].status = STATUS_NOT_READY;
+                multiMgr.sendPlayerUpdate();
+                appState = STATE_MULTI_LOBBY;
+                continue;
+            }
+
+            // Salir de la sala con [B]
+            if (kDown & KEY_B) {
+                audio.playHitSound(0);
+                if (multiMgr.isHost()) {
+                    multiMgr.notifyRoomClosed();
+                } else {
+                    multiMgr.notifyPlayerLeave();
+                }
+                multiMgr.stop();
+                multiMgr.startBrowser(sysUser);
+                appState = STATE_MULTI_BROWSER;
+                continue;
+            }
+
+            bool allFinished = multiMgr.areAllPlayersFinished();
+            bool touchedContinue = touchJustDown && (touch.px >= 12.0f && touch.px <= 308.0f && touch.py >= 188.0f && touch.py <= 232.0f);
+
+            if ((kDown & KEY_A) || touchedContinue) {
+                if (!allFinished) {
+                    audio.playHitSound(4); // Bloquear avance si aún hay jugadores activos en partida
+                } else if (multiMgr.isHost()) {
+                    audio.playHitSound(2);
+                    multiMgr.matchStarted = false;
+                    multiMgr.matchInProgressFlag = false;
+                    multiMgr.sendReturnToLobby();
+                    multiMgr.advanceQueueAndRotateHost();
+                    appState = STATE_MULTI_LOBBY;
+                    continue;
+                } else {
+                    audio.playHitSound(0);
+                }
+            }
+
+            if (kDown & (KEY_X | KEY_Y)) {
+                audio.playHitSound(0);
+                multiResultsTab = (multiResultsTab + 1) % 4;
+            }
+
+            C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
+
+            auto ranked = multiMgr.getLeaderboard();
+
+            for (int eye = 0; eye < (stereoActive ? 2 : 1); ++eye) {
+                C3D_RenderTarget* curTop = (eye == 0) ? topScreen : topScreenRight;
+                float eyeSign = stereoActive ? ((eye == 0) ? 1.0f : -1.0f) : 0.0f;
+                C2D_TargetClear(curTop, clrBgDark);
+                C2D_SceneBegin(curTop);
+                auto depthShift = [&](float px) { return eyeSign * slider3D * px; };
+
+                float dTop = depthShift(2.0f);
+                Ui::backdrop(400.0f, 240.0f, static_cast<float>(animTick), Ui::rgba(18, 14, 30), Ui::rgba(10, 8, 18), clrPrimary, 0.01f);
+
+                Ui::pill(12.0f + dTop, 10.0f, 52.0f, 18.0f, 0.25f, Ui::rgba(255, 102, 170));
+                drawCenteredText(textBuf, 38.0f + dTop, 18.0f, 0.36f, clrWhite, "osu!", 0.30f);
+
+                drawText(textBuf, 70.0f + dTop, 11.0f, 0.44f, Ui::rgba(40, 215, 235), "RESULTADOS MULTIJUGADOR", 0.30f);
+
+                std::string rSongInfo = multiMgr.activeBeatmap.title + " [" + multiMgr.activeBeatmap.version + "]";
+                drawText(textBuf, 250.0f + dTop, 12.0f, 0.32f, clrMuted, truncateString(rSongInfo, 22).c_str(), 0.30f);
+
+                for (size_t r = 0; r < ranked.size() && r < 4; ++r) {
+                    const auto& item = ranked[r];
+                    float cardY = 34.0f + r * 44.0f;
+                    float cardX = 12.0f + dTop;
+                    float cardW = 376.0f;
+                    float cardH = 40.0f;
+
+                    u32 medalClr = item.player->isFailed ? Ui::rgba(235, 45, 45) :
+                                   ((r == 0) ? Ui::rgba(255, 195, 45) :
+                                   ((r == 1) ? Ui::rgba(40, 215, 235) :
+                                   ((r == 2) ? Ui::rgba(180, 80, 240) : Ui::rgba(100, 100, 130))));
+
+                    Ui::panel(cardX, cardY, cardW, cardH, 0.20f, Ui::rgba(22, 19, 36, 240), medalClr);
+
+                    Ui::panel(cardX + 6.0f, cardY + 6.0f, 26.0f, 28.0f, 0.22f, medalClr);
+                    char rankTxt[8];
+                    if (item.player->isFailed) {
+                        std::snprintf(rankTxt, sizeof(rankTxt), "FAIL");
+                    } else {
+                        std::snprintf(rankTxt, sizeof(rankTxt), "#%u", static_cast<unsigned int>(r + 1));
+                    }
+                    drawCenteredText(textBuf, cardX + 19.0f, cardY + 20.0f, 0.32f, Ui::rgba(0, 0, 0, 250), rankTxt, 0.28f);
+
+                    drawText(textBuf, cardX + 38.0f, cardY + 6.0f, 0.44f, clrWhite, item.player->name, 0.25f);
+                    if (item.player->isFailed) {
+                        Ui::pill(cardX + 105.0f, cardY + 7.0f, 32.0f, 13.0f, 0.26f, Ui::rgba(235, 45, 45));
+                        drawCenteredText(textBuf, cardX + 121.0f, cardY + 13.0f, 0.26f, clrWhite, "FALLO", 0.30f);
+                    }
+                    if (item.player->isLocal) {
+                        float tuX = item.player->isFailed ? (cardX + 142.0f) : (cardX + 140.0f);
+                        Ui::pill(tuX, cardY + 7.0f, 24.0f, 13.0f, 0.26f, Ui::rgba(40, 215, 235));
+                        drawCenteredText(textBuf, tuX + 12.0f, cardY + 13.0f, 0.26f, Ui::rgba(0, 0, 0, 240), "TU", 0.30f);
+                    }
+
+                    std::string mStr = (item.player->activeMods != MOD_NONE) ? ("+" + formatModsString(item.player->activeMods)) : "No Mod";
+                    drawText(textBuf, cardX + 38.0f, cardY + 22.0f, 0.30f, Ui::rgba(40, 215, 235), mStr.c_str(), 0.25f);
+
+                    std::string scStr = formatScoreThousands(item.player->score);
+                    drawText(textBuf, cardX + 180.0f, cardY + 10.0f, 0.52f, clrWhite, scStr.c_str(), 0.25f);
+
+                    char accComb[32];
+                    std::snprintf(accComb, sizeof(accComb), "%.2f%%", item.player->accuracy);
+                    drawText(textBuf, cardX + 276.0f, cardY + 6.0f, 0.34f, Ui::rgba(40, 215, 235), accComb, 0.25f);
+                    char cmb[16];
+                    std::snprintf(cmb, sizeof(cmb), "%dx", item.player->maxCombo);
+                    drawText(textBuf, cardX + 282.0f, cardY + 22.0f, 0.30f, clrMuted, cmb, 0.25f);
+
+                    u32 gClr = getScoreGradeColor(item.player->grade, clrCursor);
+                    drawCenteredText(textBuf, cardX + cardW - 20.0f, cardY + 20.0f, 0.70f, gClr, item.player->grade, 0.28f);
+                }
+
+                Ui::gradV(0.0f, 214.0f, 400.0f, 26.0f, 0.3f, Ui::rgba(14, 11, 26, 120), Ui::rgba(14, 11, 26, 250));
+                if (multiMgr.hasToastNotice()) {
+                    float dToast = depthShift(4.0f);
+                    Ui::glow(200.0f + dToast, 224.0f, 0.88f, 160.0f, Ui::rgba(255, 60, 80, 110), 3);
+                    Ui::pill(30.0f + dToast, 212.0f, 340.0f, 24.0f, 0.90f, Ui::rgba(35, 12, 22, 245));
+                    drawRectOutline(30.0f + dToast, 212.0f, 340.0f, 24.0f, 1.2f, Ui::rgba(255, 80, 100), 0.92f);
+                    drawCenteredTextWithShadow(textBuf, 200.0f + dToast, 224.0f, 0.34f, Ui::rgba(255, 230, 230), multiMgr.toastNotice.c_str(), 0.95f);
+                } else if (!allFinished) {
+                    drawCenteredTextWithShadow(textBuf, 200.0f + dTop, 222.0f, 0.33f, Ui::rgba(255, 205, 50), "PARTIDA EN CURSO: Esperando a que todos terminen...", 0.32f);
+                } else {
+                    float byY = 219.0f;
+                    drawKeyBadge(textBuf, 12.0f + dTop, byY, "A", multiMgr.isHost() ? "Volver al Lobby" : "Esperar", Ui::rgba(255, 75, 80));
+                    drawKeyBadge(textBuf, 160.0f + dTop, byY, "B", "Salir", Ui::rgba(255, 195, 45));
+                    drawKeyBadge(textBuf, 240.0f + dTop, byY, "X", "Pestanas", Ui::rgba(50, 165, 255));
+                }
+
+                Ui::drawTransition(400.0f, 240.0f, screenFade, clrPrimary);
+            }
+
+            C2D_TargetClear(bottomScreen, clrTabletBg);
+            C2D_SceneBegin(bottomScreen);
+
+            Ui::backdrop(320.0f, 240.0f, static_cast<float>(animTick), Ui::rgba(18, 14, 30), Ui::rgba(10, 8, 18), clrPrimary, 0.02f);
+
+            const char* resTabs[4] = { "Aciertos", "Hit Error", "1v1 vs #1", "Chat" };
+            for (int t = 0; t < 4; ++t) {
+                float tx = 10.0f + t * 74.0f;
+                bool activeT = (multiResultsTab == t);
+                Ui::panel(tx, 8.0f, 70.0f, 22.0f, 0.20f, activeT ? Ui::rgba(40, 215, 235) : Ui::rgba(24, 20, 36, 220));
+                drawCenteredText(textBuf, tx + 35.0f, 19.0f, 0.30f, activeT ? Ui::rgba(0, 0, 0, 250) : clrMuted, resTabs[t], 0.25f);
+            }
+
+            const auto& winner = ranked.empty() ? multiMgr.players[multiMgr.localSlot] : *ranked[0].player;
+
+            float boxW = 68.0f;
+            float boxH = 50.0f;
+
+            // Box 300
+            Ui::panel(12.0f, 38.0f, boxW, boxH, 0.20f, Ui::rgba(20, 18, 34, 240), Ui::rgba(40, 215, 235));
+            drawCenteredText(textBuf, 12.0f + boxW * 0.5f, 48.0f, 0.32f, Ui::rgba(40, 215, 235), "300", 0.25f);
+            char c3Str[16]; std::snprintf(c3Str, sizeof(c3Str), "%d", winner.count300);
+            drawCenteredText(textBuf, 12.0f + boxW * 0.5f, 68.0f, 0.48f, clrWhite, c3Str, 0.25f);
+
+            // Box 100
+            Ui::panel(86.0f, 38.0f, boxW, boxH, 0.20f, Ui::rgba(20, 18, 34, 240), Ui::rgba(60, 215, 120));
+            drawCenteredText(textBuf, 86.0f + boxW * 0.5f, 48.0f, 0.32f, Ui::rgba(60, 215, 120), "100", 0.25f);
+            char c1Str[16]; std::snprintf(c1Str, sizeof(c1Str), "%d", winner.count100);
+            drawCenteredText(textBuf, 86.0f + boxW * 0.5f, 68.0f, 0.48f, clrWhite, c1Str, 0.25f);
+
+            // Box 50
+            Ui::panel(160.0f, 38.0f, boxW, boxH, 0.20f, Ui::rgba(20, 18, 34, 240), Ui::rgba(255, 185, 40));
+            drawCenteredText(textBuf, 160.0f + boxW * 0.5f, 48.0f, 0.32f, Ui::rgba(255, 185, 40), "50", 0.25f);
+            char c5Str[16]; std::snprintf(c5Str, sizeof(c5Str), "%d", winner.count50);
+            drawCenteredText(textBuf, 160.0f + boxW * 0.5f, 68.0f, 0.48f, clrWhite, c5Str, 0.25f);
+
+            // Box MISS
+            Ui::panel(234.0f, 38.0f, boxW, boxH, 0.20f, Ui::rgba(20, 18, 34, 240), Ui::rgba(240, 70, 70));
+            drawCenteredText(textBuf, 234.0f + boxW * 0.5f, 48.0f, 0.32f, Ui::rgba(240, 70, 70), "MISS", 0.25f);
+            char cmStr[16]; std::snprintf(cmStr, sizeof(cmStr), "%d", winner.countMiss);
+            drawCenteredText(textBuf, 234.0f + boxW * 0.5f, 68.0f, 0.48f, clrWhite, cmStr, 0.25f);
+
+            Ui::panel(12.0f, 96.0f, 296.0f, 54.0f, 0.20f, Ui::rgba(22, 19, 36, 240));
+            drawText(textBuf, 20.0f, 102.0f, 0.30f, clrMuted, "Jugador Seleccionado:", 0.25f);
+            drawText(textBuf, 20.0f, 116.0f, 0.42f, clrWhite, winner.name, 0.25f);
+
+            char cmbLabel[32];
+            std::snprintf(cmbLabel, sizeof(cmbLabel), "Combo: %d / %dx", winner.combo, winner.maxCombo);
+            drawText(textBuf, 190.0f, 102.0f, 0.30f, clrMuted, cmbLabel, 0.25f);
+
+            char pRel[32];
+            std::snprintf(pRel, sizeof(pRel), "%.2f%%", winner.accuracy);
+            drawText(textBuf, 20.0f, 134.0f, 0.30f, clrMuted, "Precision Relativa", 0.25f);
+            drawText(textBuf, 250.0f, 134.0f, 0.32f, Ui::rgba(40, 215, 235), pRel, 0.25f);
+
+            Ui::statBar(12.0f, 154.0f, 296.0f, 6.0f, 0.20f, winner.accuracy / 100.0f, Ui::rgba(40, 215, 235));
+
+            if (!multiMgr.mapQueue.empty()) {
+                char nextQMsg[64];
+                std::snprintf(nextQMsg, sizeof(nextQMsg), "Siguiente en cola: %s", multiMgr.mapQueue.front().title.c_str());
+                drawCenteredText(textBuf, 160.0f, 172.0f, 0.34f, Ui::rgba(255, 205, 50), truncateString(nextQMsg, 36).c_str(), 0.25f);
+            } else {
+                drawCenteredText(textBuf, 160.0f, 172.0f, 0.32f, clrMuted, "Fila completada . Regresando al lobby", 0.25f);
+            }
+
+            if (!allFinished) {
+                Ui::panel(12.0f, 188.0f, 296.0f, 44.0f, 0.20f, Ui::rgba(50, 35, 70, 240), Ui::rgba(130, 80, 200));
+                drawCenteredText(textBuf, 160.0f, 203.0f, 0.38f, Ui::rgba(255, 215, 60), "PARTIDA EN CURSO...", 0.25f);
+                drawCenteredText(textBuf, 160.0f, 219.0f, 0.28f, clrWhite, "Esperando a que todos terminen de jugar", 0.25f);
+            } else if (multiMgr.isHost()) {
+                Ui::button(12.0f, 188.0f, 296.0f, 44.0f, 0.20f, Ui::rgba(30, 165, 80, 240), Ui::rgba(100, 255, 160), true);
+                Ui::pill(20.0f, 198.0f, 24.0f, 24.0f, 0.24f, Ui::rgba(100, 255, 160));
+                drawCenteredText(textBuf, 32.0f, 210.0f, 0.34f, Ui::rgba(0, 0, 0, 240), "A", 0.28f);
+                drawCenteredTextWithShadow(textBuf, 160.0f, 210.0f, 0.44f, clrWhite, "VOLVER AL LOBBY", 0.28f);
+            } else {
+                Ui::button(12.0f, 188.0f, 296.0f, 44.0f, 0.20f, Ui::rgba(28, 38, 62, 240), Ui::rgba(60, 140, 230), false);
+                drawCenteredTextWithShadow(textBuf, 160.0f, 203.0f, 0.38f, Ui::rgba(100, 200, 255), "PARTIDA FINALIZADA", 0.25f);
+                drawCenteredTextWithShadow(textBuf, 160.0f, 219.0f, 0.30f, clrWhite, "Esperando a que el anfitrion continue...", 0.25f);
+            }
+
+            Ui::drawTransition(320.0f, 240.0f, screenFade, clrPrimary);
+            C3D_FrameEnd(0);
+            continue;
+        }
+
+        // =========================================================
+        // 4D. SINCRONIZACION PREVIA AL JUEGO (CARGA DE RECURSOS Y HANDSHAKE)
+        // =========================================================
+        if (appState == STATE_MULTI_SYNC) {
+            audio.update();
+            multiMgr.update(false);
+
+            if (!multiMgr.inMultiplayer) {
+                multiMgr.startBrowser(sysUser);
+                appState = STATE_MULTI_BROWSER;
+                continue;
+            }
+
+            // Cancelar con B si el jugador decide abortar
+            if (kDown & KEY_B) {
+                audio.playHitSound(0);
+                if (multiMgr.isHost()) {
+                    multiMgr.notifyRoomClosed();
+                } else {
+                    multiMgr.notifyPlayerLeave();
+                }
+                multiMgr.stop();
+                multiMgr.startBrowser(sysUser);
+                appState = STATE_MULTI_BROWSER;
+                continue;
+            }
+
+            // Fase 1: Carga de recursos a memoria (una sola vez)
+            if (!multiSyncLoaded) {
+                // Dibujar una pantalla de carga rapida antes de bloquear lectura de SD
+                C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
+                for (int eye = 0; eye < (stereoActive ? 2 : 1); ++eye) {
+                    C3D_RenderTarget* curTop = (eye == 0) ? topScreen : topScreenRight;
+                    C2D_TargetClear(curTop, clrBgDark);
+                    C2D_SceneBegin(curTop);
+                    Ui::backdrop(400.0f, 240.0f, static_cast<float>(animTick), Ui::rgba(18, 14, 30), Ui::rgba(10, 8, 18), clrPrimary, 0.01f);
+                    Ui::panel(50.0f, 80.0f, 300.0f, 80.0f, 0.20f, Ui::rgba(22, 19, 36, 240), Ui::rgba(40, 215, 235));
+                    drawCenteredText(textBuf, 200.0f, 108.0f, 0.44f, clrWhite, "CARGANDO RECURSOS...", 0.25f);
+                    drawCenteredText(textBuf, 200.0f, 134.0f, 0.32f, clrMuted, "Preparando beatmap, audio y fondo", 0.25f);
+                }
+                C2D_TargetClear(bottomScreen, clrBgDark);
+                C2D_SceneBegin(bottomScreen);
+                Ui::backdrop(320.0f, 240.0f, static_cast<float>(animTick), Ui::rgba(18, 14, 30), Ui::rgba(10, 8, 18), clrPrimary, 0.01f);
+                drawCenteredText(textBuf, 160.0f, 120.0f, 0.36f, Ui::rgba(40, 215, 235), "Cargando mapa en memoria...", 0.25f);
+                C3D_FrameEnd(0);
+
+                std::string osuFileToLoad = findLocalMapFile(multiMgr.activeBeatmap.folderPath, multiMgr.activeBeatmap.osuFilename);
+                if (osuFileToLoad.empty()) {
+                    osuFileToLoad = "sdmc:/3ds/osu-3ds/songs/" + multiMgr.activeBeatmap.folderPath + "/" + multiMgr.activeBeatmap.osuFilename;
+                }
+
+                if (beatmap.loadFromFile(osuFileToLoad, false)) {
+                    uint32_t matchMods = (multiMgr.modMode == MODS_HOST_ONLY)
+                        ? multiMgr.players[multiMgr.hostSlot].activeMods
+                        : multiMgr.players[multiMgr.localSlot].activeMods;
+                    beatmap.applyMods(matchMods);
+                    settings.activeMods = matchMods;
+
+                    bgLoader.cancel();
+                    previewDelay = 0;
+                    if (!beatmap.fullBackgroundPath.empty()) {
+                        bgTex.loadFromFile(beatmap.fullBackgroundPath, bgMaxW, bgMaxH);
+                    }
+                    if (settings.enableVideo && !beatmap.fullVideoPath.empty()) {
+                        videoPlayer.openVideo(beatmap.fullVideoPath, beatmap.videoOffsetMs);
+                    } else {
+                        videoPlayer.closeVideo();
+                    }
+
+                    audio.setVolumes(settings.musicVolume, settings.sfxVolume);
+                    applyActiveSkinAudio();
+                    if (settings.beatmapHitsounds && !beatmap.folderPath.empty()) {
+                        audio.loadBeatmapHitsounds(beatmap.folderPath, beatmap.sampleSetName);
+                    }
+
+                    bool isTaikoMatch = (settings.gameMode == MODE_TAIKO || beatmap.mode == 1);
+                    bool isCatchMatch = (settings.gameMode == MODE_CATCH || beatmap.mode == 2);
+                    bool isManiaMatch = (settings.gameMode == MODE_MANIA || beatmap.mode == 3);
+                    if (isTaikoMatch) {
+                        taikoEngine.initFromBeatmap(beatmap);
+                    } else if (isCatchMatch) {
+                        catchEngine.initFromBeatmap(beatmap);
+                    } else if (isManiaMatch) {
+                        maniaEngine.initFromBeatmap(beatmap);
+                    }
+
+                    multiSyncLeadIn = std::max(0, beatmap.audioLeadIn);
+                    if (isTaikoMatch) {
+                        if (!taikoEngine.notes.empty()) {
+                            int firstObjTime = taikoEngine.notes.front().time;
+                            int minStartWait = 1400;
+                            if (firstObjTime < minStartWait) multiSyncLeadIn = std::max(multiSyncLeadIn, minStartWait - firstObjTime);
+                        }
+                    } else if (isCatchMatch) {
+                        if (!catchEngine.fruits.empty()) {
+                            int firstObjTime = catchEngine.fruits.front().time;
+                            int minStartWait = 1300;
+                            if (firstObjTime < minStartWait) multiSyncLeadIn = std::max(multiSyncLeadIn, minStartWait - firstObjTime);
+                        }
+                    } else if (isManiaMatch) {
+                        if (!maniaEngine.notes.empty()) {
+                            int firstObjTime = maniaEngine.notes.front().time;
+                            int minStartWait = 1200;
+                            if (firstObjTime < minStartWait) multiSyncLeadIn = std::max(multiSyncLeadIn, minStartWait - firstObjTime);
+                        }
+                    } else if (!beatmap.circles.empty()) {
+                        int firstObjTime = beatmap.circles.front().time;
+                        int minStartWait = static_cast<int>(beatmap.diff.preempt) + 500;
+                        if (firstObjTime < minStartWait) multiSyncLeadIn = std::max(multiSyncLeadIn, minStartWait - firstObjTime);
+                    }
+
+                    multiSyncLoaded = true;
+                    multiMgr.sendMatchLoaded();
+                } else {
+                    multiMgr.matchStarted = false;
+                    multiMgr.players[multiMgr.localSlot].status = STATUS_MISSING_MAP;
+                    multiMgr.sendPlayerUpdate();
+                    appState = STATE_MULTI_LOBBY;
+                    continue;
+                }
+            }
+
+            // Fase 2: Coordinacion del Host (comprueba si todos estan cargados)
+            if (multiMgr.isHost() && multiSyncLoaded && !multiMgr.matchGo) {
+                if (multiMgr.areAllPlayersLoaded()) {
+                    multiMgr.sendMatchGo(500); // 500 ms de margen para sincronizar el inicio simultaneo
+                }
+            }
+
+            // Fase 3: Inicio simultaneo al recibir matchGo
+            if (multiMgr.matchGo) {
+                audio.playHitSound(2);
+                float speedRate = getModsSpeedMultiplier(settings.activeMods);
+                int totalLeadIn = multiSyncLeadIn + static_cast<int>(multiMgr.matchGoDelayMs);
+                audio.startMusic(beatmap.fullAudioPath, totalLeadIn, speedRate, 0);
+                gameplayFallbackStartTick = osGetTime() + totalLeadIn;
+
+                combo = 0;
+                prevCombo = 0;
+                lastBrokenCombo = 0;
+                maxCombo = 0;
+                score = 0;
+                count300 = count100 = count50 = countMiss = 0;
+                k1PressCount = k2PressCount = 0;
+                comboScale = 1.0f;
+                comboBreakAnim = 0.0f;
+                hitErrorTicks.clear();
+                allHitErrors.clear();
+                judgementHistory.clear();
+                hitErrorNeedle = 0.0f;
+                lastUnstableRate = 0.0f;
+                lastMeanHitError = 0.0f;
+                spinnerRPM = 0.0f;
+                spinnerClearAnim = 0.0f;
+                spinnerBonusAnim = 0.0f;
+                lastSpinnerBonus = 0;
+                shakeTimer = 0.0f;
+                shakeIntensity = 0.0f;
+                shakeX = 0.0f;
+                shakeY = 0.0f;
+                hp = 1.0f;
+                stageFailed = false;
+                newRecordAchieved = false;
+                lastEarnedPP = 0.0f;
+                isPaused = false;
+                pauseOption = 0;
+                cursorOsuX = 256.0f;
+                cursorOsuY = 192.0f;
+                prevCursorOsuX = 256.0f;
+                prevCursorOsuY = 192.0f;
+                cursorTrail.clear();
+                smokeParticles.clear();
+                popups.clear();
+                particles.clear();
+                overtakeFlashAnim = 0.0f;
+                hasOvertakenBest = false;
+                skipAvailable = false;
+                skipTargetMs = 0;
+                inBreakPeriod = false;
+                breakRemainingMs = 0;
+                breakTotalMs = 0;
+                breakNextObjPos = !beatmap.circles.empty() ? Vec2(beatmap.circles.front().x, beatmap.circles.front().y) : Vec2(256.0f, 192.0f);
+                inKiai = false;
+                prevInKiai = false;
+                kiaiGlow = 0.0f;
+                kiaiBurstFlash = 0.0f;
+                comboBurstTimer = 0;
+                comboBurstSide = 0;
+                comboBurstValue = 0;
+                lastComboBurstMilestone = 0;
+                lastNcStep = -999999;
+                taikoGuideTimer = 240.0f;
+
+                multiMgr.players[multiMgr.localSlot].resetForMatch();
+                multiMgr.matchStarted = false;
+                multiMgr.matchGo = false;
+
+                appState = STATE_PLAYING;
+                continue;
+            }
+
+            // Renderizado de la pantalla de espera de sincronizacion pre-partida
+            C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
+            for (int eye = 0; eye < (stereoActive ? 2 : 1); ++eye) {
+                C3D_RenderTarget* curTop = (eye == 0) ? topScreen : topScreenRight;
+                float eyeSign = stereoActive ? ((eye == 0) ? 1.0f : -1.0f) : 0.0f;
+                C2D_TargetClear(curTop, clrBgDark);
+                C2D_SceneBegin(curTop);
+                auto depthShift = [&](float px) { return eyeSign * slider3D * px; };
+
+                float dBg = depthShift(-3.0f);
+                if (bgTex.loaded) {
+                    bgTex.drawRect(dBg, 0.0f, 400.0f, 240.0f, 0.02f, 255);
+                    C2D_DrawRectSolid(0.0f, 0.0f, 0.03f, 400.0f, 240.0f, Ui::rgba(14, 10, 24, 180));
+                } else {
+                    Ui::backdrop(400.0f, 240.0f, static_cast<float>(animTick), Ui::rgba(18, 14, 30), Ui::rgba(10, 8, 18), clrPrimary, 0.01f);
+                }
+
+                float dPan = depthShift(2.5f);
+                Ui::panel(40.0f + dPan, 35.0f, 320.0f, 150.0f, 0.20f, Ui::rgba(20, 16, 32, 240), Ui::rgba(40, 215, 235));
+                drawCenteredText(textBuf, 200.0f + dPan, 52.0f, 0.44f, Ui::rgba(40, 215, 235), "ESPERANDO A LAS DEMAS CONSOLAS...", 0.25f);
+
+                char syncTxt[64];
+                std::snprintf(syncTxt, sizeof(syncTxt), "Consolas preparadas: %d / %d", multiMgr.getLoadedPlayerCount(), multiMgr.getActivePlayerCount());
+                drawCenteredText(textBuf, 200.0f + dPan, 72.0f, 0.34f, clrWhite, syncTxt, 0.25f);
+
+                // Ranuras de jugadores con su estado de carga
+                for (int s = 0; s < MULTI_MAX_PLAYERS; ++s) {
+                    if (multiMgr.players[s].active) {
+                        float py = 92.0f + s * 20.0f;
+                        drawText(textBuf, 60.0f + dPan, py, 0.32f, clrWhite, multiMgr.players[s].name, 0.25f);
+                        bool isL = (multiMgr.players[s].status == STATUS_LOADED);
+                        Ui::pill(270.0f + dPan, py, 70.0f, 16.0f, 0.26f, isL ? Ui::rgba(30, 180, 80) : Ui::rgba(220, 140, 30));
+                        drawCenteredText(textBuf, 305.0f + dPan, py + 8.0f, 0.28f, clrWhite, isL ? "PREPARADO" : "CARGANDO...", 0.30f);
+                    }
+                }
+
+                drawCenteredText(textBuf, 200.0f + dPan, 205.0f, 0.32f, clrMuted, "El mapa comenzara exactamente al mismo tiempo", 0.25f);
+                drawCenteredText(textBuf, 200.0f + dPan, 222.0f, 0.28f, Ui::rgba(255, 90, 90), "[B] Cancelar y volver a la sala", 0.25f);
+            }
+
+            C2D_TargetClear(bottomScreen, clrBgDark);
+            C2D_SceneBegin(bottomScreen);
+            Ui::backdrop(320.0f, 240.0f, static_cast<float>(animTick), Ui::rgba(18, 14, 30), Ui::rgba(10, 8, 18), clrPrimary, 0.01f);
+            Ui::panel(16.0f, 40.0f, 288.0f, 160.0f, 0.20f, Ui::rgba(22, 18, 36, 240), Ui::rgba(85, 75, 110));
+            drawCenteredText(textBuf, 160.0f, 65.0f, 0.44f, clrWhite, truncateString(multiMgr.activeBeatmap.title, 24).c_str(), 0.25f);
+            drawCenteredText(textBuf, 160.0f, 85.0f, 0.34f, clrMuted, truncateString(multiMgr.activeBeatmap.artist, 26).c_str(), 0.25f);
+            drawCenteredText(textBuf, 160.0f, 105.0f, 0.34f, Ui::rgba(255, 205, 50), truncateString(multiMgr.activeBeatmap.version, 24).c_str(), 0.25f);
+            drawCenteredText(textBuf, 160.0f, 145.0f, 0.38f, Ui::rgba(40, 215, 235), "Sincronizando reloj de juego...", 0.25f);
             C3D_FrameEnd(0);
             continue;
         }
@@ -4398,7 +6645,12 @@ int main(int argc, char* argv[]) {
         // =========================================================
         bool isTaikoPlay = (settings.gameMode == MODE_TAIKO || beatmap.mode == 1);
 
-        if (kDown & KEY_START) {
+        // En multijugador la pausa está totalmente deshabilitada para mantener la sincronía en tiempo real
+        if (multiMgr.inMultiplayer) {
+            isPaused = false;
+        }
+
+        if (!multiMgr.inMultiplayer && (kDown & KEY_START)) {
             if (!isPaused) {
                 isPaused = true;
                 pauseOption = 0;
@@ -4432,14 +6684,14 @@ int main(int argc, char* argv[]) {
             bool triggerPauseAction = (kDown & KEY_A) != 0;
 
             // Botones táctiles en la pantalla inferior durante la pausa
-            if (touchJustDown && touch.px >= 40 && touch.px <= 280) {
-                if (touch.py >= 40 && touch.py <= 84) {
+            if (touchJustDown && touch.px >= 28 && touch.px <= 292) {
+                if (touch.py >= 36 && touch.py <= 84) {
                     pauseOption = 0;
                     triggerPauseAction = true;
-                } else if (touch.py >= 98 && touch.py <= 142) {
+                } else if (touch.py >= 88 && touch.py <= 136) {
                     pauseOption = 1;
                     triggerPauseAction = true;
-                } else if (touch.py >= 156 && touch.py <= 200) {
+                } else if (touch.py >= 140 && touch.py <= 188) {
                     pauseOption = 2;
                     triggerPauseAction = true;
                 }
@@ -4457,8 +6709,13 @@ int main(int argc, char* argv[]) {
                     audio.stopMusic();
                     videoPlayer.closeVideo();
                     applyActiveSkinAudio();
-                    appState = STATE_SONG_SELECT;
-                    updateSongPreview();
+                    if (multiMgr.inMultiplayer) {
+                        multiMgr.stop();
+                        appState = STATE_MAIN_MENU;
+                    } else {
+                        appState = STATE_SONG_SELECT;
+                        updateSongPreview();
+                    }
                     continue;
                 }
             }
@@ -4466,7 +6723,39 @@ int main(int argc, char* argv[]) {
             audio.update();
         }
 
-        int songTime = audio.getTimeMs() - settings.audioOffsetMs;
+        if (multiMgr.inMultiplayer) {
+            multiMgr.players[multiMgr.localSlot].score = score;
+            multiMgr.players[multiMgr.localSlot].combo = combo;
+            multiMgr.players[multiMgr.localSlot].maxCombo = maxCombo;
+            int totalJudged = count300 + count100 + count50 + countMiss;
+            multiMgr.players[multiMgr.localSlot].accuracy = (totalJudged > 0)
+                ? ((count300 * 300.0f + count100 * 100.0f + count50 * 50.0f) / (totalJudged * 300.0f)) * 100.0f
+                : 100.0f;
+            multiMgr.players[multiMgr.localSlot].hp = hp;
+            multiMgr.update(true);
+
+            if (!multiMgr.inMultiplayer) {
+                audio.stopMusic();
+                videoPlayer.closeVideo();
+                multiMgr.startBrowser(sysUser);
+                appState = STATE_MULTI_BROWSER;
+                continue;
+            }
+        }
+
+        float speedRate    = getModsSpeedMultiplier(settings.activeMods);
+        int songTime = 0;
+        if (audio.getIsPlaying()) {
+            songTime = audio.getTimeMs() - settings.audioOffsetMs;
+        } else {
+            // Reloj monotónico de respaldo para emuladores (Citra / Azahar) o fallos de audio
+            u64 nowTick = osGetTime();
+            if (nowTick < gameplayFallbackStartTick) {
+                songTime = -static_cast<int>(gameplayFallbackStartTick - nowTick) - settings.audioOffsetMs;
+            } else {
+                songTime = static_cast<int>((nowTick - gameplayFallbackStartTick) * speedRate) - settings.audioOffsetMs;
+            }
+        }
         if (settings.enableVideo) {
             videoPlayer.update(songTime, isPaused);
         }
@@ -4480,7 +6769,6 @@ int main(int argc, char* argv[]) {
         bool isAutoPilot   = (settings.activeMods & MOD_AP) != 0;
         bool isSpunOut     = (settings.activeMods & MOD_SO) != 0;
         float scoreMult    = getModsScoreMultiplier(settings.activeMods);
-        float speedRate    = getModsSpeedMultiplier(settings.activeMods);
         isTaikoPlay        = (settings.gameMode == MODE_TAIKO || beatmap.mode == 1);
         bool isCatchPlay   = (settings.gameMode == MODE_CATCH || beatmap.mode == 2);
         bool isManiaPlay   = (settings.gameMode == MODE_MANIA || beatmap.mode == 3);
@@ -4506,24 +6794,27 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        // 2. Evaluar disponibilidad de SKIP (Intro o Descanso largo)
+        // 2. Evaluar disponibilidad de SKIP (Intro o Descanso largo, solo en Single Player)
         skipAvailable = false;
         skipTargetMs = 0;
-        if (!beatmap.circles.empty()) {
-            int firstNoteTime = beatmap.circles.front().time;
-            int introWait = firstNoteTime - static_cast<int>(beatmap.diff.preempt) - 1000;
-            if (introWait > songTime + 2200) {
-                skipAvailable = true;
-                skipTargetMs = introWait;
+        if (!multiMgr.inMultiplayer) {
+            if (!beatmap.circles.empty()) {
+                int firstNoteTime = beatmap.circles.front().time;
+                int introWait = firstNoteTime - static_cast<int>(beatmap.diff.preempt) - 1000;
+                if (introWait > songTime + 2200) {
+                    skipAvailable = true;
+                    skipTargetMs = introWait;
+                }
             }
-        }
-        if (!skipAvailable && inBreakPeriod && breakRemainingMs > 2600) {
-            skipAvailable = true;
-            skipTargetMs = songTime + breakRemainingMs - 1200;
+            if (!skipAvailable && inBreakPeriod && breakRemainingMs > 2600) {
+                skipAvailable = true;
+                skipTargetMs = songTime + breakRemainingMs - 1200;
+            }
         }
 
         // 3. Procesar activación de SKIP (Toque táctil o botones ZL / ZR / START)
-        bool touchOnSkip = (touchJustDown || isTouching) && (touch.px >= 195 && touch.px <= 318 && touch.py >= 185 && touch.py <= 240);
+        // touchJustDown únicamente (isTouching repetitivo en cada frame provocaba lag y desync)
+        bool touchOnSkip = touchJustDown && (touch.px >= 195 && touch.px <= 318 && touch.py >= 185 && touch.py <= 240);
         bool btnSkip = (kDown & (KEY_ZL | KEY_ZR | KEY_START)) != 0;
         if (skipAvailable && !isPaused && (touchOnSkip || btnSkip)) {
             audio.playHitSound(2);
@@ -4540,16 +6831,16 @@ int main(int argc, char* argv[]) {
             cursorTrail.clear();
         }
 
-        // 3b. Procesar activación de REINICIO RÁPIDO (Solo botón físico asignado como SELECT)
+        // 3b. Procesar activación de REINICIO RÁPIDO (Solo botón físico asignado como SELECT, deshabilitado en multijugador)
         bool btnRetry = (kDown & settings.keyQuickRetry) != 0;
-        if (!isPaused && btnRetry) {
+        if (!isPaused && btnRetry && !multiMgr.inMultiplayer) {
             audio.playHitSound(2);
             startSelectedBeatmap();
             continue;
         }
 
-        // 4. Animación y detección de superación de récord en vivo (In-Game Leaderboard)
-        if (!localRecords.empty() && !hasOvertakenBest) {
+        // 4. Animación y detección de superación de récord en vivo (In-Game Leaderboard, solo en Single Player)
+        if (!multiMgr.inMultiplayer && !localRecords.empty() && !hasOvertakenBest) {
             if (score > localRecords[0].bestScore) {
                 hasOvertakenBest = true;
                 overtakeFlashAnim = 1.0f;
@@ -4650,7 +6941,19 @@ int main(int argc, char* argv[]) {
             lastEarnedPP = 0.0f;
             audio.stopMusic();
             videoPlayer.closeVideo();
-            appState = STATE_RESULTS;
+            int totalJudged = count300 + count100 + count50 + countMiss;
+            float curAcc = (totalJudged > 0)
+                ? ((count300 * 300.0f + count100 * 100.0f + count50 * 50.0f) / (totalJudged * 300.0f)) * 100.0f
+                : 100.0f;
+            if (multiMgr.inMultiplayer) {
+                multiMgr.matchStarted = false;
+                multiMgr.matchInProgressFlag = false;
+                multiMgr.matchFinished = true;
+                multiMgr.sendLiveGameplay(score, combo, maxCombo, curAcc, 0.0f, "F", count300, count100, count50, countMiss, true, true);
+                appState = STATE_MULTI_RESULTS;
+            } else {
+                appState = STATE_RESULTS;
+            }
         };
 
         bool tapWithTouch = settings.playOnBottomScreen || settings.tapWithStylus;
@@ -4829,7 +7132,19 @@ int main(int argc, char* argv[]) {
                         lastEarnedPP = 0.0f;
                         audio.stopMusic();
                         videoPlayer.closeVideo();
-                        appState = STATE_RESULTS;
+                        int totalJudged = count300 + count100 + count50 + countMiss;
+                        float curAcc = (totalJudged > 0)
+                            ? ((count300 * 300.0f + count100 * 100.0f + count50 * 50.0f) / (totalJudged * 300.0f)) * 100.0f
+                            : 100.0f;
+                        if (multiMgr.inMultiplayer) {
+                            multiMgr.matchStarted = false;
+                            multiMgr.matchInProgressFlag = false;
+                            multiMgr.matchFinished = true;
+                            multiMgr.sendLiveGameplay(score, combo, maxCombo, curAcc, 0.0f, "F", count300, count100, count50, countMiss, true, true);
+                            appState = STATE_MULTI_RESULTS;
+                        } else {
+                            appState = STATE_RESULTS;
+                        }
                         continue;
                     }
                 }
@@ -4955,8 +7270,10 @@ int main(int argc, char* argv[]) {
                         hp = std::min(1.0f, hp + 0.05f);
                         playTaikoSfx();
                         if (combo > 0 && (combo % 50 == 0)) audio.playTaikoBalloonPop();
-                        popups.push_back(HitPopup(ModeTaiko::TARGET_X, ModeTaiko::TRACK_Y, HIT_300, 24.0f, clr300, 24));
-                        spawnParticles(ModeTaiko::TARGET_X, ModeTaiko::TRACK_Y, donDown ? ModeTaiko::CLR_DON_INNER : ModeTaiko::CLR_KATSU_INNER, 6, 0.8f, 2.4f, 2.2f, 15);
+                        if (settings.showHit300) {
+                            popups.push_back(HitPopup(ModeTaiko::TARGET_X, ModeTaiko::TRACK_Y, HIT_300, 24.0f, clr300, 24));
+                            spawnParticles(ModeTaiko::TARGET_X, ModeTaiko::TRACK_Y, donDown ? ModeTaiko::CLR_DON_INNER : ModeTaiko::CLR_KATSU_INNER, 6, 0.8f, 2.4f, 2.2f, 15);
+                        }
                     } else if (hitRes == ModeTaiko::TAIKO_HIT_100) {
                         count100++;
                         combo++;
@@ -5084,7 +7401,7 @@ int main(int argc, char* argv[]) {
                             score += static_cast<int>((300 + 300 * combo * 0.05f) * scoreMult);
                             hp = std::min(1.0f, hp + 0.04f);
                             audio.playHitSound(c % 2);
-                            popups.push_back(HitPopup(popX, ModeMania::HIT_Y - 20.0f, HIT_300, 22.0f, clr300, 22));
+                            if (settings.showHit300) popups.push_back(HitPopup(popX, ModeMania::HIT_Y - 20.0f, HIT_300, 22.0f, clr300, 22));
                         } else if (relRes == 100) {
                             count100++;
                             combo++;
@@ -5121,8 +7438,10 @@ int main(int argc, char* argv[]) {
                             score += static_cast<int>((300 + 300 * combo * 0.05f) * scoreMult);
                             hp = std::min(1.0f, hp + 0.04f);
                             audio.playHitSound(c % 2);
-                            popups.push_back(HitPopup(popX, ModeMania::HIT_Y - 20.0f, HIT_300, 24.0f, clr300, 24));
-                            spawnParticles(popX, ModeMania::HIT_Y, pClr, 6, 0.8f, 2.2f, 2.0f, 15);
+                            if (settings.showHit300) {
+                                popups.push_back(HitPopup(popX, ModeMania::HIT_Y - 20.0f, HIT_300, 24.0f, clr300, 24));
+                                spawnParticles(popX, ModeMania::HIT_Y, pClr, 6, 0.8f, 2.2f, 2.0f, 15);
+                            }
                         } else if (hitRes == 100) {
                             count100++;
                             combo++;
@@ -5163,7 +7482,7 @@ int main(int argc, char* argv[]) {
                     if (combo > maxCombo) maxCombo = combo;
                     score += static_cast<int>((300 + 300 * combo * 0.05f) * scoreMult);
                     hp = std::min(1.0f, hp + 0.04f);
-                    popups.push_back(HitPopup(ModeMania::TRACK_X + ModeMania::COL_WIDTH * 2.0f, ModeMania::HIT_Y - 20.0f, HIT_300, 24.0f, clr300, 24));
+                    if (settings.showHit300) popups.push_back(HitPopup(ModeMania::TRACK_X + ModeMania::COL_WIDTH * 2.0f, ModeMania::HIT_Y - 20.0f, HIT_300, 24.0f, clr300, 24));
                 }
 
                 allObjectsDone = (maniaEngine.nextNoteIndex >= maniaEngine.notes.size());
@@ -5229,10 +7548,12 @@ int main(int argc, char* argv[]) {
                     audio.playHitSound((hitResult == 1100) ? 2 : (hitResult == 100 ? 1 : 0));
                     float fruitScrX = catchEngine.toScreenX(catchEngine.catcherX);
                     if (hitResult == 300) {
-                        spawnParticles(fruitScrX, ModeCatch::PLATE_Y, Ui::rgba(255, 100, 140), 5, 0.8f, 2.2f, 2.0f, 14);
+                        if (settings.showHit300) spawnParticles(fruitScrX, ModeCatch::PLATE_Y, Ui::rgba(255, 100, 140), 5, 0.8f, 2.2f, 2.0f, 14);
                     } else if (hitResult == 1100) {
-                        spawnParticles(fruitScrX, ModeCatch::PLATE_Y, ModeCatch::CLR_BANANA, 8, 1.0f, 2.8f, 2.2f, 18);
-                        popups.push_back(HitPopup(fruitScrX, ModeCatch::PLATE_Y - 25.0f, HIT_300, 24.0f, ModeCatch::CLR_BANANA, 24));
+                        if (settings.showHit300) {
+                            spawnParticles(fruitScrX, ModeCatch::PLATE_Y, ModeCatch::CLR_BANANA, 8, 1.0f, 2.8f, 2.2f, 18);
+                            popups.push_back(HitPopup(fruitScrX, ModeCatch::PLATE_Y - 25.0f, HIT_300, 24.0f, ModeCatch::CLR_BANANA, 24));
+                        }
                     }
                 } else if (hitResult == -1) {
                     // ¡MISS de fruta grande!
@@ -5372,7 +7693,9 @@ int main(int argc, char* argv[]) {
                                 break;
                             }
                         }
-                        popups.push_back(HitPopup(256.0f, 192.0f, obj.state, hitRadius * SCALE_FACTOR, objBurstClr, 20));
+                        if (obj.state != HIT_300 || settings.showHit300) {
+                            popups.push_back(HitPopup(256.0f, 192.0f, obj.state, hitRadius * SCALE_FACTOR, objBurstClr, 20));
+                        }
                     }
                     continue;
                 }
@@ -5432,8 +7755,10 @@ int main(int argc, char* argv[]) {
                             count300++;
                             hp = std::min(1.0f, hp + 0.05f);
                             judgementHistory.push_back({obj.endTime, HIT_300, 0.0f});
-                            popups.push_back(HitPopup(ballPos.x, ballPos.y, HIT_300, hitRadius * SCALE_FACTOR, objBurstClr, 18));
-                            spawnParticles(ballPos.x, ballPos.y, objBurstClr, 7, 0.8f, 2.3f, 2.3f, 15);
+                            if (settings.showHit300) {
+                                popups.push_back(HitPopup(ballPos.x, ballPos.y, HIT_300, hitRadius * SCALE_FACTOR, objBurstClr, 18));
+                                spawnParticles(ballPos.x, ballPos.y, objBurstClr, 7, 0.8f, 2.3f, 2.3f, 15);
+                            }
                         } else if (obj.state == NOT_HIT) {
                             obj.state = HIT_MISS;
                             combo = 0;
@@ -5517,9 +7842,11 @@ int main(int argc, char* argv[]) {
                             if (combo > maxCombo) maxCombo = combo;
                             if (obj.isSlider) obj.sliderTracking = true;
                             judgementHistory.push_back({obj.time, obj.state, signedErrMs});
-                            popups.push_back(HitPopup(obj.x, obj.y, obj.state, hitRadius * SCALE_FACTOR, objBurstClr, 18));
-                            spawnParticles(obj.x, obj.y, (obj.state == HIT_300) ? objBurstClr : clr100,
-                                           (obj.state == HIT_300) ? 7 : 4, 0.8f, 2.4f, 2.3f, 15);
+                            if (obj.state != HIT_300 || settings.showHit300) {
+                                popups.push_back(HitPopup(obj.x, obj.y, obj.state, hitRadius * SCALE_FACTOR, objBurstClr, 18));
+                                spawnParticles(obj.x, obj.y, (obj.state == HIT_300) ? objBurstClr : clr100,
+                                               (obj.state == HIT_300) ? 7 : 4, 0.8f, 2.4f, 2.3f, 15);
+                            }
 
                             // Registrar marca en el Hit Error Meter y estadisticas de UR
                             hitErrorTicks.push_back({signedErrMs, obj.state, 210});
@@ -5647,10 +7974,15 @@ int main(int argc, char* argv[]) {
                 newRecordAchieved = scoreMgr.submitScore(
                     beatmap.filePath, score, maxCombo, acc, grade, settings.activeMods, lastEarnedPP, currentPlayMode
                 );
-                if (newRecordAchieved && songMgr.sortMode == SORT_BY_RECORD) {
-                    songMgr.applySortAndFilter(&scoreMgr);
+                if (multiMgr.inMultiplayer) {
+                    multiMgr.matchStarted = false;
+                    multiMgr.matchInProgressFlag = false;
+                    multiMgr.matchFinished = true;
+                    multiMgr.sendLiveGameplay(score, combo, maxCombo, acc, hp, grade, count300, count100, count50, countMiss, true, stageFailed);
+                    appState = STATE_MULTI_RESULTS;
+                } else {
+                    appState = STATE_RESULTS;
                 }
-                appState = STATE_RESULTS;
                 continue;
             }
         }
@@ -5703,12 +8035,8 @@ int main(int argc, char* argv[]) {
             if (settings.showPlayfieldBorder && !isTaikoPlay && !isManiaPlay && !isCatchPlay) {
                 drawRectOutline(baseOffsetX + shakeX + dPlayfield, baseOffsetY + shakeY, PLAYFIELD_W, PLAYFIELD_H, 1.0f, Ui::rgba(255, 255, 255, 38), 0.03f);
             }
-            if (comboBreakAnim > 0.01f) {
-                u8 cbAlpha = static_cast<u8>(comboBreakAnim * 110.0f);
-                drawRectOutline(0.0f, 0.0f, screenW, 240.0f, 4.0f, Ui::rgba(255, 60, 75, cbAlpha), 0.85f);
-            }
 
-            // Efectos de Kiai Time: Resplandor rítmico, viñetas de energía y destello inicial
+            // Efectos de Kiai Time: Resplandor rítmico y viñetas de energía
             float bpmPulse = getBpmPulse();
             if (kiaiGlow > 0.01f) {
                 u8 glowAlpha = static_cast<u8>(kiaiGlow * (45.0f + 110.0f * bpmPulse));
@@ -5721,10 +8049,6 @@ int main(int argc, char* argv[]) {
                 u8 vAlpha = static_cast<u8>(kiaiGlow * (35.0f + 45.0f * bpmPulse));
                 Ui::gradV(0.0f, 0.0f, screenW, edgeH, 0.04f, Ui::rgba(255, 120, 180, vAlpha), Ui::rgba(255, 120, 180, 0));
                 Ui::gradV(0.0f, 240.0f - edgeH, screenW, edgeH, 0.04f, Ui::rgba(255, 120, 180, 0), Ui::rgba(255, 120, 180, vAlpha));
-            }
-            if (kiaiBurstFlash > 0.01f) {
-                u8 fAlpha = static_cast<u8>(kiaiBurstFlash * 65.0f);
-                C2D_DrawRectSolid(0.0f, 0.0f, 0.82f, screenW, 240.0f, Ui::rgba(255, 240, 200, fAlpha));
             }
 
             if (isTaikoPlay) {
@@ -5798,17 +8122,20 @@ int main(int argc, char* argv[]) {
                     alphaMult = std::max(0.0f, std::min(1.0f, timeSinceAppear / fadeIn));
                 }
                 if (isHidden && !obj.isSpinner) {
-                    float fadeOutStart = preempt * 0.4f;
-                    float fadeOutEnd   = preempt * 0.72f;
+                    float fadeOutStart = preempt * 0.40f;
+                    float fadeOutEnd   = preempt * 0.70f; // Se desvanece totalmente cuando falta 30% del preempt
                     if (timeSinceAppear > fadeOutStart) {
                         float t = (timeSinceAppear - fadeOutStart) / std::max(1.0f, fadeOutEnd - fadeOutStart);
                         alphaMult = std::max(0.0f, 1.0f - t);
+                    }
+                    if (timeSinceAppear >= fadeOutEnd) {
+                        alphaMult = 0.0f;
                     }
                 }
 
                 const auto& rgb = activePalette[obj.colorIndex % activePalette.size()];
                 u8 cAlpha = static_cast<u8>(235.0f * alphaMult);
-                u8 sAlpha = static_cast<u8>(165.0f * (isHidden ? std::max(0.25f, alphaMult) : 1.0f));
+                u8 sAlpha = static_cast<u8>(165.0f * alphaMult);
                 u32 cColor = C2D_Color32(rgb.r, rgb.g, rgb.b, cAlpha);
                 u32 sColor = activeSkin.hasSliderTrackOverride
                     ? C2D_Color32(activeSkin.sliderTrackColor.r, activeSkin.sliderTrackColor.g, activeSkin.sliderTrackColor.b, sAlpha)
@@ -5824,7 +8151,7 @@ int main(int argc, char* argv[]) {
                     float timeRatio = std::max(0.0f, std::min(1.0f, static_cast<float>(songTime - obj.time) / spDur));
 
                     // Atenuacion suave del fondo para destacar el Spinner
-                    C2D_DrawRectSolid(baseOffsetX + shakeX + dPlayfield, baseOffsetY + shakeY, 0.14f, PLAYFIELD_W, PLAYFIELD_H, Ui::rgba(8, 6, 18, 95));
+                    C2D_DrawRectSolid(baseOffsetX + shakeX + dPlayfield, baseOffsetY + shakeY, 0.025f, PLAYFIELD_W, PLAYFIELD_H, Ui::rgba(8, 6, 18, 95));
 
                     u32 spinClr = obj.spinnerCleared ? clrCursor : ((fillRatio > 0.6f) ? clr100 : clr300);
 
@@ -6003,7 +8330,7 @@ int main(int argc, char* argv[]) {
                         if (!tk.hit && tk.time >= songTime - 50) {
                             float tkProgress = static_cast<float>(tk.time - obj.time) / std::max(1.0f, slideDur);
                             if (songTime >= obj.time || snakeInFrac >= tkProgress) {
-                                C2D_DrawCircleSolid(playX(tk.x, dSlider), playY(tk.y), objBaseZ + subStep * 3.0f, 2.2f, clrWhite);
+                                C2D_DrawCircleSolid(playX(tk.x, dSlider), playY(tk.y), objBaseZ + subStep * 3.0f, 2.2f, Ui::withAlpha(clrWhite, cAlpha));
                             }
                         }
                     }
@@ -6017,7 +8344,7 @@ int main(int argc, char* argv[]) {
                             drawReverseArrow(
                                 playX(pTip.x, dSlider), playY(pTip.y),
                                 playX(pPrev.x, dSlider), playY(pPrev.y),
-                                rScreen * 0.65f, clrWhite, objBaseZ + subStep * 4.0f
+                                rScreen * 0.65f, Ui::withAlpha(clrWhite, cAlpha), objBaseZ + subStep * 4.0f
                             );
                         } else {
                             const Vec2& pTip = obj.sliderPath.front();
@@ -6025,7 +8352,7 @@ int main(int argc, char* argv[]) {
                             drawReverseArrow(
                                 playX(pTip.x, dSlider), playY(pTip.y),
                                 playX(pNext.x, dSlider), playY(pNext.y),
-                                rScreen * 0.65f, clrWhite, objBaseZ + subStep * 4.0f
+                                rScreen * 0.65f, Ui::withAlpha(clrWhite, cAlpha), objBaseZ + subStep * 4.0f
                             );
                         }
                     }
@@ -6153,6 +8480,7 @@ int main(int argc, char* argv[]) {
             // 3. Efecto Hit Burst y calificaciones flotantes (300 / 100 / 50 / X)
             float dHitPopup = depthShift(4.8f);
             for (size_t i = 0; i < popups.size(); ++i) {
+                if (popups[i].state == HIT_300 && !settings.showHit300) continue;
                 float px = (isTaikoPlay || isManiaPlay || isCatchPlay) ? (popups[i].x + dHitPopup) : playX(popups[i].x, dHitPopup);
                 float py = (isTaikoPlay || isManiaPlay || isCatchPlay) ? (popups[i].y + shakeY) : playY(popups[i].y);
                 float age = static_cast<float>(18 - popups[i].timer);
@@ -6223,6 +8551,53 @@ int main(int argc, char* argv[]) {
                 if (settings.activeMods != MOD_NONE) {
                     std::string mTag = formatModsString(settings.activeMods);
                     drawText(textBuf, 330.0f + dFrontHud, 52.0f, 0.34f, clrCursor, mTag.c_str());
+                }
+
+                // Leaderboard lateral Multijugador en vivo (Estilo osu! 3DS)
+                if (multiMgr.inMultiplayer) {
+                    auto rankedList = multiMgr.getLeaderboard();
+                    for (size_t r = 0; r < rankedList.size() && r < 4; ++r) {
+                        const auto& item = rankedList[r];
+                        bool onLeft = (r < 2);
+                        float cardX = (onLeft ? 8.0f : 348.0f) + dFrontHud;
+                        float cardY = (r % 2 == 0) ? 55.0f : 140.0f;
+                        float cardW = 44.0f;
+                        float cardH = 46.0f;
+
+                        u32 rankClr = (r == 0) ? Ui::rgba(255, 195, 45) :
+                                      ((r == 1) ? Ui::rgba(40, 215, 235) :
+                                      ((r == 2) ? Ui::rgba(195, 100, 255) : Ui::rgba(140, 140, 160)));
+
+                        u32 cardBorderClr = item.player->isFailed ? Ui::rgba(235, 45, 45) : rankClr;
+                        Ui::panel(cardX, cardY, cardW, cardH, 0.32f, Ui::rgba(16, 14, 28, 220), cardBorderClr);
+
+                        char rStr[8];
+                        if (item.player->isFailed) {
+                            std::snprintf(rStr, sizeof(rStr), "FAIL");
+                        } else {
+                            std::snprintf(rStr, sizeof(rStr), "#%u", static_cast<unsigned int>(r + 1));
+                        }
+                        Ui::pill(cardX + 4.0f, cardY + 4.0f, cardW - 8.0f, 13.0f, 0.35f, item.player->isFailed ? Ui::rgba(235, 45, 45) : rankClr);
+                        drawCenteredText(textBuf, cardX + cardW * 0.5f, cardY + 10.0f, 0.27f, Ui::rgba(0, 0, 0, 240), rStr, 0.38f);
+
+                        std::string shortName = item.player->name;
+                        if (shortName.size() > 5) shortName = shortName.substr(0, 4) + ".";
+                        drawCenteredText(textBuf, cardX + cardW * 0.5f, cardY + 23.0f, 0.30f, item.player->isFailed ? Ui::rgba(255, 120, 120) : clrWhite, shortName.c_str(), 0.38f);
+
+                        char statStr[16];
+                        if (multiMgr.winCondition == WIN_ACCURACY) {
+                            std::snprintf(statStr, sizeof(statStr), "%.1f%%", item.player->accuracy);
+                        } else if (multiMgr.winCondition == WIN_COMBO) {
+                            std::snprintf(statStr, sizeof(statStr), "%dx", item.player->maxCombo);
+                        } else {
+                            if (item.player->score >= 1000000) {
+                                std::snprintf(statStr, sizeof(statStr), "%.1fM", item.player->score / 1000000.0f);
+                            } else {
+                                std::snprintf(statStr, sizeof(statStr), "%ldk", item.player->score / 1000);
+                            }
+                        }
+                        drawCenteredText(textBuf, cardX + cardW * 0.5f, cardY + 36.0f, 0.28f, item.player->isFailed ? Ui::rgba(255, 100, 100) : rankClr, statStr, 0.38f);
+                    }
                 }
 
                 // Combo con efecto pop al golpear + fantasma rojo al romper combo + pulso rítmico en Kiai
@@ -6365,8 +8740,8 @@ int main(int argc, char* argv[]) {
                 }
             }
 
-            // Marcador en vivo (Leaderboard) estilo osu! lazer en el margen izquierdo
-            if (drawFullHud && !isTaikoPlay) {
+            // Marcador en vivo (Leaderboard) estilo osu! lazer en el margen izquierdo (solo Single Player; en Multi se usa el Leaderboard multijugador)
+            if (drawFullHud && !isTaikoPlay && !multiMgr.inMultiplayer) {
                 float lbX = (3.0f + dFrontHud);
                 float lbW = isTaikoPlay ? 80.0f : 74.0f;
                 float lbH = isTaikoPlay ? 18.0f : 26.0f;
@@ -6629,28 +9004,44 @@ int main(int argc, char* argv[]) {
                 float dPause = depthShift(5.0f);
                 C2D_DrawRectSolid(0.0f, 0.0f, 0.90f, 400.0f, 240.0f, Ui::rgba(8, 6, 16, 185));
                 Ui::panel(70.0f + dPause, 36.0f, 260.0f, 168.0f, 0.92f, Ui::rgba(22, 18, 38, 248), clrPrimary);
-                drawCenteredText(textBuf, 200.0f + dPause, 58.0f, 0.62f, clrCursor, "JUEGO EN PAUSA", 0.99f);
+                drawCenteredText(textBuf, 200.0f + dPause, 58.0f, 0.62f, clrCursor, LOC(STR_GAME_PAUSED), 0.99f);
 
-                const char* pOpts[3] = { "Continuar", "Reintentar Beatmap", "Volver a Canciones" };
+                const char* pOpts[3] = { LOC(STR_PAUSE_RESUME), LOC(STR_PAUSE_RETRY), LOC(STR_PAUSE_QUIT) };
+                const char* pKeys[3] = { "A", "X", "B" };
                 u32 pClrs[3] = { clr100, clrCursor, clrPrimary };
                 for (int i = 0; i < 3; ++i) {
                     bool sel = (pauseOption == i);
                     float py = 84.0f + i * 34.0f;
-                    if (sel) {
-                        Ui::slantRectGrad(90.0f + dPause, py, 220.0f, 26.0f, 8.0f, 0.95f, pClrs[i], Ui::rgba(45, 35, 78, 245));
-                    } else {
-                        Ui::slantRect(90.0f + dPause, py, 220.0f, 26.0f, 8.0f, 0.94f, Ui::rgba(36, 30, 56, 220));
-                    }
-                    drawCenteredText(textBuf, 200.0f + dPause, py + 13.0f, 0.46f, clrWhite, pOpts[i], 0.99f);
+                    float px = 86.0f + dPause;
+                    float pw = 228.0f;
+                    float ph = 28.0f;
+                    u32 bg = sel ? Ui::rgba(45, 36, 72, 250) : Ui::rgba(24, 20, 38, 235);
+                    Ui::button(px, py, pw, ph, 0.95f, bg, pClrs[i], sel);
+
+                    Ui::pill(px + 8.0f, py + 5.0f, 18.0f, 18.0f, 0.96f, sel ? pClrs[i] : Ui::rgba(45, 38, 65));
+                    drawCenteredText(textBuf, px + 17.0f, py + 14.0f, 0.28f, sel ? Ui::rgba(0, 0, 0, 240) : clrWhite, pKeys[i], 0.98f);
+                    drawTextWithShadow(textBuf, px + 34.0f, py + 5.0f, 0.40f, clrWhite, pOpts[i], 0.98f);
                 }
                 if (isTaikoPlay) {
                     u32 bClr = (settings.taikoBgMode == 0) ? Ui::rgba(225, 145, 25, 230) : ((settings.taikoBgMode == 1) ? Ui::rgba(45, 130, 215, 230) : Ui::rgba(165, 55, 185, 230));
                     Ui::pill(90.0f + dPause, 186.0f, 220.0f, 15.0f, 0.94f, bClr);
                     char bgInfo[64];
-                    std::snprintf(bgInfo, sizeof(bgInfo), "X: Fondo Taiko (%s)", settings.getTaikoBgModeName());
+                    std::snprintf(bgInfo, sizeof(bgInfo), "X: %s (%s)", LOC(STR_SET_TAIKO_BG), settings.getTaikoBgModeName());
                     drawCenteredText(textBuf, 200.0f + dPause, 193.5f, 0.26f, clrWhite, bgInfo, 0.99f);
                 }
             }
+            // Destello inicial de Kiai Time (en primer plano sin contaminar el depth buffer de los círculos)
+            if (kiaiBurstFlash > 0.01f) {
+                u8 fAlpha = static_cast<u8>(kiaiBurstFlash * 65.0f);
+                C2D_DrawRectSolid(0.0f, 0.0f, 0.82f, screenW, 240.0f, Ui::rgba(255, 240, 200, fAlpha));
+            }
+
+            // Borde de aviso al romper combo (Combo Break)
+            if (comboBreakAnim > 0.01f) {
+                u8 cbAlpha = static_cast<u8>(comboBreakAnim * 110.0f);
+                drawRectOutline(0.0f, 0.0f, screenW, 240.0f, 4.0f, Ui::rgba(255, 60, 75, cbAlpha), 0.85f);
+            }
+
             Ui::drawTransition(screenW, 240.0f, screenFade, clrPrimary);
         };
 
@@ -6669,29 +9060,31 @@ int main(int argc, char* argv[]) {
 
         if (isPaused) {
             Ui::backdrop(320.0f, 240.0f, static_cast<float>(animTick), Ui::rgba(22, 16, 38), Ui::rgba(10, 8, 18), clrPrimary, 0.01f);
-            const char* pOpts[3] = { "CONTINUAR", "REINTENTAR", "VOLVER A CANCIONES" };
+            const char* pOpts[3] = { LOC(STR_PAUSE_RESUME), LOC(STR_PAUSE_RETRY), LOC(STR_PAUSE_QUIT) };
+            const char* pKeys[3] = { "A", "X", "B" };
             u32 pClrs[3] = { clr100, clrCursor, clrPrimary };
             for (int i = 0; i < 3; ++i) {
                 bool sel = (pauseOption == i);
-                float bx = 40.0f;
-                float by = 40.0f + i * 54.0f;
-                float bw = 240.0f;
-                float bh = 42.0f;
+                float bx = 30.0f;
+                float by = 38.0f + i * 52.0f;
+                float bw = 260.0f;
+                float bh = 44.0f;
 
-                if (sel) {
-                    Ui::slantRectGrad(bx, by, bw, bh, 12.0f, 0.25f, pClrs[i], Ui::rgba(45, 35, 78, 245));
-                    C2D_DrawLine(bx + 12.0f, by, clrWhite, bx + bw, by, clrWhite, 1.5f, 0.3f);
-                } else {
-                    Ui::slantRectGrad(bx, by, bw, bh, 12.0f, 0.2f, Ui::rgba(40, 35, 62, 230), Ui::rgba(22, 19, 36, 230));
-                    C2D_DrawLine(bx + 12.0f, by, pClrs[i], bx, by + bh, pClrs[i], 3.0f, 0.3f);
-                }
-                drawCenteredText(textBuf, bx + bw * 0.5f, by + bh * 0.5f, 0.50f, clrWhite, pOpts[i], 0.85f);
+                u32 bg = sel ? Ui::rgba(45, 36, 72, 250) : Ui::rgba(22, 19, 36, 235);
+                Ui::button(bx, by, bw, bh, 0.20f, bg, pClrs[i], sel);
+
+                // Pastilla indicadora de la tecla
+                Ui::pill(bx + 12.0f, by + 12.0f, 22.0f, 20.0f, 0.24f, sel ? pClrs[i] : Ui::rgba(40, 34, 58, 240));
+                drawCenteredText(textBuf, bx + 23.0f, by + 22.0f, 0.32f, sel ? Ui::rgba(0, 0, 0, 240) : clrWhite, pKeys[i], 0.28f);
+
+                // Texto del boton con sombra de alto contraste
+                drawTextWithShadow(textBuf, bx + 44.0f, by + 13.0f, 0.46f, clrWhite, pOpts[i], 0.28f);
             }
             if (isTaikoPlay) {
                 u32 bClr = (settings.taikoBgMode == 0) ? Ui::rgba(225, 145, 25, 240) : ((settings.taikoBgMode == 1) ? Ui::rgba(45, 130, 215, 240) : Ui::rgba(165, 55, 185, 240));
                 Ui::pill(40.0f, 206.0f, 240.0f, 24.0f, 0.25f, bClr);
                 char bgInfo[64];
-                std::snprintf(bgInfo, sizeof(bgInfo), "Fondo Taiko: %s (Toca o X)", settings.getTaikoBgModeName());
+                std::snprintf(bgInfo, sizeof(bgInfo), "%s: %s (Toca o X)", LOC(STR_SET_TAIKO_BG), settings.getTaikoBgModeName());
                 drawCenteredText(textBuf, 160.0f, 218.0f, 0.32f, clrWhite, bgInfo, 0.85f);
             }
             Ui::drawTransition(320.0f, 240.0f, screenFade, clrPrimary);
@@ -6705,7 +9098,7 @@ int main(int argc, char* argv[]) {
                 u32 sBg = Ui::lerpColor(Ui::rgba(255, 80, 140, 240), Ui::rgba(255, 120, 180, 250), skipPulse);
                 Ui::panel(212.0f, 196.0f, 100.0f, 34.0f, 0.85f, sBg, clrWhite);
                 drawCenteredText(textBuf, 262.0f, 208.0f, 0.44f, clrWhite, "SKIP >>", 0.90f);
-                drawCenteredText(textBuf, 262.0f, 222.0f, 0.25f, Ui::rgba(255, 230, 242), "Toca o ZL / ZR", 0.90f);
+                drawCenteredText(textBuf, 262.0f, 222.0f, 0.25f, Ui::rgba(255, 230, 242), LOC(STR_SKIP_HINT), 0.90f);
             }
             Ui::drawTransition(320.0f, 240.0f, screenFade, clrPrimary);
         } else if (isManiaPlay) {
@@ -6724,7 +9117,7 @@ int main(int argc, char* argv[]) {
                 u32 sBg = Ui::lerpColor(Ui::rgba(255, 80, 140, 240), Ui::rgba(255, 120, 180, 250), skipPulse);
                 Ui::panel(212.0f, 196.0f, 100.0f, 34.0f, 0.85f, sBg, clrWhite);
                 drawCenteredText(textBuf, 262.0f, 208.0f, 0.44f, clrWhite, "SKIP >>", 0.90f);
-                drawCenteredText(textBuf, 262.0f, 222.0f, 0.25f, Ui::rgba(255, 230, 242), "Toca o ZL / ZR", 0.90f);
+                drawCenteredText(textBuf, 262.0f, 222.0f, 0.25f, Ui::rgba(255, 230, 242), LOC(STR_SKIP_HINT), 0.90f);
             }
             Ui::drawTransition(320.0f, 240.0f, screenFade, clrPrimary);
         } else if (isCatchPlay) {
@@ -6743,7 +9136,7 @@ int main(int argc, char* argv[]) {
                 u32 sBg = Ui::lerpColor(Ui::rgba(255, 80, 140, 240), Ui::rgba(255, 120, 180, 250), skipPulse);
                 Ui::panel(212.0f, 196.0f, 100.0f, 34.0f, 0.85f, sBg, clrWhite);
                 drawCenteredText(textBuf, 262.0f, 208.0f, 0.44f, clrWhite, "SKIP >>", 0.90f);
-                drawCenteredText(textBuf, 262.0f, 222.0f, 0.25f, Ui::rgba(255, 230, 242), "Toca o ZL / ZR", 0.90f);
+                drawCenteredText(textBuf, 262.0f, 222.0f, 0.25f, Ui::rgba(255, 230, 242), LOC(STR_SKIP_HINT), 0.90f);
             }
             Ui::drawTransition(320.0f, 240.0f, screenFade, clrPrimary);
         } else if (settings.playOnBottomScreen) {
@@ -6790,6 +9183,7 @@ int main(int argc, char* argv[]) {
     }
 
     videoPlayer.shutdown();
+    audio.stopAsyncLoader();
     bgLoader.stop();
     bgTex.unload();
     texSkinCursor.unload();
@@ -6804,6 +9198,7 @@ int main(int argc, char* argv[]) {
     C2D_Fini();
     C3D_Fini();
     romfsExit();
+    acExit();
     gfxExit();
     osSetSpeedupEnable(false);
     return 0;

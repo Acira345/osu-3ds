@@ -17,6 +17,31 @@ enum HitState {
     HIT_MISS
 };
 
+// Modificadores de juego (Mods) estilo osu!
+enum OsuMods : uint32_t {
+    MOD_NONE     = 0,
+    MOD_NOFAIL   = (1u << 0),  // NF - Multiplicador Score: 0.50x
+    MOD_NF       = MOD_NOFAIL,
+    MOD_EASY     = (1u << 1),  // EZ - Multiplicador Score: 0.50x
+    MOD_EZ       = MOD_EASY,
+    MOD_HT       = (1u << 2),  // Half Time (0.30x, 0.75x velocidad)
+    MOD_HARDROCK = (1u << 3),  // HR - Multiplicador Score: 1.06x
+    MOD_HR       = MOD_HARDROCK,
+    MOD_DT       = (1u << 4),  // Double Time (1.12x, 1.50x velocidad)
+    MOD_HIDDEN   = (1u << 5),  // HD - Multiplicador Score: 1.06x
+    MOD_HD       = MOD_HIDDEN,
+    MOD_AUTO     = (1u << 6),  // Autoplay (0.00x)
+    MOD_SD       = (1u << 7),  // Sudden Death (1.00x)
+    MOD_PF       = (1u << 8),  // Perfect (1.00x)
+    MOD_FL       = (1u << 9),  // Flashlight (1.12x)
+    MOD_RX       = (1u << 10), // Relax
+    MOD_AP       = (1u << 11), // AutoPilot
+    MOD_SO       = (1u << 12), // Spun Out
+    MOD_MR       = (1u << 13), // Mirror
+    MOD_NC       = (1u << 14)  // Nightcore (1.12x)
+};
+typedef OsuMods ModFlags;
+
 struct Vec2 {
     float x;
     float y;
@@ -1139,16 +1164,16 @@ struct Beatmap {
         return (circleCount + sliderCount + spinnerCount) > 0;
     }
 
-    // Aplica modificadores de juego (EZ = 2, HR = 8) sobre la dificultad y geometría
+    // Aplica modificadores de juego (EZ, HR, MR) sobre la dificultad y geometría
     void applyMods(uint32_t mods) {
-        if (mods & (1u << 1)) { // MOD_EZ
+        if (mods & MOD_EASY) { // MOD_EASY / MOD_EZ
             diff.cs *= 0.5f;
             diff.ar *= 0.5f;
             diff.od *= 0.5f;
             diff.hp *= 0.5f;
             diff.calculateDerivedValues();
         }
-        if (mods & (1u << 3)) { // MOD_HR
+        if (mods & MOD_HARDROCK) { // MOD_HARDROCK / MOD_HR
             diff.cs = std::min(10.0f, diff.cs * 1.3f);
             diff.ar = std::min(10.0f, diff.ar * 1.4f);
             diff.od = std::min(10.0f, diff.od * 1.4f);
@@ -1167,7 +1192,7 @@ struct Beatmap {
                 }
             }
         }
-        if (mods & (1u << 13)) { // MOD_MR (Mirror horizontal)
+        if (mods & MOD_MR) { // MOD_MR (Mirror horizontal)
             for (auto& c : circles) {
                 if (!c.isSpinner) {
                     c.x = 512.0f - c.x;

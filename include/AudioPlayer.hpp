@@ -12,6 +12,7 @@
 #define STB_VORBIS_HEADER_ONLY
 #include "stb_vorbis.h"
 
+constexpr size_t AUDIO_BUFFER_COUNT = 3;
 constexpr size_t AUDIO_BUFFER_FRAMES = 4096;
 
 struct WavSample {
@@ -43,6 +44,8 @@ private:
     bool isPaused = false;
     bool inLeadIn = false;
     bool eofReached = false;
+    bool loopEnabled = false;
+    int loopOffsetMs = 0;
 
     int musicChannel = 0;
     u32 sampleRate = 44100;
@@ -52,14 +55,17 @@ private:
     float musicGain = 0.85f;
     float sfxGain = 1.0f;
 
-    s16* audioBuffer[2] = { nullptr, nullptr };
-    ndspWaveBuf waveBuf[2];
+    s16* audioBuffer[AUDIO_BUFFER_COUNT] = { nullptr, nullptr, nullptr };
+    ndspWaveBuf waveBuf[AUDIO_BUFFER_COUNT];
 
     u64 totalSamplesPlayed = 0;
     u64 seekOffsetSamples = 0;
     u64 leadInStartTick = 0;
     u64 pauseStartTick = 0;
+    u64 musicStartTick = 0;
+    u64 musicPlayheadOffsetMs = 0;
     int leadInDurationMs = 0;
+    mutable int lastReportedTimeMs = -999999;
 
     std::string loadedMusicPath = "";
 
@@ -71,6 +77,211 @@ private:
     WavSample ncClap;
     WavSample ncHat;
     WavSample ncCrash;
+
+    // =========================================================================
+    // Cargador asíncrono de vistas previas de canciones (Preview Audio)
+    // Permite que la decodificación y lectura de audio desde la SD ocurra en
+    // un hilo secundario sin congelar la interfaz ni los 60 FPS del selector.
+    // =========================================================================
+    struct PreparedPreview {
+        mp3dec_ex_t mp3;
+        stb_vorbis* vorbisStream = nullptr;
+        bool usingVorbis = false;
+        u32 sampleRate = 44100;
+        u16 musicChannels = 2;
+        float speedRate = 1.0f;
+        u64 seekOffsetSamples = 0;
+        std::string loadedMusicPath = "";
+        s16* audioBuffer[AUDIO_BUFFER_COUNT] = { nullptr, nullptr, nullptr };
+        size_t bufferSamples[AUDIO_BUFFER_COUNT] = { 0, 0, 0 };
+        int startOffsetMs = 0;
+        bool loop = false;
+        bool ready = false;
+        u32 id = 0;
+
+        PreparedPreview() {
+            reset();
+        }
+
+        void reset() {
+            std::memset(&mp3, 0, sizeof(mp3));
+            vorbisStream = nullptr;
+            usingVorbis = false;
+            sampleRate = 44100;
+            musicChannels = 2;
+            speedRate = 1.0f;
+            seekOffsetSamples = 0;
+            loadedMusicPath.clear();
+            for (size_t i = 0; i < AUDIO_BUFFER_COUNT; ++i) {
+                audioBuffer[i] = nullptr;
+                bufferSamples[i] = 0;
+            }
+            startOffsetMs = 0;
+            loop = false;
+            ready = false;
+            id = 0;
+        }
+
+        void release() {
+            if (usingVorbis) {
+                if (vorbisStream) {
+                    stb_vorbis_close(vorbisStream);
+                    vorbisStream = nullptr;
+                }
+                usingVorbis = false;
+            } else {
+                if (mp3.file.buffer) {
+                    mp3dec_ex_close(&mp3);
+                }
+                std::memset(&mp3, 0, sizeof(mp3));
+            }
+            for (size_t i = 0; i < AUDIO_BUFFER_COUNT; ++i) {
+                if (audioBuffer[i]) { linearFree(audioBuffer[i]); audioBuffer[i] = nullptr; }
+                bufferSamples[i] = 0;
+            }
+            ready = false;
+            loadedMusicPath.clear();
+        }
+    };
+
+    Thread previewWorker = nullptr;
+    LightLock previewLock;
+    LightEvent previewWake;
+    volatile bool previewQuit = false;
+    volatile bool previewLoading = false;
+    std::string reqPreviewPath = "";
+    float reqPreviewRate = 1.0f;
+    int reqPreviewStartOff = 0;
+    bool reqPreviewLoop = false;
+    u32 reqPreviewId = 0;
+    PreparedPreview preparedPreview;
+
+    static void previewThreadMain(void* arg) {
+        static_cast<AudioPlayer*>(arg)->runPreviewWorker();
+    }
+
+    void runPreviewWorker() {
+        while (!previewQuit) {
+            LightEvent_Wait(&previewWake);
+            if (previewQuit) break;
+
+            LightLock_Lock(&previewLock);
+            std::string path = reqPreviewPath;
+            float rate = reqPreviewRate;
+            int startOff = reqPreviewStartOff;
+            bool loop = reqPreviewLoop;
+            u32 id = reqPreviewId;
+            LightLock_Unlock(&previewLock);
+
+            if (path.empty()) continue;
+
+            PreparedPreview p;
+            p.usingVorbis = false;
+            p.vorbisStream = nullptr;
+            p.seekOffsetSamples = 0;
+            p.speedRate = std::max(0.5f, std::min(2.0f, rate));
+            p.startOffsetMs = startOff;
+            p.loop = loop;
+
+            bool tryOggFirst = hasOggHeaderOrExt(path);
+            if (tryOggFirst) {
+                int err = 0;
+                p.vorbisStream = stb_vorbis_open_filename(path.c_str(), &err, nullptr);
+                if (p.vorbisStream) {
+                    stb_vorbis_info vinfo = stb_vorbis_get_info(p.vorbisStream);
+                    p.sampleRate = (vinfo.sample_rate > 0) ? vinfo.sample_rate : 44100;
+                    p.musicChannels = (vinfo.channels == 1) ? 1 : 2;
+                    p.usingVorbis = true;
+                }
+            }
+
+            if (!p.usingVorbis) {
+                std::memset(&p.mp3, 0, sizeof(p.mp3));
+                if (mp3dec_ex_open(&p.mp3, path.c_str(), MP3D_SEEK_TO_SAMPLE) == 0 && p.mp3.info.hz > 0) {
+                    p.sampleRate = static_cast<u32>(p.mp3.info.hz);
+                    p.musicChannels = (p.mp3.info.channels == 1) ? 1 : 2;
+                } else {
+                    int err = 0;
+                    p.vorbisStream = stb_vorbis_open_filename(path.c_str(), &err, nullptr);
+                    if (!p.vorbisStream) {
+                        p.release();
+                        continue;
+                    }
+                    stb_vorbis_info vinfo = stb_vorbis_get_info(p.vorbisStream);
+                    p.sampleRate = (vinfo.sample_rate > 0) ? vinfo.sample_rate : 44100;
+                    p.musicChannels = (vinfo.channels == 1) ? 1 : 2;
+                    p.usingVorbis = true;
+                }
+            }
+
+            if (previewQuit || id != reqPreviewId) {
+                p.release();
+                continue;
+            }
+
+            if (startOff > 0) {
+                if (p.usingVorbis && p.vorbisStream) {
+                    unsigned int targetFrame = static_cast<unsigned int>((static_cast<u64>(startOff) * p.sampleRate) / 1000ULL);
+                    if (stb_vorbis_seek(p.vorbisStream, targetFrame)) {
+                        int act = stb_vorbis_get_sample_offset(p.vorbisStream);
+                        p.seekOffsetSamples = (act >= 0) ? static_cast<u64>(act) : targetFrame;
+                    }
+                } else if (p.sampleRate > 0 && p.musicChannels > 0) {
+                    uint64_t targetSample = (static_cast<uint64_t>(startOff) * p.sampleRate * p.musicChannels) / 1000ULL;
+                    if (mp3dec_ex_seek(&p.mp3, targetSample) == 0) {
+                        p.seekOffsetSamples = p.mp3.cur_sample / p.musicChannels;
+                    }
+                }
+            }
+
+            if (previewQuit || id != reqPreviewId) {
+                p.release();
+                continue;
+            }
+
+            size_t bufferSize = AUDIO_BUFFER_FRAMES * p.musicChannels * sizeof(s16);
+            bool allocOk = true;
+            for (size_t i = 0; i < AUDIO_BUFFER_COUNT; ++i) {
+                p.audioBuffer[i] = static_cast<s16*>(linearAlloc(bufferSize));
+                if (!p.audioBuffer[i]) allocOk = false;
+            }
+            if (!allocOk) {
+                p.release();
+                continue;
+            }
+
+            for (size_t i = 0; i < AUDIO_BUFFER_COUNT; ++i) {
+                size_t samplesToRead = AUDIO_BUFFER_FRAMES * p.musicChannels;
+                size_t samplesRead = 0;
+                if (p.usingVorbis && p.vorbisStream) {
+                    int frames = stb_vorbis_get_samples_short_interleaved(
+                        p.vorbisStream, p.musicChannels, p.audioBuffer[i], static_cast<int>(samplesToRead)
+                    );
+                    if (frames > 0) samplesRead = static_cast<size_t>(frames) * p.musicChannels;
+                } else {
+                    samplesRead = mp3dec_ex_read(&p.mp3, p.audioBuffer[i], samplesToRead);
+                }
+                if (samplesRead > 0) {
+                    DSP_FlushDataCache(p.audioBuffer[i], samplesRead * sizeof(s16));
+                }
+                p.bufferSamples[i] = samplesRead;
+            }
+
+            p.loadedMusicPath = path;
+            p.id = id;
+            p.ready = true;
+
+            LightLock_Lock(&previewLock);
+            if (id == reqPreviewId && !previewQuit) {
+                preparedPreview.release();
+                preparedPreview = p;
+                p.reset();
+            } else {
+                p.release();
+            }
+            LightLock_Unlock(&previewLock);
+        }
+    }
 
     void applyChannelGain(int chn, float gain) {
         if (!dspReady) return;
@@ -460,14 +671,177 @@ private:
     void beginNDSPPlayback() {
         inLeadIn = false;
         totalSamplesPlayed = seekOffsetSamples;
+        musicStartTick = osGetTime();
         applyChannelGain(musicChannel, musicGain);
-        fillAndPlayBuffer(0);
-        fillAndPlayBuffer(1);
+        for (size_t i = 0; i < AUDIO_BUFFER_COUNT; ++i) {
+            fillAndPlayBuffer(i);
+        }
     }
 
 public:
     AudioPlayer() = default;
-    ~AudioPlayer() { exitAll(); }
+    ~AudioPlayer() {
+        stopAsyncLoader();
+        exitAll();
+    }
+
+    bool startAsyncLoader(bool isNew3DS = false) {
+        LightLock_Init(&previewLock);
+        LightEvent_Init(&previewWake, RESET_ONESHOT);
+        previewQuit = false;
+        previewLoading = false;
+
+        s32 prio = 0x30;
+        svcGetThreadPriority(&prio, CUR_THREAD_HANDLE);
+        s32 workerPrio = std::min<s32>(0x3F, prio + 1);
+
+        if (isNew3DS) {
+            // En New 3DS / New 2DS XL ejecutamos en el núcleo 2 dedicado a 804 MHz
+            previewWorker = threadCreate(previewThreadMain, this, 64 * 1024, workerPrio, 2, false);
+        }
+        if (!previewWorker) previewWorker = threadCreate(previewThreadMain, this, 64 * 1024, workerPrio, 1, false);
+        if (!previewWorker) previewWorker = threadCreate(previewThreadMain, this, 64 * 1024, workerPrio, -2, false);
+        return previewWorker != nullptr;
+    }
+
+    void stopAsyncLoader() {
+        if (!previewWorker) return;
+        previewQuit = true;
+        LightLock_Lock(&previewLock);
+        reqPreviewPath.clear();
+        reqPreviewId++;
+        preparedPreview.release();
+        LightEvent_Signal(&previewWake);
+        LightLock_Unlock(&previewLock);
+
+        threadJoin(previewWorker, U64_MAX);
+        threadFree(previewWorker);
+        previewWorker = nullptr;
+    }
+
+    void setLoop(bool loop, int offsetMs = -1) {
+        loopEnabled = loop;
+        if (offsetMs >= 0) {
+            loopOffsetMs = offsetMs;
+        }
+    }
+    bool getLoop() const { return loopEnabled; }
+    int getLoopOffsetMs() const { return loopOffsetMs; }
+
+    // Solicita la carga y reproducción de la vista previa de una canción sin bloquear el hilo principal
+    void requestPreview(const std::string& filepath, float rate = 1.0f, int startOffsetMs = 0, bool loop = false, bool forceReload = false) {
+        if (filepath.empty()) {
+            cancelPreview();
+            stopMusicInternal();
+            return;
+        }
+        if (!forceReload && isPlaying && !isSongFinished() && loadedMusicPath == filepath) {
+            setLoop(loop, startOffsetMs);
+            return;
+        }
+
+        if (!previewWorker) {
+            startMusic(filepath, 0, rate, startOffsetMs);
+            setLoop(loop, startOffsetMs);
+            return;
+        }
+
+        LightLock_Lock(&previewLock);
+        if (forceReload || isSongFinished() || reqPreviewPath != filepath || reqPreviewStartOff != startOffsetMs || reqPreviewLoop != loop) {
+            reqPreviewPath = filepath;
+            reqPreviewRate = rate;
+            reqPreviewStartOff = startOffsetMs;
+            reqPreviewLoop = loop;
+            reqPreviewId++;
+            previewLoading = true;
+            preparedPreview.release();
+            LightEvent_Signal(&previewWake);
+        }
+        LightLock_Unlock(&previewLock);
+    }
+
+    void cancelPreview() {
+        LightLock_Lock(&previewLock);
+        reqPreviewPath.clear();
+        reqPreviewId++;
+        previewLoading = false;
+        preparedPreview.release();
+        LightLock_Unlock(&previewLock);
+    }
+
+    bool isPreviewLoading() {
+        LightLock_Lock(&previewLock);
+        bool loading = previewLoading && !reqPreviewPath.empty();
+        LightLock_Unlock(&previewLock);
+        return loading;
+    }
+
+    void pollPreview() {
+        if (!dspReady) return;
+        PreparedPreview p;
+        bool haveNew = false;
+
+        LightLock_Lock(&previewLock);
+        if (preparedPreview.ready && preparedPreview.id == reqPreviewId) {
+            p = preparedPreview;
+            preparedPreview.reset();
+            previewLoading = false;
+            haveNew = true;
+        }
+        LightLock_Unlock(&previewLock);
+
+        if (haveNew) {
+            stopMusicInternal();
+
+            mp3 = p.mp3;
+            vorbisStream = p.vorbisStream;
+            usingVorbis = p.usingVorbis;
+            sampleRate = p.sampleRate;
+            musicChannels = p.musicChannels;
+            speedRate = p.speedRate;
+            seekOffsetSamples = p.seekOffsetSamples;
+            loadedMusicPath = p.loadedMusicPath;
+            isLoaded = true;
+            isPaused = false;
+            eofReached = false;
+            inLeadIn = false;
+            loopEnabled = p.loop;
+            loopOffsetMs = p.startOffsetMs;
+
+            ndspChnReset(musicChannel);
+            ndspChnSetInterp(musicChannel, NDSP_INTERP_POLYPHASE);
+            ndspChnSetRate(musicChannel, static_cast<float>(sampleRate) * speedRate);
+            ndspChnSetFormat(
+                musicChannel,
+                (musicChannels == 1) ? NDSP_FORMAT_MONO_PCM16 : NDSP_FORMAT_STEREO_PCM16
+            );
+            applyChannelGain(musicChannel, musicGain);
+
+            for (size_t i = 0; i < AUDIO_BUFFER_COUNT; ++i) {
+                audioBuffer[i] = p.audioBuffer[i];
+                p.audioBuffer[i] = nullptr;
+            }
+
+            std::memset(&waveBuf, 0, sizeof(waveBuf));
+            for (size_t i = 0; i < AUDIO_BUFFER_COUNT; ++i) {
+                waveBuf[i].data_vaddr = audioBuffer[i];
+                if (p.bufferSamples[i] > 0) {
+                    waveBuf[i].nsamples = p.bufferSamples[i] / musicChannels;
+                    waveBuf[i].status = NDSP_WBUF_FREE;
+                    ndspChnWaveBufAdd(musicChannel, &waveBuf[i]);
+                } else {
+                    waveBuf[i].nsamples = 0;
+                    waveBuf[i].status = NDSP_WBUF_DONE;
+                }
+            }
+
+            isPlaying = true;
+            totalSamplesPlayed = seekOffsetSamples;
+            lastReportedTimeMs = -999999;
+            musicStartTick = osGetTime();
+            musicPlayheadOffsetMs = (p.startOffsetMs > 0) ? static_cast<u64>(p.startOffsetMs) : 0;
+        }
+    }
 
     bool initDSPAndHitsounds() {
         if (!dspReady) {
@@ -649,7 +1023,8 @@ public:
     bool getIsPlaying() const { return isPlaying; }
 
     bool startMusic(const std::string& filepath, int leadInMs = 0, float rate = 1.0f, int startOffsetMs = 0) {
-        stopMusic();
+        cancelPreview();
+        stopMusicInternal();
         if (filepath.empty()) return false;
         if (!dspReady && !initDSPAndHitsounds()) return false;
 
@@ -717,17 +1092,18 @@ public:
         applyChannelGain(musicChannel, musicGain);
 
         size_t bufferSize = AUDIO_BUFFER_FRAMES * musicChannels * sizeof(s16);
-        audioBuffer[0] = static_cast<s16*>(linearAlloc(bufferSize));
-        audioBuffer[1] = static_cast<s16*>(linearAlloc(bufferSize));
-
         std::memset(&waveBuf, 0, sizeof(waveBuf));
-        for (int i = 0; i < 2; ++i) {
+        for (size_t i = 0; i < AUDIO_BUFFER_COUNT; ++i) {
+            audioBuffer[i] = static_cast<s16*>(linearAlloc(bufferSize));
             waveBuf[i].data_vaddr = audioBuffer[i];
             waveBuf[i].status = NDSP_WBUF_DONE;
         }
 
         isPlaying = true;
         totalSamplesPlayed = seekOffsetSamples;
+        lastReportedTimeMs = -999999;
+        musicStartTick = 0;
+        musicPlayheadOffsetMs = (startOffsetMs > 0 && leadInMs <= 0) ? static_cast<u64>(startOffsetMs) : 0;
 
         if (leadInMs > 0) {
             inLeadIn = true;
@@ -753,8 +1129,13 @@ public:
         isPaused = false;
         if (inLeadIn) {
             leadInStartTick += (osGetTime() - pauseStartTick);
-        } else if (dspReady) {
-            ndspChnSetPaused(musicChannel, false);
+        } else {
+            if (musicStartTick > 0) {
+                musicStartTick += (osGetTime() - pauseStartTick);
+            }
+            if (dspReady) {
+                ndspChnSetPaused(musicChannel, false);
+            }
         }
     }
 
@@ -762,10 +1143,13 @@ public:
         if (!isLoaded || sampleRate == 0) return false;
 
         // Si el salto nos sitúa en tiempo de espera previo (Lead-In)
+        lastReportedTimeMs = -999999;
         if (targetMs < 0) {
             inLeadIn = true;
             leadInDurationMs = -targetMs;
             leadInStartTick = osGetTime();
+            musicStartTick = 0;
+            musicPlayheadOffsetMs = 0;
             totalSamplesPlayed = 0;
             seekOffsetSamples = 0;
             if (usingVorbis && vorbisStream) {
@@ -781,6 +1165,8 @@ public:
 
         inLeadIn = false;
         targetMs = std::max(0, targetMs);
+        musicStartTick = osGetTime();
+        musicPlayheadOffsetMs = static_cast<u64>(targetMs);
 
         if (usingVorbis && vorbisStream) {
             unsigned int targetFrame = static_cast<unsigned int>((static_cast<u64>(targetMs) * sampleRate) / 1000ULL);
@@ -813,12 +1199,13 @@ public:
                 (musicChannels == 1) ? NDSP_FORMAT_MONO_PCM16 : NDSP_FORMAT_STEREO_PCM16
             );
             applyChannelGain(musicChannel, musicGain);
-            for (int i = 0; i < 2; ++i) {
+            for (size_t i = 0; i < AUDIO_BUFFER_COUNT; ++i) {
                 waveBuf[i].status = NDSP_WBUF_DONE;
                 waveBuf[i].nsamples = 0;
             }
-            fillAndPlayBuffer(0);
-            fillAndPlayBuffer(1);
+            for (size_t i = 0; i < 2 && i < AUDIO_BUFFER_COUNT; ++i) {
+                fillAndPlayBuffer(i);
+            }
         }
         return true;
     }
@@ -839,6 +1226,46 @@ public:
             samplesRead = mp3dec_ex_read(&mp3, audioBuffer[index], samplesToRead);
         }
 
+        // Bucle sin interrupción (Seamless Loop): si se alcanza el final de la pista y el bucle está activo,
+        // rebobinar de inmediato al punto de inicio (PreviewTime o 0) y completar el resto del búfer actual.
+        if (samplesRead < samplesToRead && loopEnabled && sampleRate > 0 && musicChannels > 0) {
+            if (usingVorbis && vorbisStream) {
+                unsigned int targetFrame = static_cast<unsigned int>((static_cast<u64>(loopOffsetMs) * sampleRate) / 1000ULL);
+                if (!stb_vorbis_seek(vorbisStream, targetFrame)) {
+                    stb_vorbis_seek(vorbisStream, 0);
+                    targetFrame = 0;
+                }
+                int act = stb_vorbis_get_sample_offset(vorbisStream);
+                if (act >= 0) targetFrame = static_cast<unsigned int>(act);
+                seekOffsetSamples = targetFrame;
+            } else {
+                uint64_t targetSample = (static_cast<uint64_t>(loopOffsetMs) * sampleRate * musicChannels) / 1000ULL;
+                if (mp3dec_ex_seek(&mp3, targetSample) == 0) {
+                    seekOffsetSamples = mp3.cur_sample / musicChannels;
+                } else {
+                    mp3dec_ex_seek(&mp3, 0);
+                    seekOffsetSamples = 0;
+                }
+            }
+
+            totalSamplesPlayed = seekOffsetSamples;
+            musicStartTick = osGetTime();
+            musicPlayheadOffsetMs = static_cast<u64>(loopOffsetMs);
+            lastReportedTimeMs = loopOffsetMs;
+
+            size_t remaining = samplesToRead - samplesRead;
+            size_t extra = 0;
+            if (usingVorbis && vorbisStream) {
+                int frames = stb_vorbis_get_samples_short_interleaved(
+                    vorbisStream, musicChannels, audioBuffer[index] + samplesRead, static_cast<int>(remaining)
+                );
+                if (frames > 0) extra = static_cast<size_t>(frames) * musicChannels;
+            } else {
+                extra = mp3dec_ex_read(&mp3, audioBuffer[index] + samplesRead, remaining);
+            }
+            samplesRead += extra;
+        }
+
         if (samplesRead == 0) {
             eofReached = true;
             return;
@@ -851,6 +1278,7 @@ public:
     }
 
     void update() {
+        pollPreview();
         if (!isPlaying || isPaused) return;
 
         if (inLeadIn) {
@@ -861,7 +1289,7 @@ public:
             return;
         }
 
-        for (int i = 0; i < 2; ++i) {
+        for (size_t i = 0; i < AUDIO_BUFFER_COUNT; ++i) {
             if (waveBuf[i].status == NDSP_WBUF_DONE) {
                 if (waveBuf[i].nsamples > 0) {
                     totalSamplesPlayed += waveBuf[i].nsamples;
@@ -879,24 +1307,52 @@ public:
         if (inLeadIn) {
             u64 now = isPaused ? pauseStartTick : osGetTime();
             int elapsed = static_cast<int>((now - leadInStartTick) * speedRate);
-            return elapsed - leadInDurationMs;
+            int t = elapsed - leadInDurationMs;
+            lastReportedTimeMs = t;
+            return t;
         }
         u64 currentSamples = totalSamplesPlayed + ndspChnGetSamplePos(musicChannel);
-        return static_cast<int>((currentSamples * 1000) / sampleRate);
+        int t = static_cast<int>((currentSamples * 1000) / sampleRate);
+
+        // Watchdog de tiempo real para emuladores (Citra / Azahar) ante pérdida o estancamiento de muestras DSP
+        if (musicStartTick > 0) {
+            u64 nowTick = isPaused ? pauseStartTick : osGetTime();
+            int wallT = static_cast<int>((nowTick - musicStartTick) * speedRate) + static_cast<int>(musicPlayheadOffsetMs);
+            if (t == 0 && wallT > 100) {
+                t = wallT;
+            } else if (wallT > t + 500) {
+                t = std::max(t, wallT - 100);
+            }
+        }
+
+        if (t < lastReportedTimeMs && (lastReportedTimeMs - t) < 300) {
+            t = lastReportedTimeMs;
+        } else {
+            lastReportedTimeMs = t;
+        }
+        return t;
     }
 
     bool isSongFinished() const {
         if (!isPlaying || inLeadIn || isPaused) return false;
-        return eofReached &&
-               waveBuf[0].status == NDSP_WBUF_DONE &&
-               waveBuf[1].status == NDSP_WBUF_DONE;
+        if (loopEnabled) return false;
+        if (!eofReached) return false;
+        for (size_t i = 0; i < AUDIO_BUFFER_COUNT; ++i) {
+            if (waveBuf[i].status != NDSP_WBUF_DONE) return false;
+        }
+        return true;
     }
 
-    void stopMusic() {
+    void stopMusicInternal() {
         if (isLoaded) {
             isPlaying = false;
             isPaused = false;
             inLeadIn = false;
+            loopEnabled = false;
+            loopOffsetMs = 0;
+            musicStartTick = 0;
+            musicPlayheadOffsetMs = 0;
+            lastReportedTimeMs = -999999;
             loadedMusicPath = "";
             ndspChnReset(musicChannel);
             if (usingVorbis) {
@@ -906,16 +1362,26 @@ public:
                 }
                 usingVorbis = false;
             } else {
-                mp3dec_ex_close(&mp3);
+                if (mp3.file.buffer) {
+                    mp3dec_ex_close(&mp3);
+                }
+                std::memset(&mp3, 0, sizeof(mp3));
             }
-            if (audioBuffer[0]) { linearFree(audioBuffer[0]); audioBuffer[0] = nullptr; }
-            if (audioBuffer[1]) { linearFree(audioBuffer[1]); audioBuffer[1] = nullptr; }
+            for (size_t i = 0; i < AUDIO_BUFFER_COUNT; ++i) {
+                if (audioBuffer[i]) { linearFree(audioBuffer[i]); audioBuffer[i] = nullptr; }
+            }
             isLoaded = false;
         }
     }
 
+    void stopMusic() {
+        cancelPreview();
+        stopMusicInternal();
+    }
+
     void exitAll() {
-        stopMusic();
+        stopAsyncLoader();
+        stopMusicInternal();
         for (int i = 0; i < 5; ++i) hitSounds[i].freeData();
         ncKick.freeData();
         ncClap.freeData();

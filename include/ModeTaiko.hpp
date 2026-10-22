@@ -874,8 +874,8 @@ public:
         // Notas musicales flotantes alrededor de Don-chan si el alma está llena
         if (isFullSoul) {
             float nBob = std::sin(songTime * 0.006f) * 4.0f;
-            drawCenteredText(textBuf, mascotX + 22.0f, mascotY - 14.0f + nBob, 0.34f, Ui::rgba(255, 220, 60), "♪", 0.10f);
-            drawCenteredText(textBuf, mascotX - 22.0f, mascotY - 16.0f - nBob, 0.30f, Ui::rgba(255, 140, 180), "♫", 0.10f);
+            drawCenteredText(textBuf, mascotX + 22.0f, mascotY - 14.0f + nBob, 0.38f, Ui::rgba(255, 220, 60), "*", 0.10f);
+            drawCenteredText(textBuf, mascotX - 22.0f, mascotY - 16.0f - nBob, 0.38f, Ui::rgba(255, 140, 180), "*", 0.10f);
         }
 
         // Hachimaki blanco y brazos alzados con baquetas (Bachi)

@@ -129,6 +129,19 @@ public:
         return ok;
     }
 
+    bool addSingleBeatmap(const std::string& osuPath, bool isRomfs = false, const ScoreManager* scoreMgr = nullptr) {
+        addOsuFileToSets(osuPath, isRomfs);
+        for (auto& set : allSets) {
+            std::sort(set.difficulties.begin(), set.difficulties.end(),
+                [](const BeatmapEntry& a, const BeatmapEntry& b) {
+                    return a.starRating < b.starRating;
+                }
+            );
+        }
+        applySortAndFilter(scoreMgr);
+        return true;
+    }
+
     void applySortAndFilter(const ScoreManager* scoreMgr = nullptr) {
         sets.clear();
         std::string rawQ = Beatmap::toLower(Beatmap::trim(searchQuery));
@@ -285,6 +298,9 @@ private:
         std::string keyTitle = Beatmap::toLower(meta.title);
         for (auto& set : allSets) {
             if (set.folderPath == meta.folderPath && Beatmap::toLower(set.title) == keyTitle) {
+                for (const auto& d : set.difficulties) {
+                    if (d.osuPath == osuPath) return; // Ya existe en la lista
+                }
                 if (set.backgroundPath.empty() && !entry.backgroundPath.empty()) {
                     set.backgroundPath = entry.backgroundPath;
                 }

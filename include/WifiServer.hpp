@@ -14,6 +14,7 @@
 #include <vector>
 #include <algorithm>
 #include "OszExtractor.hpp"
+#include "NetCommon.hpp"
 
 // Servidor Web HTTP Local no bloqueante para Nintendo 3DS (Puerto 8080)
 class WifiServer {
@@ -129,6 +130,7 @@ private:
             "<!DOCTYPE html><html lang='es'><head><meta charset='utf-8'>"
             "<meta name='viewport' content='width=device-width,initial-scale=1'>"
             "<title>osu! 3DS Hub</title>"
+            "<script src='https://cdn.jsdelivr.net/npm/mp4box@0.5.2/dist/mp4box.all.min.js' defer></script>"
             "<style>"
             "*{box-sizing:border-box}"
             "body{font-family:system-ui,-apple-system,sans-serif;background:#0f0d18;color:#fff;margin:0;padding:12px 12px 90px;text-align:center}"
@@ -209,7 +211,7 @@ private:
             "<div class='opt-row' style='margin:0 0 12px 0'>"
             "<label style='display:flex;align-items:center;justify-content:center;gap:8px;cursor:pointer;width:100%'>"
             "<input type='checkbox' id='wantVideo'>"
-            "<span>🎬 <b>Incluir Video de Fondo</b> <span style='font-size:0.75rem;color:#aaa5c7'>(Convierte a 3DSV 256x128 @ 15fps)</span></span>"
+            "<span>🎬 <b>Incluir Video de Fondo</b> <span style='font-size:0.75rem;color:#50dcff'>(Acelerado por Hardware GPU ⚡ 256x128 @ 15fps)</span></span>"
             "</label>"
             "</div>"
             "<!-- TAB 1: EXPLORAR -->"
@@ -302,13 +304,129 @@ private:
             "odv.setUint32(cdOff,0x06054b50,true);odv.setUint16(cdOff+8,entries.length,true);odv.setUint16(cdOff+10,entries.length,true);"
             "odv.setUint32(cdOff+12,cdSz,true);odv.setUint32(cdOff+16,bodySz,true);"
             "return new Blob([out]);}"
-            "async function transcodeTo3dsv(vidBytes){"
+            "function assemble3dsv(frames,W,H,fps){"
+            "if(!frames||!frames.length)return null;"
+            "const count=frames.length,hdrSize=16+count*8;"
+            "let totalSize=hdrSize;for(const f of frames)totalSize+=f.length;"
+            "const out=new Uint8Array(totalSize),dv=new DataView(out.buffer);"
+            "out[0]=0x33;out[1]=0x44;out[2]=0x53;out[3]=0x56;"
+            "dv.setUint16(4,W,true);dv.setUint16(6,H,true);dv.setUint16(8,fps*100,true);dv.setUint16(10,0,true);dv.setUint32(12,count,true);"
+            "let off=hdrSize;"
+            "for(let i=0;i<count;i++){"
+            "dv.setUint32(16+i*8,off,true);dv.setUint32(16+i*8+4,frames[i].length,true);"
+            "out.set(frames[i],off);off+=frames[i].length;"
+            "}"
+            "return out;}"
+            "async function ensureMp4Box(){"
+            "if(typeof MP4Box!=='undefined')return true;"
+            "return new Promise((res)=>{"
+            "const s=document.createElement('script');"
+            "s.src='https://cdn.jsdelivr.net/npm/mp4box@0.5.2/dist/mp4box.all.min.js';"
+            "s.onload=()=>res(true);s.onerror=()=>res(false);"
+            "document.head.appendChild(s);"
+            "setTimeout(()=>res(false),3000);"
+            "});}"
+            "async function transcodeWebCodecs(vidBytes){"
+            "if(typeof VideoDecoder==='undefined')return null;"
+            "const hasMp4=await ensureMp4Box();"
+            "if(!hasMp4||typeof MP4Box==='undefined')return null;"
+            "return new Promise((resolve)=>{"
+            "try{"
+            "const mp4box=MP4Box.createFile();"
+            "let decoder=null;"
+            "const W=256,H=128,fps=15,intervalUs=1000000/fps;"
+            "let nextTargetUs=0,totalDurSec=0,processedSamples=0,isDone=false;"
+            "const frames=[],frameQueue=[];"
+            "let processingQueue=false;"
+            "const cv=document.createElement('canvas');cv.width=W;cv.height=H;"
+            "const ctx=cv.getContext('2d');"
+            "const finish=()=>{"
+            "if(isDone)return;isDone=true;"
+            "try{if(decoder&&decoder.state!=='closed')decoder.close();}catch(e){}"
+            "resolve(assemble3dsv(frames,W,H,fps));"
+            "};"
+            "const failTo=setTimeout(()=>{finish();},35000);"
+            "async function processFrameQueue(){"
+            "if(processingQueue)return;processingQueue=true;"
+            "while(frameQueue.length>0){"
+            "const vf=frameQueue.shift();"
+            "try{ctx.drawImage(vf,0,0,W,H);vf.close();}catch(e){try{vf.close();}catch(e2){}}"
+            "const blob=await new Promise(r=>cv.toBlob(r,'image/jpeg',0.62));"
+            "if(blob){frames.push(new Uint8Array(await blob.arrayBuffer()));}"
+            "}"
+            "processingQueue=false;"
+            "}"
+            "mp4box.onError=()=>{clearTimeout(failTo);finish();};"
+            "mp4box.onReady=(info)=>{"
+            "const vTrack=info.videoTracks&&info.videoTracks[0];"
+            "if(!vTrack){clearTimeout(failTo);finish();return;}"
+            "totalDurSec=Math.min((info.duration/info.timescale)||180,240);"
+            "let description=null;"
+            "try{"
+            "const trak=mp4box.getTrackById(vTrack.id);"
+            "for(const entry of trak.mdia.minf.stbl.stsd.entries){"
+            "const box=entry.avcC||entry.hvcC||entry.av1C||entry.vpcC;"
+            "if(box){const st=new DataStream(undefined,0,DataStream.BIG_ENDIAN);box.write(st);description=new Uint8Array(st.buffer,8);break;}"
+            "}"
+            "}catch(e){}"
+            "const config={codec:vTrack.codec,codedWidth:vTrack.video.width,codedHeight:vTrack.video.height,description:description};"
+            "try{"
+            "decoder=new VideoDecoder({"
+            "output:(vf)=>{"
+            "const ts=vf.timestamp;"
+            "if(ts>=nextTargetUs){"
+            "nextTargetUs+=intervalUs;"
+            "frameQueue.push(vf);"
+            "processFrameQueue();"
+            "}else{vf.close();}"
+            "},"
+            "error:()=>{finish();}"
+            "});"
+            "decoder.configure(config);"
+            "}catch(e){clearTimeout(failTo);finish();return;}"
+            "mp4box.setExtractionOptions(vTrack.id,null,{nbSamples:1000});"
+            "mp4box.start();"
+            "};"
+            "mp4box.onSamples=async(trackId,ref,samples)=>{"
+            "for(const s of samples){"
+            "if(isDone)break;"
+            "const sec=(s.cts/s.timescale);"
+            "if(sec>240){isDone=true;break;}"
+            "processedSamples++;"
+            "if(processedSamples%30===0){"
+            "const p=Math.min(99,Math.round((sec/totalDurSec)*100));"
+            "barBg.style.display='block';barFill.style.width=p+'%';"
+            "st.style.color='#50dcff';st.textContent='⚡ Decodificando por GPU ('+p+'%)...';"
+            "}"
+            "while(frameQueue.length>8||(decoder&&decoder.decodeQueueSize>12)){"
+            "await new Promise(r=>setTimeout(r,6));"
+            "}"
+            "if(decoder&&decoder.state==='configured'){"
+            "decoder.decode(new EncodedVideoChunk({"
+            "type:s.is_sync?'key':'delta',"
+            "timestamp:(s.cts*1000000)/s.timescale,"
+            "duration:(s.duration*1000000)/s.timescale,"
+            "data:s.data"
+            "}));"
+            "}"
+            "}"
+            "if(decoder&&decoder.state==='configured'){try{await decoder.flush();}catch(e){}}"
+            "while(frameQueue.length>0||processingQueue){await new Promise(r=>setTimeout(r,6));}"
+            "clearTimeout(failTo);finish();"
+            "};"
+            "const ab=vidBytes.buffer.slice(vidBytes.byteOffset,vidBytes.byteOffset+vidBytes.byteLength);"
+            "ab.fileStart=0;"
+            "mp4box.appendBuffer(ab);"
+            "mp4box.flush();"
+            "}catch(e){finish();}"
+            "});}"
+            "async function transcodeFallback(vidBytes){"
             "return new Promise((resolve)=>{"
             "const url=URL.createObjectURL(new Blob([vidBytes]));"
             "const v=document.createElement('video');"
             "v.muted=true;v.playsInline=true;v.preload='auto';v.src=url;"
             "const cleanup=()=>{try{v.pause();v.removeAttribute('src');v.load();URL.revokeObjectURL(url);}catch(e){}};"
-            "const failTimeout=setTimeout(()=>{cleanup();resolve(null);},9000);"
+            "const failTimeout=setTimeout(()=>{cleanup();resolve(null);},15000);"
             "v.onerror=()=>{clearTimeout(failTimeout);cleanup();resolve(null);};"
             "v.onloadedmetadata=async()=>{"
             "clearTimeout(failTimeout);"
@@ -321,27 +439,25 @@ private:
             "barBg.style.display='block';"
             "for(let i=0;i<total;i++){"
             "v.currentTime=i/fps;"
-            "await new Promise(r=>{const to=setTimeout(r,800);v.onseeked=()=>{clearTimeout(to);r();};});"
+            "await new Promise(r=>{const to=setTimeout(r,250);v.onseeked=()=>{clearTimeout(to);r();};});"
             "ctx.drawImage(v,0,0,W,H);"
             "const jb=await new Promise(r=>cv.toBlob(r,'image/jpeg',0.62));"
             "if(!jb)continue;"
             "frames.push(new Uint8Array(await jb.arrayBuffer()));"
-            "if(i%8===0||i===total-1){const p=Math.round(((i+1)/total)*100);barFill.style.width=p+'%';st.style.color='#ffe066';st.textContent='🎬 Convirtiendo video a 256x128 para 3DS ('+p+'%)...';}"
+            "if(i%8===0||i===total-1){const p=Math.round(((i+1)/total)*100);barFill.style.width=p+'%';st.style.color='#ffe066';st.textContent='🎬 Convirtiendo video para 3DS ('+p+'%)...';}"
             "}"
             "cleanup();"
-            "if(!frames.length){resolve(null);return;}"
-            "const count=frames.length,hdrSize=16+count*8;"
-            "let totalSize=hdrSize;for(const f of frames)totalSize+=f.length;"
-            "const out=new Uint8Array(totalSize),dv=new DataView(out.buffer);"
-            "out[0]=0x33;out[1]=0x44;out[2]=0x53;out[3]=0x56;"
-            "dv.setUint16(4,W,true);dv.setUint16(6,H,true);dv.setUint16(8,fps*100,true);dv.setUint16(10,0,true);dv.setUint32(12,count,true);"
-            "let off=hdrSize;"
-            "for(let i=0;i<count;i++){"
-            "dv.setUint32(16+i*8,off,true);dv.setUint32(16+i*8+4,frames[i].length,true);"
-            "out.set(frames[i],off);off+=frames[i].length;"
-            "}"
-            "resolve(out);"
+            "resolve(assemble3dsv(frames,W,H,fps));"
             "};});}"
+            "async function transcodeTo3dsv(vidBytes){"
+            "barBg.style.display='block';barFill.style.width='5%';"
+            "st.style.color='#50dcff';st.textContent='⚡ Decodificando video por Hardware (GPU)...';"
+            "try{"
+            "const v3=await transcodeWebCodecs(vidBytes);"
+            "if(v3&&v3.length>64)return v3;"
+            "}catch(e){}"
+            "return await transcodeFallback(vidBytes);"
+            "}"
             "async function optimizeOszFor3ds(blob,name,wantVideo){"
             "if(!name.toLowerCase().endsWith('.osz'))return blob;"
             "try{"
@@ -707,6 +823,15 @@ private:
     }
 
 public:
+    enum ServerInitState {
+        SERVER_STOPPED,
+        SERVER_CONNECTING,
+        SERVER_RUNNING
+    };
+
+    ServerInitState initState = SERVER_STOPPED;
+    u32 retryTimer = 0;
+
     std::string serverUrl = "";
     std::string statusText = "Inactivo";
     std::string currentFile = "";
@@ -716,59 +841,108 @@ public:
     WifiServer() = default;
     ~WifiServer() { stop(); }
 
-    bool start() {
-        if (socReady) return true;
+    bool isRunning() const {
+        return socReady && listenSock >= 0 && initState == SERVER_RUNNING;
+    }
 
-        socBuffer = static_cast<u32*>(memalign(SOC_ALIGN, SOC_BUFFERSIZE));
-        if (!socBuffer) {
-            statusText = "Error: Sin memoria para sockets";
+    bool isConnecting() const {
+        return initState == SERVER_CONNECTING;
+    }
+
+    bool tryInitServer() {
+        if (isRunning()) return true;
+
+        u8 wifiSig = osGetWifiStrength();
+        if (wifiSig == 0) {
+            statusText = "Buscando senal Wi-Fi... (Sin conexion)";
+            serverUrl = "";
             return false;
         }
 
-        if (socInit(socBuffer, SOC_BUFFERSIZE) != 0) {
-            free(socBuffer);
-            socBuffer = nullptr;
-            statusText = "Error al iniciar Wi-Fi (socInit)";
-            return false;
+        if (!socReady) {
+            if (!NetCommon::initSoc()) {
+                Result r = NetCommon::getLastSocResult();
+                char errBuf[64];
+                std::snprintf(errBuf, sizeof(errBuf), "Iniciando Wi-Fi... (0x%08lX)", (unsigned long)r);
+                statusText = errBuf;
+                return false;
+            }
+            socReady = true;
         }
-        socReady = true;
 
-        listenSock = socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
         if (listenSock < 0) {
-            stop();
-            statusText = "Error al crear socket TCP";
-            return false;
+            listenSock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+            if (listenSock < 0) {
+                int err = errno;
+                char errBuf[64];
+                std::snprintf(errBuf, sizeof(errBuf), "Esperando socket TCP... (err: %d)", err);
+                statusText = errBuf;
+                if (err == ENODEV) {
+                    if (socReady) {
+                        NetCommon::exitSoc();
+                        socReady = false;
+                    }
+                }
+                return false;
+            }
+
+            int opt = 1;
+            setsockopt(listenSock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+            struct sockaddr_in addr;
+            std::memset(&addr, 0, sizeof(addr));
+            addr.sin_family = AF_INET;
+            addr.sin_port = htons(SERVER_PORT);
+            addr.sin_addr.s_addr = htonl(INADDR_ANY);
+
+            if (bind(listenSock, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) < 0 ||
+                listen(listenSock, 4) < 0) {
+                int err = errno;
+                close(listenSock);
+                listenSock = -1;
+                char errBuf[64];
+                std::snprintf(errBuf, sizeof(errBuf), "Error en puerto %d (err: %d)", SERVER_PORT, err);
+                statusText = errBuf;
+                return false;
+            }
+
+            setNonBlocking(listenSock);
         }
-
-        int opt = 1;
-        setsockopt(listenSock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-
-        struct sockaddr_in addr;
-        std::memset(&addr, 0, sizeof(addr));
-        addr.sin_family = AF_INET;
-        addr.sin_port = htons(SERVER_PORT);
-        addr.sin_addr.s_addr = htonl(INADDR_ANY);
-
-        if (bind(listenSock, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) < 0 ||
-            listen(listenSock, 4) < 0) {
-            stop();
-            statusText = "Error en bind/listen puerto 8080";
-            return false;
-        }
-
-        setNonBlocking(listenSock);
 
         if (ioBuffer.size() < IO_CHUNK_SIZE) {
             ioBuffer.resize(IO_CHUNK_SIZE);
         }
 
+        // Comprobar si el router ya asignó una dirección IP válida
         struct in_addr hostAddr;
         hostAddr.s_addr = gethostid();
+        u32 rawIp = hostAddr.s_addr;
+        if (rawIp == 0 || rawIp == INADDR_NONE || (rawIp & 0xFF) == 127) {
+            serverUrl = "";
+            statusText = "Obteniendo direccion IP del router...";
+            return false;
+        }
+
         char ipStr[64];
         std::snprintf(ipStr, sizeof(ipStr), "http://%s:%d", inet_ntoa(hostAddr), SERVER_PORT);
         serverUrl = ipStr;
         statusText = "Esperando conexion desde PC o Celular...";
+        initState = SERVER_RUNNING;
         return true;
+    }
+
+    bool start() {
+        if (isRunning()) return true;
+
+        initState = SERVER_CONNECTING;
+        retryTimer = 0;
+        statusText = "Conectando al servidor Wi-Fi...";
+        return tryInitServer();
+    }
+
+    void restart() {
+        stop();
+        start();
     }
 
     void stop() {
@@ -778,18 +952,15 @@ public:
             listenSock = -1;
         }
         if (socReady) {
-            socExit();
+            NetCommon::exitSoc();
             socReady = false;
         }
-        if (socBuffer) {
-            free(socBuffer);
-            socBuffer = nullptr;
-        }
+        socBuffer = nullptr;
         serverUrl = "";
+        initState = SERVER_STOPPED;
+        retryTimer = 0;
         statusText = "Servidor detenido";
     }
-
-    bool isRunning() const { return socReady && listenSock >= 0; }
 
     float getProgressRatio() const {
         if (state != CLIENT_RECEIVING_BODY || contentLength == 0) return 0.0f;
@@ -800,7 +971,30 @@ public:
     size_t getContentLength() const { return contentLength; }
 
     void update() {
-        if (!isRunning()) return;
+        if (!isRunning()) {
+            if (initState == SERVER_CONNECTING) {
+                retryTimer++;
+                // Reintentar de forma suave cada 20 fotogramas (~0.33s)
+                if (retryTimer >= 20) {
+                    retryTimer = 0;
+                    tryInitServer();
+                }
+            }
+            return;
+        }
+
+        // Si por alguna razón la URL no se había fijado con la IP correcta, reintentar leer la IP
+        if (serverUrl.empty()) {
+            struct in_addr hostAddr;
+            hostAddr.s_addr = gethostid();
+            u32 rawIp = hostAddr.s_addr;
+            if (rawIp != 0 && rawIp != INADDR_NONE && (rawIp & 0xFF) != 127) {
+                char ipStr[64];
+                std::snprintf(ipStr, sizeof(ipStr), "http://%s:%d", inet_ntoa(hostAddr), SERVER_PORT);
+                serverUrl = ipStr;
+            }
+        }
+
         if (ioBuffer.size() < IO_CHUNK_SIZE) ioBuffer.resize(IO_CHUNK_SIZE);
 
         // 1. Aceptar nuevo cliente si estamos libres

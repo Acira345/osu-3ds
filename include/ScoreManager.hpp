@@ -8,25 +8,8 @@
 #include "Beatmap.hpp"
 #include "OszExtractor.hpp"
 
-// Máscara de bits para Mods estilo osu!lazer
-enum ModFlags : uint32_t {
-    MOD_NONE = 0,
-    MOD_NF   = (1u << 0),  // No Fail     (0.50x)
-    MOD_EZ   = (1u << 1),  // Easy        (0.50x)
-    MOD_HT   = (1u << 2),  // Half Time   (0.30x, 0.75x velocidad)
-    MOD_HR   = (1u << 3),  // Hard Rock   (1.06x, invierte Y y sube CS/AR/OD/HP)
-    MOD_DT   = (1u << 4),  // Double Time (1.12x, 1.50x velocidad)
-    MOD_HD   = (1u << 5),  // Hidden      (1.06x, desaparece el círculo y sin anillo de aproximación)
-    MOD_AUTO = (1u << 6),  // Autoplay    (0.00x, Bot perfecto de demostración)
-    MOD_SD   = (1u << 7),  // SuddenDeath (1.00x, 1 fallo = fail instantaneo)
-    MOD_PF   = (1u << 8),  // Perfect     (1.00x, solo 300s, 100/50/fallo = fail)
-    MOD_FL   = (1u << 9),  // Flashlight  (1.12x, linterna focal sobre el stylus)
-    MOD_RX   = (1u << 10), // Relax       (0.00x, solo apunta, timing automatico)
-    MOD_AP   = (1u << 11), // AutoPilot   (0.00x, solo ritmo, apuntado automatico)
-    MOD_SO   = (1u << 12), // Spun Out    (0.90x, spinners automaticos)
-    MOD_MR   = (1u << 13), // Mirror      (1.00x, espejo horizontal de notas)
-    MOD_NC   = (1u << 14)  // Nightcore   (1.12x, velocidad 1.50x con ritmo dance)
-};
+// Máscara de bits para Mods (definida en Beatmap.hpp como OsuMods)
+
 
 inline float getModsScoreMultiplier(uint32_t mods) {
     if (mods & (MOD_AUTO | MOD_RX | MOD_AP)) return 0.0f;

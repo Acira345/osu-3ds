@@ -79,6 +79,47 @@ inline void glow(float cx, float cy, float z, float radius, u32 color, int layer
     }
 }
 
+// Boton estilo tarjeta multijugador con degradado, sombra, brillo superior y acento luminoso
+inline void button(float x, float y, float w, float h, float z, u32 bgColor, u32 accentColor = 0, bool active = false) {
+    float rx = std::round(x);
+    float ry = std::round(y);
+    float rw = std::round(w);
+    float rh = std::round(h);
+
+    if (active) {
+        glow(rx + rw * 0.5f, ry + rh * 0.5f, z - 0.02f, std::max(rw, rh) * 0.50f, withAlpha(accentColor ? accentColor : bgColor, 95), 3);
+    }
+    // Sombra suave proyectada
+    C2D_DrawRectSolid(rx + 2.0f, ry + 3.0f, z - 0.01f, rw, rh, rgba(0, 0, 0, 95));
+    // Fondo en gradiente vertical
+    gradV(rx, ry, rw, rh, z, brighten(bgColor, active ? 1.35f : 1.20f), bgColor);
+    // Borde superior brillante tipo cristal
+    C2D_DrawRectSolid(rx, ry, z + 0.004f, rw, 1.0f, rgba(255, 255, 255, active ? 80 : 45));
+    // Barra de acento y marco nitido pixel-perfect
+    if (accentColor) {
+        if (active) {
+            pill(rx + 3.0f, ry + 3.0f, 4.0f, rh - 6.0f, z + 0.006f, accentColor);
+            C2D_DrawRectSolid(rx, ry, z + 0.005f, rw, 1.0f, accentColor);
+            C2D_DrawRectSolid(rx, ry + rh - 1.0f, z + 0.005f, rw, 1.0f, accentColor);
+            C2D_DrawRectSolid(rx, ry, z + 0.005f, 1.0f, rh, accentColor);
+            C2D_DrawRectSolid(rx + rw - 1.0f, ry, z + 0.005f, 1.0f, rh, accentColor);
+        } else {
+            C2D_DrawRectSolid(rx, ry, z + 0.005f, 3.5f, rh, accentColor);
+            u32 bClr = rgba(50, 44, 72, 160);
+            C2D_DrawRectSolid(rx, ry, z + 0.003f, rw, 1.0f, bClr);
+            C2D_DrawRectSolid(rx, ry + rh - 1.0f, z + 0.003f, rw, 1.0f, bClr);
+            C2D_DrawRectSolid(rx, ry, z + 0.003f, 1.0f, rh, bClr);
+            C2D_DrawRectSolid(rx + rw - 1.0f, ry, z + 0.003f, 1.0f, rh, bClr);
+        }
+    }
+}
+
+// Pestana interactiva estilo sala multijugador
+inline void tab(float x, float y, float w, float h, float z, bool active, u32 activeClr = rgba(40, 215, 235), u32 inactiveClr = rgba(26, 22, 40, 240)) {
+    u32 bg = active ? activeClr : inactiveClr;
+    panel(x, y, w, h, z, bg, active ? rgba(255, 255, 255, 220) : 0);
+}
+
 inline void ring(float x, float y, float z, float r, float th, u32 c, int seg = 32) {
     const float step = 6.2831853f / seg;
     for (int i = 0; i < seg; ++i) {

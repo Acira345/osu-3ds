@@ -41,9 +41,9 @@ GRAPHICS	:=	gfx
 ROMFS		:=	romfs
 GFXBUILD	:=	$(ROMFS)/gfx
 
-APP_TITLE       := osu! 3DS Edition
-APP_DESCRIPTION := Port de osu!standard con Wi-Fi, Skins, Fondos y PP
-APP_AUTHOR      := Diyel
+APP_TITLE       := osu! 3DS
+APP_DESCRIPTION := Rhythm is just a click away!
+APP_AUTHOR      := Acira345
 ICON            := icon.png
 
 #---------------------------------------------------------------------------------
@@ -158,7 +158,12 @@ endif
 all:
 	@mkdir -p $(BUILD) $(GFXBUILD)
 	@$(MAKE) --no-print-directory -C $(BUILD) -f $(CURDIR)/Makefile
-	@bannertool makebanner -i $(CURDIR)/banner.png -a $(CURDIR)/banner.wav -o $(BUILD)/banner.bnr > /dev/null
+	@bannertool makesmdh -s "$(APP_TITLE)" -l "$(APP_DESCRIPTION)" -p "$(APP_AUTHOR)" -i $(CURDIR)/$(ICON) -o $(CURDIR)/$(TARGET).smdh
+	@if [ -f "$(CURDIR)/banner.cgfx" ]; then \
+		bannertool makebanner -ci "$(CURDIR)/banner.cgfx" -a "$(CURDIR)/banner.wav" -o "$(BUILD)/banner.bnr" ; \
+	else \
+		bannertool makebanner -i "$(CURDIR)/banner.png" -a "$(CURDIR)/banner.wav" -o "$(BUILD)/banner.bnr" ; \
+	fi
 	@rm -f $(CURDIR)/$(TARGET).cia
 	@makerom -f cia -o $(CURDIR)/$(TARGET).cia -DAPP_ENCRYPTED=false -rsf $(CURDIR)/cia.rsf -target t -exefslogo -elf $(CURDIR)/$(TARGET).elf -icon $(CURDIR)/$(TARGET).smdh -banner $(BUILD)/banner.bnr
 	@echo built ... $(TARGET).cia
