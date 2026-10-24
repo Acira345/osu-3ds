@@ -133,7 +133,13 @@ main.o: C:/Users/Diyel/osu-3ds/source/main.cpp \
  C:/Users/Diyel/osu-3ds/source/game/modes/taiko/ModeTaiko.hpp \
  C:/Users/Diyel/osu-3ds/source/game/modes/mania/ModeMania.hpp \
  C:/Users/Diyel/osu-3ds/source/game/modes/catch/ModeCatch.hpp \
- C:/Users/Diyel/osu-3ds/source/backend/net/MultiplayerManager.hpp
+ C:/Users/Diyel/osu-3ds/source/backend/net/MultiplayerManager.hpp \
+ C:/Users/Diyel/osu-3ds/source/game/core/Playfield.hpp \
+ C:/Users/Diyel/osu-3ds/source/game/core/Mods.hpp \
+ C:/Users/Diyel/osu-3ds/source/game/effects/GameplayEffects.hpp \
+ C:/Users/Diyel/osu-3ds/source/app/AppState.hpp \
+ C:/Users/Diyel/osu-3ds/source/frontend/render/QrRenderer.hpp \
+ C:/Users/Diyel/osu-3ds/source/frontend/render/Draw.hpp
 C:/msys64/opt/devkitpro/libctru/include/3ds.h:
 C:/msys64/opt/devkitpro/libctru/include/3ds/types.h:
 C:/msys64/opt/devkitpro/libctru/include/3ds/result.h:
@@ -269,3 +275,9 @@ C:/Users/Diyel/osu-3ds/source/game/modes/taiko/ModeTaiko.hpp:
 C:/Users/Diyel/osu-3ds/source/game/modes/mania/ModeMania.hpp:
 C:/Users/Diyel/osu-3ds/source/game/modes/catch/ModeCatch.hpp:
 C:/Users/Diyel/osu-3ds/source/backend/net/MultiplayerManager.hpp:
+C:/Users/Diyel/osu-3ds/source/game/core/Playfield.hpp:
+C:/Users/Diyel/osu-3ds/source/game/core/Mods.hpp:
+C:/Users/Diyel/osu-3ds/source/game/effects/GameplayEffects.hpp:
+C:/Users/Diyel/osu-3ds/source/app/AppState.hpp:
+C:/Users/Diyel/osu-3ds/source/frontend/render/QrRenderer.hpp:
+C:/Users/Diyel/osu-3ds/source/frontend/render/Draw.hpp:

@@ -6,6 +6,7 @@
 #include <vector>
 #include <dirent.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 // Descompresor ligero y autónomo de archivos .osz (formato ZIP: STORED y DEFLATE RFC 1951)
 // Diseñado específicamente para Nintendo 3DS sin dependencias externas.

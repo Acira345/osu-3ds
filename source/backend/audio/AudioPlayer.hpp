@@ -4,9 +4,9 @@
 #include <cstdio>
 #include <cmath>
 #include <string>
+#include <vector>
 #include <algorithm>
 
-#define MINIMP3_IMPLEMENTATION
 #include "minimp3_ex.h"
 
 #define STB_VORBIS_HEADER_ONLY
