@@ -110,30 +110,30 @@ main.o: C:/Users/Diyel/osu-3ds/source/main.cpp \
  C:/msys64/opt/devkitpro/libctru/include/c2d/sprite.h \
  C:/msys64/opt/devkitpro/libctru/include/c2d/text.h \
  C:/msys64/opt/devkitpro/libctru/include/c2d/font.h \
- C:/Users/Diyel/osu-3ds/include/Beatmap.hpp \
- C:/Users/Diyel/osu-3ds/include/AudioPlayer.hpp \
+ C:/Users/Diyel/osu-3ds/source/game/core/Beatmap.hpp \
+ C:/Users/Diyel/osu-3ds/source/backend/audio/AudioPlayer.hpp \
  C:/Users/Diyel/osu-3ds/third_party/minimp3_ex.h \
  C:/Users/Diyel/osu-3ds/third_party/minimp3.h \
  C:/Users/Diyel/osu-3ds/third_party/stb_vorbis.h \
- C:/Users/Diyel/osu-3ds/include/SongManager.hpp \
- C:/Users/Diyel/osu-3ds/include/OszExtractor.hpp \
- C:/Users/Diyel/osu-3ds/include/ScoreManager.hpp \
- C:/Users/Diyel/osu-3ds/include/Localization.hpp \
- C:/Users/Diyel/osu-3ds/include/Settings.hpp \
- C:/Users/Diyel/osu-3ds/include/SkinManager.hpp \
- C:/Users/Diyel/osu-3ds/include/WifiServer.hpp \
+ C:/Users/Diyel/osu-3ds/source/backend/storage/SongManager.hpp \
+ C:/Users/Diyel/osu-3ds/source/backend/storage/OszExtractor.hpp \
+ C:/Users/Diyel/osu-3ds/source/backend/storage/ScoreManager.hpp \
+ C:/Users/Diyel/osu-3ds/source/backend/i18n/Localization.hpp \
+ C:/Users/Diyel/osu-3ds/source/backend/storage/Settings.hpp \
+ C:/Users/Diyel/osu-3ds/source/backend/storage/SkinManager.hpp \
+ C:/Users/Diyel/osu-3ds/source/backend/net/WifiServer.hpp \
  C:/msys64/opt/devkitpro/libctru/include/arpa/inet.h \
- C:/Users/Diyel/osu-3ds/include/NetCommon.hpp \
- C:/Users/Diyel/osu-3ds/include/TextureLoader.hpp \
+ C:/Users/Diyel/osu-3ds/source/backend/net/NetCommon.hpp \
+ C:/Users/Diyel/osu-3ds/source/frontend/render/TextureLoader.hpp \
  C:/Users/Diyel/osu-3ds/third_party/stb_image.h \
- C:/Users/Diyel/osu-3ds/include/VideoPlayer.hpp \
- C:/Users/Diyel/osu-3ds/include/UiKit.hpp \
+ C:/Users/Diyel/osu-3ds/source/frontend/render/VideoPlayer.hpp \
+ C:/Users/Diyel/osu-3ds/source/frontend/render/UiKit.hpp \
  C:/Users/Diyel/osu-3ds/third_party/qrcodegen.h \
- C:/Users/Diyel/osu-3ds/include/DirectDownloader.hpp \
- C:/Users/Diyel/osu-3ds/include/ModeTaiko.hpp \
- C:/Users/Diyel/osu-3ds/include/ModeMania.hpp \
- C:/Users/Diyel/osu-3ds/include/ModeCatch.hpp \
- C:/Users/Diyel/osu-3ds/include/MultiplayerManager.hpp
+ C:/Users/Diyel/osu-3ds/source/backend/net/DirectDownloader.hpp \
+ C:/Users/Diyel/osu-3ds/source/game/modes/taiko/ModeTaiko.hpp \
+ C:/Users/Diyel/osu-3ds/source/game/modes/mania/ModeMania.hpp \
+ C:/Users/Diyel/osu-3ds/source/game/modes/catch/ModeCatch.hpp \
+ C:/Users/Diyel/osu-3ds/source/backend/net/MultiplayerManager.hpp
 C:/msys64/opt/devkitpro/libctru/include/3ds.h:
 C:/msys64/opt/devkitpro/libctru/include/3ds/types.h:
 C:/msys64/opt/devkitpro/libctru/include/3ds/result.h:
@@ -245,27 +245,27 @@ C:/msys64/opt/devkitpro/libctru/include/c2d/spritesheet.h:
 C:/msys64/opt/devkitpro/libctru/include/c2d/sprite.h:
 C:/msys64/opt/devkitpro/libctru/include/c2d/text.h:
 C:/msys64/opt/devkitpro/libctru/include/c2d/font.h:
-C:/Users/Diyel/osu-3ds/include/Beatmap.hpp:
-C:/Users/Diyel/osu-3ds/include/AudioPlayer.hpp:
+C:/Users/Diyel/osu-3ds/source/game/core/Beatmap.hpp:
+C:/Users/Diyel/osu-3ds/source/backend/audio/AudioPlayer.hpp:
 C:/Users/Diyel/osu-3ds/third_party/minimp3_ex.h:
 C:/Users/Diyel/osu-3ds/third_party/minimp3.h:
 C:/Users/Diyel/osu-3ds/third_party/stb_vorbis.h:
-C:/Users/Diyel/osu-3ds/include/SongManager.hpp:
-C:/Users/Diyel/osu-3ds/include/OszExtractor.hpp:
-C:/Users/Diyel/osu-3ds/include/ScoreManager.hpp:
-C:/Users/Diyel/osu-3ds/include/Localization.hpp:
-C:/Users/Diyel/osu-3ds/include/Settings.hpp:
-C:/Users/Diyel/osu-3ds/include/SkinManager.hpp:
-C:/Users/Diyel/osu-3ds/include/WifiServer.hpp:
+C:/Users/Diyel/osu-3ds/source/backend/storage/SongManager.hpp:
+C:/Users/Diyel/osu-3ds/source/backend/storage/OszExtractor.hpp:
+C:/Users/Diyel/osu-3ds/source/backend/storage/ScoreManager.hpp:
+C:/Users/Diyel/osu-3ds/source/backend/i18n/Localization.hpp:
+C:/Users/Diyel/osu-3ds/source/backend/storage/Settings.hpp:
+C:/Users/Diyel/osu-3ds/source/backend/storage/SkinManager.hpp:
+C:/Users/Diyel/osu-3ds/source/backend/net/WifiServer.hpp:
 C:/msys64/opt/devkitpro/libctru/include/arpa/inet.h:
-C:/Users/Diyel/osu-3ds/include/NetCommon.hpp:
-C:/Users/Diyel/osu-3ds/include/TextureLoader.hpp:
+C:/Users/Diyel/osu-3ds/source/backend/net/NetCommon.hpp:
+C:/Users/Diyel/osu-3ds/source/frontend/render/TextureLoader.hpp:
 C:/Users/Diyel/osu-3ds/third_party/stb_image.h:
-C:/Users/Diyel/osu-3ds/include/VideoPlayer.hpp:
-C:/Users/Diyel/osu-3ds/include/UiKit.hpp:
+C:/Users/Diyel/osu-3ds/source/frontend/render/VideoPlayer.hpp:
+C:/Users/Diyel/osu-3ds/source/frontend/render/UiKit.hpp:
 C:/Users/Diyel/osu-3ds/third_party/qrcodegen.h:
-C:/Users/Diyel/osu-3ds/include/DirectDownloader.hpp:
-C:/Users/Diyel/osu-3ds/include/ModeTaiko.hpp:
-C:/Users/Diyel/osu-3ds/include/ModeMania.hpp:
-C:/Users/Diyel/osu-3ds/include/ModeCatch.hpp:
-C:/Users/Diyel/osu-3ds/include/MultiplayerManager.hpp:
+C:/Users/Diyel/osu-3ds/source/backend/net/DirectDownloader.hpp:
+C:/Users/Diyel/osu-3ds/source/game/modes/taiko/ModeTaiko.hpp:
+C:/Users/Diyel/osu-3ds/source/game/modes/mania/ModeMania.hpp:
+C:/Users/Diyel/osu-3ds/source/game/modes/catch/ModeCatch.hpp:
+C:/Users/Diyel/osu-3ds/source/backend/net/MultiplayerManager.hpp:

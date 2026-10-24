@@ -33,9 +33,24 @@ include $(DEVKITARM)/3ds_rules
 #---------------------------------------------------------------------------------
 TARGET := osu-3ds
 BUILD		:=	build
-SOURCES		:=	source third_party
+SOURCES		:=	source \
+			source/app \
+			source/backend/audio \
+			source/backend/storage \
+			source/backend/net \
+			source/backend/i18n \
+			source/frontend/render \
+			source/frontend/screens \
+			source/game/core \
+			source/game/effects \
+			source/game/modes \
+			source/game/modes/standard \
+			source/game/modes/taiko \
+			source/game/modes/mania \
+			source/game/modes/catch \
+			third_party
 DATA		:=	data
-INCLUDES	:=	include third_party
+INCLUDES	:=	$(SOURCES)
 ASSETS		:=	assets
 GRAPHICS	:=	gfx
 #GFXBUILD	:=	$(BUILD)

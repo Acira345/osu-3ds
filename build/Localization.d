@@ -1,5 +1,6 @@
-Localization.o: C:/Users/Diyel/osu-3ds/source/Localization.cpp \
- C:/Users/Diyel/osu-3ds/include/Localization.hpp \
+Localization.o: \
+ C:/Users/Diyel/osu-3ds/source/backend/i18n/Localization.cpp \
+ C:/Users/Diyel/osu-3ds/source/backend/i18n/Localization.hpp \
  C:/msys64/opt/devkitpro/libctru/include/3ds.h \
  C:/msys64/opt/devkitpro/libctru/include/3ds/types.h \
  C:/msys64/opt/devkitpro/libctru/include/3ds/result.h \
@@ -87,7 +88,7 @@ Localization.o: C:/Users/Diyel/osu-3ds/source/Localization.cpp \
  C:/msys64/opt/devkitpro/libctru/include/3ds/font.h \
  C:/msys64/opt/devkitpro/libctru/include/3ds/gdbhio_dev.h \
  C:/msys64/opt/devkitpro/libctru/include/3ds/3dslink.h
-C:/Users/Diyel/osu-3ds/include/Localization.hpp:
+C:/Users/Diyel/osu-3ds/source/backend/i18n/Localization.hpp:
 C:/msys64/opt/devkitpro/libctru/include/3ds.h:
 C:/msys64/opt/devkitpro/libctru/include/3ds/types.h:
 C:/msys64/opt/devkitpro/libctru/include/3ds/result.h:
