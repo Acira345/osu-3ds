@@ -2,9 +2,13 @@ import socket
 import http.server
 import socketserver
 import threading
+import os
 import qrcode
 
 PORT = 8000
+
+# Servir desde la raiz del repositorio (donde make deja osu-3ds.3dsx)
+os.chdir(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # 1. Detectar automáticamente tu IP local (ej. 192.168.1.XX)
 def get_local_ip():

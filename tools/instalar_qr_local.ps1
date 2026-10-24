@@ -4,10 +4,11 @@
 # =============================================================================
 
 $port = 8090
-$ciaPath = Join-Path $PSScriptRoot "osu-3ds.cia"
+$repoRoot = Split-Path -Parent $PSScriptRoot
+$ciaPath = Join-Path $repoRoot "osu-3ds.cia"
 
 if (-not (Test-Path $ciaPath)) {
-    Write-Host "Error: No se encontro osu-3ds.cia en $PSScriptRoot" -ForegroundColor Red
+    Write-Host "Error: No se encontro osu-3ds.cia en $repoRoot" -ForegroundColor Red
     pause
     exit 1
 }

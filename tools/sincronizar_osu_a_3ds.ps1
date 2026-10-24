@@ -149,7 +149,7 @@ if (-not [string]::IsNullOrWhiteSpace($Ip3DS)) {
     } else {
         $DestinoSD = Read-Host "Escribe la letra de tu SD (ej: E:) o deja vacio para guardar en .\songs_para_3ds"
         if ([string]::IsNullOrWhiteSpace($DestinoSD)) {
-            $DestinoSD = Join-Path $PSScriptRoot "songs_para_3ds"
+            $DestinoSD = Join-Path (Split-Path -Parent $PSScriptRoot) "songs_para_3ds"
         } elseif ($DestinoSD -match "^[a-zA-Z]:\\?$") {
             $DestinoSD = Join-Path ($DestinoSD.TrimEnd('\') + "\") "3ds\osu-3ds\songs"
         }
