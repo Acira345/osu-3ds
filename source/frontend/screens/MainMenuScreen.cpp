@@ -1,26 +1,87 @@
 #include "MainMenuScreen.hpp"
 
+namespace {
+
+// Dibuja un icono vectorial nitido de corchea musical (♪)
+void drawMusicNoteIcon(float cx, float cy, float z, u32 color) {
+    C2D_DrawCircleSolid(cx - 2.0f, cy + 2.5f, z, 2.3f, color);
+    C2D_DrawCircleSolid(cx + 3.0f, cy + 1.5f, z, 2.3f, color);
+    C2D_DrawRectSolid(cx - 0.5f, cy - 4.5f, z, 1.3f, 7.0f, color);
+    C2D_DrawRectSolid(cx + 4.5f, cy - 5.5f, z, 1.3f, 7.0f, color);
+    C2D_DrawLine(cx - 0.5f, cy - 4.0f, color, cx + 5.5f, cy - 5.0f, color, 2.0f, z);
+}
+
+// Dibuja una estrella vectorial de 5 puntas (★)
+void drawStarIcon(float cx, float cy, float r, float z, u32 color) {
+    for (int i = 0; i < 5; ++i) {
+        float a0 = -1.5707963f + i * 1.2566371f;
+        float a1 = a0 + 0.6283185f;
+        float a2 = a0 - 0.6283185f;
+        float xTip = cx + std::cos(a0) * r;
+        float yTip = cy + std::sin(a0) * r;
+        float xR   = cx + std::cos(a1) * (r * 0.42f);
+        float yR   = cy + std::sin(a1) * (r * 0.42f);
+        float xL   = cx + std::cos(a2) * (r * 0.42f);
+        float yL   = cy + std::sin(a2) * (r * 0.42f);
+        C2D_DrawTriangle(cx, cy, color, xL, yL, color, xTip, yTip, color, z);
+        C2D_DrawTriangle(cx, cy, color, xTip, yTip, color, xR, yR, color, z);
+    }
+}
+
+// Dibuja la galleta / medallón osu! con anillos, brillo y texto centrado
+void drawOsuMedallion(C2D_TextBuf textBuf, float cx, float cy, float radius,
+                      float beat, int animTick, bool drawPulseRings, float textScale) {
+    u32 pinkMain = Ui::rgba(255, 102, 171); // #FF66AB
+    u32 pinkDeep = Ui::rgba(184, 23, 85);   // #B81755
+    u32 whiteClr = Ui::rgba(255, 255, 255);
+
+    if (drawPulseRings) {
+        for (int k = 0; k < 2; ++k) {
+            float phase = std::fmod(animTick * 0.014f + k * 0.5f, 1.0f);
+            u8 ringAlpha = static_cast<u8>((1.0f - phase) * 85.0f);
+            Ui::ring(cx, cy, 0.18f, radius + 4.0f + phase * 26.0f, 1.8f, Ui::withAlpha(pinkMain, ringAlpha), 36);
+        }
+    }
+
+    // Anillo exterior pulsante + resplandor suave
+    Ui::ring(cx, cy, 0.20f, radius + 8.0f + beat * 4.0f, 1.6f, Ui::withAlpha(pinkMain, 70), 36);
+    Ui::glow(cx, cy, 0.22f, radius + 12.0f, Ui::withAlpha(pinkMain, static_cast<u8>(95 + beat * 35)), 4);
+
+    // Sombra suave bajo el medallón
+    C2D_DrawCircleSolid(cx + 2.0f, cy + 4.0f, 0.23f, radius, Ui::rgba(0, 0, 0, 120));
+
+    // Borde blanco brillante + cuerpo rosa osu! + centro magenta profundo
+    float borderW = std::max(2.5f, radius * 0.065f);
+    float innerOffset = std::max(5.0f, radius * 0.14f);
+    C2D_DrawCircleSolid(cx, cy, 0.25f, radius, whiteClr);
+    C2D_DrawCircleSolid(cx, cy, 0.28f, radius - borderW, pinkMain);
+    C2D_DrawCircleSolid(cx, cy, 0.30f, radius - innerOffset, pinkDeep);
+
+    // Reflejo superior sutil estilo cristal
+    C2D_DrawCircleSolid(cx - radius * 0.18f, cy - radius * 0.22f, 0.31f, radius * 0.48f, Ui::rgba(255, 255, 255, 22));
+
+    // Texto central "osu!"
+    drawCenteredTextWithShadow(textBuf, cx, cy - 2.0f, textScale, whiteClr, "osu!", 0.35f, Ui::rgba(0, 0, 0, 140));
+}
+
+} // namespace
+
 void runMainMenuScreen(AppContext& ctx) {
-    const SkinProfile& activeSkin = ctx.getActiveSkin();
     ctx.audio.update();
     if (ctx.bgLoader.poll(ctx.bgTex)) ctx.bgFade = 0.0f;
     ctx.bgFade = Ui::approach(ctx.bgFade, 255.0f, 0.10f);
-    // Al terminar la canción del menú (sea Click the circles o una descargada),
-    // continuar con otra de las canciones descargadas continuamente sin quedarse en silencio
+
+    // Continuar reproduciendo música del menú sin quedarse en silencio
     if (ctx.settings.songPreview && !ctx.audio.isPreviewLoading() && (ctx.audio.isSongFinished() || !ctx.audio.getIsPlaying())) {
         ctx.rotateMenuSong();
     }
-    if (ctx.kDown & KEY_START) { ctx.shouldQuit = true; return; }
 
-    if (ctx.kDown & KEY_DUP) {
-        ctx.mainMenuOption = (ctx.mainMenuOption + 4) % 5;
-        ctx.audio.playHitSound(0);
+    if (ctx.kDown & KEY_START) {
+        ctx.shouldQuit = true;
+        return;
     }
-    if (ctx.kDown & KEY_DDOWN) {
-        ctx.mainMenuOption = (ctx.mainMenuOption + 1) % 5;
-        ctx.audio.playHitSound(0);
-    }
-    // Cambiar canción del menú manualmente con L y R o cruceta Izq/Der
+
+    // Cambiar canción del menú manualmente con L/R o Cruceta Izq/Der
     if (!ctx.songMgr.sets.empty() && (ctx.kDown & (KEY_L | KEY_R | KEY_DLEFT | KEY_DRIGHT))) {
         int dir = (ctx.kDown & (KEY_R | KEY_DRIGHT)) ? 1 : -1;
         int nSets = static_cast<int>(ctx.songMgr.sets.size());
@@ -31,16 +92,60 @@ void runMainMenuScreen(AppContext& ctx) {
         ctx.updateSongPreview();
     }
 
-    bool activateOption = (ctx.kDown & KEY_A) != 0;
+    bool activateOption = false;
 
-    if (ctx.touchJustDown) {
-        if (ctx.touch.px >= 18 && ctx.touch.px <= 302) {
-            for (int i = 0; i < 5; ++i) {
-                float by = 12.0f + i * 34.0f;
-                if (ctx.touch.py >= by && ctx.touch.py <= by + 30.0f) {
-                    ctx.mainMenuOption = i;
-                    activateOption = true;
-                    break;
+    if (!ctx.mainMenuExpanded) {
+        // ESTADO 1 (Contraído): Tocar el círculo central o pulsar A despliega las opciones
+        if (ctx.kDown & KEY_A) {
+            ctx.mainMenuExpanded = true;
+            ctx.audio.playHitSound(2);
+        } else if (ctx.touchJustDown) {
+            float dx = static_cast<float>(ctx.touch.px) - 160.0f;
+            float dy = static_cast<float>(ctx.touch.py) - 112.0f;
+            if (dx * dx + dy * dy <= 76.0f * 76.0f) {
+                ctx.mainMenuExpanded = true;
+                ctx.audio.playHitSound(2);
+            }
+        }
+    } else {
+        // ESTADO 2 (Desplegado): Navegación por las 5 opciones inclinadas o contraer con B / círculo izquierdo
+        if (ctx.kDown & KEY_B) {
+            ctx.mainMenuExpanded = false;
+            ctx.audio.playHitSound(0);
+        } else {
+            if (ctx.kDown & KEY_DUP) {
+                ctx.mainMenuOption = (ctx.mainMenuOption + 4) % 5;
+                ctx.audio.playHitSound(0);
+            }
+            if (ctx.kDown & KEY_DDOWN) {
+                ctx.mainMenuOption = (ctx.mainMenuOption + 1) % 5;
+                ctx.audio.playHitSound(0);
+            }
+            if (ctx.kDown & KEY_A) {
+                activateOption = true;
+            }
+
+            if (ctx.touchJustDown) {
+                // Comprobar toque en el círculo ancla izquierdo (cx = 46, cy = 120, r = 38)
+                float dx = static_cast<float>(ctx.touch.px) - 46.0f;
+                float dy = static_cast<float>(ctx.touch.py) - 120.0f;
+                if (dx * dx + dy * dy <= 42.0f * 42.0f) {
+                    ctx.mainMenuExpanded = false;
+                    ctx.audio.playHitSound(0);
+                } else if (ctx.touch.px >= 92 && ctx.touch.px <= 314) {
+                    // Comprobar toque en los 4 botones principales + 5to botón Salir
+                    for (int i = 0; i < 4; ++i) {
+                        float by = 18.0f + i * 43.0f;
+                        if (ctx.touch.py >= by && ctx.touch.py <= by + 38.0f) {
+                            ctx.mainMenuOption = i;
+                            activateOption = true;
+                            break;
+                        }
+                    }
+                    if (!activateOption && ctx.touch.py >= 192 && ctx.touch.py <= 226) {
+                        ctx.mainMenuOption = 4;
+                        activateOption = true;
+                    }
                 }
             }
         }
@@ -52,7 +157,6 @@ void runMainMenuScreen(AppContext& ctx) {
             ctx.appState = STATE_SONG_SELECT;
             ctx.updateSongPreview();
         } else if (ctx.mainMenuOption == 1) {
-            // Abrir Navegador de Salas Multijugador Local (LAN)
             ctx.multiMgr.startBrowser(ctx.sysUser);
             ctx.appState = STATE_MULTI_BROWSER;
         } else if (ctx.mainMenuOption == 2) {
@@ -66,159 +170,178 @@ void runMainMenuScreen(AppContext& ctx) {
             ctx.calibrationMode = false;
             ctx.appState = STATE_SETTINGS;
         } else if (ctx.mainMenuOption == 4) {
-            { ctx.shouldQuit = true; return; }
+            ctx.shouldQuit = true;
+            return;
         }
     }
+
+    ctx.mainMenuExpandAnim = Ui::approach(ctx.mainMenuExpandAnim, ctx.mainMenuExpanded ? 1.0f : 0.0f, 0.22f);
 
     C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
 
     float beat = ctx.getBpmPulse();
-    const char* menuLabels[5] = {
-        LOC(STR_MENU_PLAY),
-        LOC(STR_MENU_MULTI),
-        LOC(STR_MENU_WIFI),
-        LOC(STR_MENU_SETTINGS),
-        LOC(STR_MENU_EXIT)
-    };
-    const char* menuSubPills[5] = {
-        LOC(STR_MENU_PILL_SOLO),
-        LOC(STR_MENU_PILL_MULTI),
-        LOC(STR_MENU_PILL_WIFI),
-        LOC(STR_MENU_PILL_SETTINGS),
-        LOC(STR_MENU_PILL_EXIT)
-    };
+    u32 pinkAccent = Ui::rgba(255, 102, 171); // #FF66AB
+
+    // =========================================================================
+    // PANTALLA SUPERIOR (400x240, 3D Estereoscópico)
+    // =========================================================================
     for (int eye = 0; eye < (ctx.stereoActive ? 2 : 1); ++eye) {
         C3D_RenderTarget* curTop = (eye == 0) ? ctx.topScreen : ctx.topScreenRight;
         float eyeSign = ctx.stereoActive ? ((eye == 0) ? 1.0f : -1.0f) : 0.0f;
-        C2D_TargetClear(curTop, ctx.clrBgDark);
+        C2D_TargetClear(curTop, Ui::rgba(10, 7, 20));
         C2D_SceneBegin(curTop);
         auto depthShift = [&](float px) { return eyeSign * ctx.slider3D * px; };
 
-        float dBg = depthShift(-3.5f);
+        // 1. Fondo estilo osu!lazer con degradado oscuro (#140D24 -> #0A0714) y geometría flotante
+        float dBg = depthShift(-3.0f);
+        Ui::backdrop(400.0f, 240.0f, static_cast<float>(ctx.animTick),
+                     Ui::rgba(20, 13, 36), Ui::rgba(10, 7, 20), pinkAccent, 0.01f);
         if (ctx.bgTex.loaded) {
-            Ui::backdrop(400.0f, 240.0f, static_cast<float>(ctx.animTick), Ui::rgba(34, 14, 56), Ui::rgba(10, 7, 22), ctx.clrPrimary, 0.01f);
-            ctx.bgTex.drawRect(dBg - beat * 2.0f, -beat * 1.5f, 400.0f + beat * 4.0f, 240.0f + beat * 3.0f, 0.02f, static_cast<u8>(ctx.bgFade));
-            u8 dimAlpha = static_cast<u8>((ctx.settings.bgDim * 180) / 100);
-            C2D_DrawRectSolid(0.0f, 0.0f, 0.04f, 400.0f, 240.0f, Ui::rgba(14, 10, 24, dimAlpha));
-        } else {
-            Ui::backdrop(400.0f, 240.0f, static_cast<float>(ctx.animTick), Ui::rgba(34, 14, 56), Ui::rgba(10, 7, 22), ctx.clrPrimary, 0.02f);
+            ctx.bgTex.drawRect(dBg - beat * 2.0f, -beat * 1.5f,
+                               400.0f + beat * 4.0f, 240.0f + beat * 3.0f,
+                               0.02f, static_cast<u8>(ctx.bgFade * 0.45f));
+            C2D_DrawRectSolid(0.0f, 0.0f, 0.03f, 400.0f, 240.0f, Ui::rgba(14, 9, 24, 175));
         }
 
-        // Barra superior de canción en reproducción (Estilo osu! PC / Multijugador)
+        // 2. Cabecera superior estilo osu!lazer: [osu!] osu!lazer 3DS | ● Conectado • 60 FPS
+        Ui::lazerHeader(400.0f, 0.30f, "osu!lazer 3DS", "60 FPS", pinkAccent, ctx.textBuf, true);
+
+        // 3. Medallón central osu! pulsante en 3D
+        float dLogo = depthShift(3.5f + beat * 1.2f);
+        float topCx = 200.0f + dLogo;
+        float topCy = 100.0f;
+        float topRadius = 46.0f + beat * 4.0f;
+        drawOsuMedallion(ctx.textBuf, topCx, topCy, topRadius, beat, ctx.animTick, true, 0.96f + beat * 0.04f);
+
+        // 4. Lema y subtítulo inferior bajo el medallón
+        float dText = depthShift(2.0f);
+        drawCenteredTextWithShadow(ctx.textBuf, 200.0f + dText, 164.0f, 0.42f,
+                                   ctx.clrWhite, "Rhythm is just a click away!", 0.35f);
+        drawCenteredTextWithShadow(ctx.textBuf, 200.0f + dText, 181.0f, 0.34f,
+                                   pinkAccent, ctx.mainMenuExpanded ? "Selecciona una opcion en la pantalla tactil" : "Toca la pantalla inferior para comenzar", 0.35f);
+
+        // 5. Barra inferior de canción en reproducción (♪ Title (Artist) | 180 BPM • ★ 2.97)
+        float barY = 212.0f;
+        C2D_DrawRectSolid(0.0f, barY, 0.30f, 400.0f, 28.0f, Ui::rgba(14, 10, 24, 240));
+        C2D_DrawRectSolid(0.0f, barY, 0.31f, 400.0f, 1.0f, Ui::withAlpha(pinkAccent, 85));
+
+        std::string songTitle  = "Circles!";
+        std::string songArtist = "Nekodex";
+        int songBpm = 175;
+        float songStars = 2.40f;
+
         if (!ctx.songMgr.sets.empty() && ctx.selectedSet >= 0 && ctx.selectedSet < static_cast<int>(ctx.songMgr.sets.size())) {
             const auto& curSet = ctx.songMgr.sets[ctx.selectedSet];
-            Ui::gradV(0.0f, 0.0f, 400.0f, 26.0f, 0.28f, Ui::rgba(14, 10, 24, 240), Ui::rgba(14, 10, 24, 60));
-
-            // Pastilla indicadora de música estilo multijugador (sin signos de interrogación)
-            Ui::pill(10.0f, 5.0f, 56.0f, 16.0f, 0.32f, Ui::rgba(255, 102, 171));
-            drawCenteredText(ctx.textBuf, 38.0f, 12.0f, 0.28f, ctx.clrWhite, LOC(STR_MENU_MUSIC_NOW), 0.35f);
-
-            std::string nowPlaying = curSet.artist + " - " + curSet.title;
-            drawTextWithShadow(ctx.textBuf, 72.0f, 5.0f, 0.38f, ctx.clrWhite, truncateString(nowPlaying, 34).c_str(), 0.35f);
-
-            Ui::pill(322.0f, 5.0f, 70.0f, 16.0f, 0.32f, Ui::rgba(30, 24, 46, 230));
-            drawCenteredText(ctx.textBuf, 357.0f, 12.0f, 0.29f, ctx.isNew3DS ? ctx.clr100 : ctx.clrMuted, ctx.isNew3DS ? "New3DS 804M" : "3DS 268M", 0.35f);
+            songTitle  = curSet.title;
+            songArtist = curSet.artist;
+            if (!curSet.difficulties.empty()) {
+                int dIdx = std::max(0, std::min(ctx.selectedDiff, static_cast<int>(curSet.difficulties.size()) - 1));
+                const auto& diff = curSet.difficulties[dIdx];
+                songBpm   = static_cast<int>(std::round(diff.getBPM()));
+                songStars = diff.starRating;
+            }
         }
 
-        // Logo que late sincronizado al BPM real y flota hacia adelante en 3D
-        float dLogo = depthShift(3.5f + beat * 1.2f);
-        float logoX = 118.0f + dLogo;
-        float logoY = 126.0f;
-        float logoR = 55.0f + beat * 8.0f;
+        float dBar = depthShift(1.2f);
+        drawMusicNoteIcon(14.0f + dBar, barY + 14.0f, 0.35f, pinkAccent);
 
-        for (int k = 0; k < 3; ++k) {
-            float phase = std::fmod(ctx.animTick * 0.012f + k / 3.0f, 1.0f);
-            Ui::ring(logoX, logoY, 0.15f, logoR + phase * 60.0f, 2.0f, Ui::withAlpha(ctx.clrPrimary, static_cast<u8>((1.0f - phase) * 95.0f)), 40);
-        }
-        Ui::glow(logoX, logoY, 0.16f, logoR * 1.9f, Ui::rgba(255, 102, 170, static_cast<u8>(115 + beat * 45)), 6);
-        C2D_DrawCircleSolid(logoX + 3.0f, logoY + 5.0f, 0.18f, logoR, Ui::rgba(0, 0, 0, 120));
-        C2D_DrawCircleSolid(logoX, logoY, 0.2f, logoR, Ui::rgba(255, 98, 168, 255));
-        C2D_DrawCircleSolid(logoX - logoR * 0.22f, logoY - logoR * 0.28f, 0.21f, logoR * 0.6f, Ui::rgba(255, 255, 255, 30));
-        Ui::ring(logoX, logoY, 0.25f, logoR, 3.5f, ctx.clrWhite, 40);
-        drawCenteredText(ctx.textBuf, logoX, logoY - 6.0f, 1.10f + beat * 0.06f, ctx.clrWhite, "osu!");
-        drawCenteredText(ctx.textBuf, logoX, logoY + 24.0f, 0.46f, Ui::rgba(255, 235, 245), "3DS Edition");
+        std::string truncTitle = truncateString(songTitle, 22);
+        drawTextWithShadow(ctx.textBuf, 25.0f + dBar, barY + 7.5f, 0.37f, ctx.clrWhite, truncTitle.c_str(), 0.35f);
 
-        for (int i = 0; i < 5; ++i) {
-            bool sel = (ctx.mainMenuOption == i);
-            float dBtn = depthShift(sel ? 4.2f : 1.5f);
-            float bx = (sel ? (202.0f - beat * 3.5f) : 218.0f) + dBtn;
-            float by = 28.0f + i * 36.0f;
-            float bw = 178.0f;
-            float bh = 30.0f;
+        // Medir el ancho del título para colocar (Artist) justo al lado
+        C2D_Text tmpTitle;
+        C2D_TextParse(&tmpTitle, ctx.textBuf, truncTitle.c_str());
+        float titleW = 0.0f, titleH = 0.0f;
+        C2D_TextGetDimensions(&tmpTitle, 0.37f, 0.37f, &titleW, &titleH);
 
-            const RGBColor& c = activeSkin.comboColors[i % activeSkin.comboColors.size()];
-            u32 base = C2D_Color32(c.r, c.g, c.b, 255);
-            u32 bg = sel ? Ui::rgba(42, 34, 70, 250) : Ui::rgba(22, 19, 36, 235);
-            Ui::button(bx, by, bw, bh, 0.20f, bg, base, sel);
+        std::string artistParen = "(" + truncateString(songArtist, 22) + ")";
+        drawText(ctx.textBuf, 30.0f + titleW + dBar, barY + 8.0f, 0.34f, Ui::rgba(160, 155, 185), artistParen.c_str(), 0.35f);
 
-            // Pastilla indicadora de selección [>] o [A]
-            Ui::pill(bx + 8.0f, by + 6.0f, 20.0f, 18.0f, 0.24f, sel ? base : Ui::rgba(38, 32, 55, 240));
-            drawCenteredText(ctx.textBuf, bx + 18.0f, by + 14.0f, 0.28f, sel ? Ui::rgba(0, 0, 0, 245) : ctx.clrWhite, sel ? "A" : ">", 0.28f);
+        // BPM en cian + Estrella dorada a la derecha
+        char bpmBuf[24];
+        std::snprintf(bpmBuf, sizeof(bpmBuf), "%d BPM", songBpm);
+        drawText(ctx.textBuf, 294.0f + dBar, barY + 8.0f, 0.34f, Ui::rgba(56, 210, 255), bpmBuf, 0.35f);
 
-            // Título de la opción del menú
-            drawTextWithShadow(ctx.textBuf, bx + 34.0f, by + 6.5f, 0.38f, ctx.clrWhite, menuLabels[i], 0.28f);
+        C2D_DrawCircleSolid(344.0f + dBar, barY + 14.0f, 0.35f, 1.3f, Ui::rgba(130, 125, 155));
 
-            // Pastilla de categoría / modo a la derecha estilo multijugador
-            Ui::pill(bx + bw - 58.0f, by + 6.0f, 52.0f, 18.0f, 0.24f, sel ? base : Ui::rgba(32, 26, 48, 220));
-            drawCenteredText(ctx.textBuf, bx + bw - 32.0f, by + 14.0f, 0.26f, sel ? Ui::rgba(0, 0, 0, 245) : Ui::rgba(215, 210, 235), menuSubPills[i], 0.28f);
-        }
+        drawStarIcon(354.0f + dBar, barY + 14.0f, 4.2f, 0.35f, Ui::rgba(255, 195, 40));
+        char starBuf[16];
+        std::snprintf(starBuf, sizeof(starBuf), "%.2f", songStars);
+        drawTextWithShadow(ctx.textBuf, 361.0f + dBar, barY + 8.0f, 0.35f, Ui::rgba(255, 195, 40), starBuf, 0.35f);
 
-        // Barra inferior de atajos estilo multijugador con v4.0 3D
-        Ui::gradV(0.0f, 212.0f, 400.0f, 28.0f, 0.3f, Ui::rgba(14, 11, 26, 140), Ui::rgba(14, 11, 26, 250));
-        float byY = 219.0f;
-        drawKeyBadge(ctx.textBuf, 12.0f, byY, "A", LOC(STR_SELECT_ACTION), Ui::rgba(50, 165, 255));
-        drawKeyBadge(ctx.textBuf, 88.0f, byY, "DPAD", LOC(STR_MOVE_ACTION), Ui::rgba(255, 180, 40));
-        drawKeyBadge(ctx.textBuf, 164.0f, byY, "TOUCH", LOC(STR_TOUCH_ACTION), Ui::rgba(50, 215, 115));
-
-        Ui::pill(328.0f, byY - 1.0f, 62.0f, 16.0f, 0.30f, Ui::rgba(25, 40, 65, 230));
-        drawCenteredText(ctx.textBuf, 359.0f, byY + 6.5f, 0.30f, Ui::rgba(100, 215, 255), "v4.0 3D", 0.32f);
         Ui::drawTransition(400.0f, 240.0f, ctx.screenFade, ctx.clrPrimary);
     }
 
-    C2D_TargetClear(ctx.bottomScreen, ctx.clrTabletBg);
+    // =========================================================================
+    // PANTALLA INFERIOR (320x240, Táctil: Estado 1 Círculo / Estado 2 Desplegado)
+    // =========================================================================
+    C2D_TargetClear(ctx.bottomScreen, Ui::rgba(10, 6, 20));
     C2D_SceneBegin(ctx.bottomScreen);
 
-    Ui::backdrop(320.0f, 240.0f, static_cast<float>(ctx.animTick), Ui::rgba(26, 20, 44), Ui::rgba(12, 10, 22), ctx.clrPrimary, 0.02f);
-    if (ctx.bgTex.loaded) {
-        ctx.bgTex.drawRect(0.0f, 0.0f, 320.0f, 240.0f, 0.03f, 75);
-        C2D_DrawRectSolid(0.0f, 0.0f, 0.04f, 320.0f, 240.0f, Ui::rgba(14, 11, 24, 160));
+    // Fondo oscuro limpio (#0A0614) con geometría sutil estilo osu!lazer
+    Ui::backdrop(320.0f, 240.0f, static_cast<float>(ctx.animTick),
+                 Ui::rgba(16, 10, 30), Ui::rgba(10, 6, 20), pinkAccent, 0.01f);
+
+    float tExp = ctx.mainMenuExpandAnim;
+
+    // Interpolación suave del círculo osu! entre Estado 1 (centro) y Estado 2 (ancla izquierda)
+    float botCx     = 160.0f * (1.0f - tExp) + 46.0f * tExp;
+    float botCy     = 112.0f * (1.0f - tExp) + 120.0f * tExp;
+    float botRadius = (54.0f + beat * 4.5f) * (1.0f - tExp) + (35.0f + beat * 2.0f) * tExp;
+    float botTxtScl = 1.10f * (1.0f - tExp) + 0.72f * tExp;
+
+    drawOsuMedallion(ctx.textBuf, botCx, botCy, botRadius, beat, ctx.animTick, !ctx.mainMenuExpanded, botTxtScl);
+
+    if (tExp < 0.5f) {
+        // Texto inferior del Estado 1 (Contraído)
+        u8 promptAlpha = static_cast<u8>((1.0f - tExp * 2.0f) * (195.0f + beat * 60.0f));
+        drawCenteredTextWithShadow(ctx.textBuf, 160.0f, 188.0f, 0.40f,
+                                   Ui::rgba(255, 255, 255, promptAlpha),
+                                   "TOCA EL CIRCULO PARA JUGAR", 0.35f);
+        drawCenteredText(ctx.textBuf, 160.0f, 222.0f, 0.30f,
+                         Ui::rgba(145, 138, 175, static_cast<u8>((1.0f - tExp * 2.0f) * 180.0f)),
+                         "L / R: Cambiar cancion   •   START: Salir", 0.35f);
     }
 
-    for (int i = 0; i < 5; ++i) {
-        bool sel = (ctx.mainMenuOption == i);
-        float bx = 20.0f;
-        float by = 12.0f + i * 34.0f;
-        float bw = 280.0f;
-        float bh = 30.0f;
+    if (tExp > 0.05f) {
+        // Estado 2 (Desplegado): Botones inclinados estilo osu!lazer a la derecha
+        float slideOffset = (1.0f - tExp) * 180.0f;
+        float bx = 98.0f + slideOffset;
+        float bw = 212.0f;
+        float slant = -6.0f;
 
-        const RGBColor& c = activeSkin.comboColors[i % activeSkin.comboColors.size()];
-        u32 base = C2D_Color32(c.r, c.g, c.b, 255);
-        u32 bg = sel ? Ui::rgba(45, 36, 72, 250) : Ui::rgba(22, 19, 36, 235);
-        Ui::button(bx, by, bw, bh, 0.20f, bg, base, sel);
+        const char* btnTitles[4] = {
+            "JUGAR",
+            "MULTIJUGADOR",
+            "DESCARGAS",
+            "AJUSTES"
+        };
+        const char* btnSubs[4] = {
+            "SOLO BEATMAPS",
+            "SALAS 1V1 Y 4P",
+            "PORTAL WI-FI 8080",
+            "TABLET Y AUDIO"
+        };
+        u32 btnColors[4] = {
+            Ui::rgba(255, 102, 171), // #FF66AB Rosa osu!
+            Ui::rgba(66, 144, 251),  // #4290FB Azul multijugador
+            Ui::rgba(85, 221, 119),  // #55DD77 Verde descargas
+            Ui::rgba(147, 85, 232)   // #9355E8 Morado ajustes
+        };
 
-        // Pastilla indicadora de atajo [A]
-        Ui::pill(bx + 8.0f, by + 6.0f, 22.0f, 18.0f, 0.24f, sel ? base : Ui::rgba(38, 32, 55, 240));
-        drawCenteredText(ctx.textBuf, bx + 19.0f, by + 14.5f, 0.28f, sel ? Ui::rgba(0, 0, 0, 245) : ctx.clrWhite, "A", 0.28f);
+        for (int i = 0; i < 4; ++i) {
+            float by = 18.0f + i * 43.0f;
+            bool sel = (ctx.mainMenuOption == i);
+            Ui::slantButton(bx, by, bw, 38.0f, slant, btnColors[i],
+                            btnTitles[i], btnSubs[i], ctx.textBuf, sel, 0.25f);
+        }
 
-        // Titulo de la opcion del menu con sombra nitida
-        drawTextWithShadow(ctx.textBuf, bx + 36.0f, by + 6.0f, 0.42f, ctx.clrWhite, menuLabels[i], 0.28f);
-
-        // Pastilla de categoria / modo a la derecha estilo multijugador
-        Ui::pill(bx + bw - 74.0f, by + 6.0f, 66.0f, 18.0f, 0.24f, sel ? base : Ui::rgba(32, 26, 48, 220));
-        drawCenteredText(ctx.textBuf, bx + bw - 41.0f, by + 14.5f, 0.27f, sel ? Ui::rgba(0, 0, 0, 245) : Ui::rgba(215, 210, 235), menuSubPills[i], 0.28f);
+        // 5to botón compacto inclinado: SALIR
+        bool exitSel = (ctx.mainMenuOption == 4);
+        Ui::slantButton(bx, 192.0f, bw, 32.0f, slant, Ui::rgba(255, 77, 109),
+                        "SALIR", "VOLVER A HOME (START)", ctx.textBuf, exitSel, 0.25f);
     }
 
-    Ui::panel(10.0f, 186.0f, 300.0f, 46.0f, 0.20f, Ui::rgba(20, 18, 34, 240), ctx.clr300);
-    char summary1[96];
-    std::snprintf(summary1, sizeof(summary1), "%s: %s  •  Area: %d%%  •  Offset: %+dms",
-        LOC(STR_MODE),
-        ctx.settings.getShortInputModeLabel(),
-        static_cast<int>(std::round(ctx.settings.tabletScale * 100.0f)),
-        ctx.settings.audioOffsetMs);
-    drawCenteredTextWithShadow(ctx.textBuf, 160.0f, 199.0f, 0.35f, ctx.clr300, summary1, 0.25f);
-
-    std::string skinLine = "Skin: " + truncateString(activeSkin.name, 22) + "  •  Mods: " + formatModsString(ctx.settings.activeMods);
-    drawCenteredTextWithShadow(ctx.textBuf, 160.0f, 217.0f, 0.35f, ctx.clrCursor, skinLine.c_str(), 0.25f);
     Ui::drawTransition(320.0f, 240.0f, ctx.screenFade, ctx.clrPrimary);
 
     C3D_FrameEnd(0);

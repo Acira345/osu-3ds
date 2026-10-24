@@ -2,6 +2,7 @@
 #include <3ds.h>
 #include <citro2d.h>
 #include <cmath>
+#include <cstdio>
 #include <algorithm>
 #include <vector>
 
@@ -129,7 +130,7 @@ inline void ring(float x, float y, float z, float r, float th, u32 c, int seg = 
     }
 }
 
-// Fondo animado: degradado + triangulos flotantes (como el menu de osu!)
+// Fondo animado: degradado + triangulos y cuadrados flotantes (como el menu de osu!lazer)
 inline void backdrop(float w, float h, float anim, u32 topClr, u32 botClr, u32 tint, float z = 0.01f) {
     gradV(0.0f, 0.0f, w, h, z, topClr, botClr);
     for (int i = 0; i < 16; ++i) {
@@ -141,6 +142,115 @@ inline void backdrop(float w, float h, float anim, u32 topClr, u32 botClr, u32 t
         u8 a = static_cast<u8>(10 + (i % 4) * 6);
         u32 c = withAlpha(tint, a);
         C2D_DrawTriangle(x, y - size, c, x - size * 0.87f, y + size * 0.5f, c, x + size * 0.87f, y + size * 0.5f, c, z + 0.001f);
+    }
+    // Rombos / cuadrados inclinados sutiles de fondo estilo osu!lazer
+    for (int j = 0; j < 4; ++j) {
+        float cx = 75.0f + j * 95.0f;
+        float cy = 65.0f + (j % 2) * 85.0f;
+        float r = 36.0f + (j % 3) * 14.0f;
+        float ang = 0.35f + j * 0.45f + anim * 0.002f * ((j % 2 == 0) ? 1.0f : -1.0f);
+        u32 lineClr = withAlpha(tint, 22);
+        for (int k = 0; k < 4; ++k) {
+            float a0 = ang + k * 1.5707963f;
+            float a1 = ang + (k + 1) * 1.5707963f;
+            C2D_DrawLine(cx + std::cos(a0) * r, cy + std::sin(a0) * r, lineClr,
+                         cx + std::cos(a1) * r, cy + std::sin(a1) * r, lineClr, 1.0f, z + 0.002f);
+        }
+    }
+}
+
+// Cabecera superior estilo osu!lazer con pastilla [osu!], titulo, estado Conectado y FPS
+inline void lazerHeader(float w, float z, const char* title, const char* rightTag, u32 accentClr, C2D_TextBuf textBuf, bool connected = true) {
+    float h = 24.0f;
+    C2D_DrawRectSolid(0.0f, 0.0f, z, w, h, rgba(14, 9, 24, 235));
+    C2D_DrawRectSolid(0.0f, h - 1.0f, z + 0.005f, w, 1.0f, withAlpha(accentClr, 90));
+
+    // Pastilla rosa [osu!] a la izquierda
+    pill(10.0f, 4.0f, 34.0f, 16.0f, z + 0.01f, accentClr);
+    if (textBuf) {
+        C2D_Text t;
+        C2D_TextParse(&t, textBuf, "osu!");
+        C2D_TextOptimize(&t);
+        float tw = 0.0f, th = 0.0f;
+        C2D_TextGetDimensions(&t, 0.36f, 0.36f, &tw, &th);
+        C2D_DrawText(&t, C2D_WithColor, 27.0f - tw * 0.5f, 12.0f - th * 0.5f, z + 0.02f, 0.36f, 0.36f, rgba(255, 255, 255));
+
+        // Titulo junto a la pastilla
+        if (title && title[0]) {
+            C2D_Text tTitle;
+            C2D_TextParse(&tTitle, textBuf, title);
+            C2D_TextOptimize(&tTitle);
+            C2D_DrawText(&tTitle, C2D_WithColor, 50.0f, 5.5f, z + 0.02f, 0.40f, 0.40f, rgba(255, 255, 255));
+        }
+
+        // Indicador derecho: Punto verde "Conectado" + separador + rightTag ("60 FPS")
+        u32 dotClr = connected ? rgba(46, 213, 115) : rgba(160, 155, 180);
+        float dotX = w - 122.0f;
+        glow(dotX, 12.0f, z + 0.01f, 6.0f, withAlpha(dotClr, 90), 2);
+        C2D_DrawCircleSolid(dotX, 12.0f, z + 0.02f, 3.2f, dotClr);
+
+        C2D_Text tConn;
+        C2D_TextParse(&tConn, textBuf, connected ? "Conectado" : "Local");
+        C2D_TextOptimize(&tConn);
+        C2D_DrawText(&tConn, C2D_WithColor, dotX + 7.0f, 6.5f, z + 0.02f, 0.33f, 0.33f, dotClr);
+
+        if (rightTag && rightTag[0]) {
+            C2D_DrawCircleSolid(w - 52.0f, 12.0f, z + 0.02f, 1.2f, rgba(130, 120, 155));
+            C2D_Text tRight;
+            C2D_TextParse(&tRight, textBuf, rightTag);
+            C2D_TextOptimize(&tRight);
+            C2D_DrawText(&tRight, C2D_WithColor, w - 45.0f, 6.5f, z + 0.02f, 0.33f, 0.33f, accentClr);
+        }
+    }
+}
+
+// Boton inclinado (paralelogramo) estilo osu!lazer con acento lateral, titulo y subtitulo
+inline void slantButton(float x, float y, float w, float h, float slant, u32 accentClr,
+                        const char* title, const char* subtitle,
+                        C2D_TextBuf textBuf = nullptr, bool selected = false, float z = 0.25f) {
+    float rx = selected ? (x - 4.0f) : x;
+    if (selected) {
+        glow(rx + w * 0.5f, y + h * 0.5f, z - 0.02f, w * 0.45f, withAlpha(accentClr, 75), 3);
+    }
+
+    // Sombra inclinada
+    slantRect(rx + 2.5f, y + 3.0f, w, h, slant, z - 0.01f, rgba(0, 0, 0, 130));
+
+    // Cuerpo del paralelogramo con gradiente horizontal
+    u32 leftBg  = selected ? lerpColor(rgba(34, 24, 56, 250), accentClr, 0.38f) : lerpColor(rgba(24, 18, 40, 242), accentClr, 0.16f);
+    u32 rightBg = selected ? rgba(26, 18, 44, 248) : rgba(16, 12, 28, 238);
+    slantRectGrad(rx, y, w, h, slant, z, leftBg, rightBg);
+
+    // Barra lateral izquierda inclinada de color acento
+    slantRect(rx, y, selected ? 7.5f : 5.5f, h, slant, z + 0.01f, accentClr);
+
+    // Linea de brillo superior e inferior
+    u32 topEdge = selected ? accentClr : rgba(255, 255, 255, 45);
+    C2D_DrawLine(rx + slant, y, topEdge, rx + w, y, withAlpha(topEdge, 25), selected ? 1.5f : 1.0f, z + 0.012f);
+    if (selected) {
+        C2D_DrawLine(rx, y + h, accentClr, rx + w - slant, y + h, withAlpha(accentClr, 40), 1.2f, z + 0.012f);
+    }
+
+    if (textBuf) {
+        if (title && title[0]) {
+            C2D_Text tTitle;
+            C2D_TextParse(&tTitle, textBuf, title);
+            C2D_TextOptimize(&tTitle);
+            C2D_DrawText(&tTitle, C2D_WithColor, rx + 15.0f, y + 4.5f, z + 0.02f, 0.44f, 0.44f, rgba(255, 255, 255));
+        }
+        if (subtitle && subtitle[0]) {
+            C2D_Text tSub;
+            C2D_TextParse(&tSub, textBuf, subtitle);
+            C2D_TextOptimize(&tSub);
+            u32 subClr = selected ? brighten(accentClr, 1.35f) : withAlpha(brighten(accentClr, 1.20f), 215);
+            C2D_DrawText(&tSub, C2D_WithColor, rx + 15.0f, y + h - 14.5f, z + 0.02f, 0.30f, 0.30f, subClr);
+        }
+        if (selected) {
+            C2D_Text tSel;
+            C2D_TextParse(&tSel, textBuf, ">>");
+            C2D_TextOptimize(&tSel);
+            C2D_DrawText(&tSel, C2D_WithColor, rx + w - 24.0f, y + h * 0.5f - 6.5f, z + 0.02f, 0.36f, 0.36f, accentClr);
+        }
     }
 }
 
@@ -256,6 +366,51 @@ inline void strainGraph(float x, float y, float w, float h, float z,
     C2D_DrawLine(x, baseY, rgba(60, 52, 90, clamp8(160.0f * alphaMult)), x + w, baseY, rgba(60, 52, 90, clamp8(160.0f * alphaMult)), 1.0f, z + 0.025f);
     C2D_DrawLine(x, y, rgba(60, 52, 90, clamp8(160.0f * alphaMult)), x, baseY, rgba(60, 52, 90, clamp8(160.0f * alphaMult)), 1.0f, z + 0.025f);
     C2D_DrawLine(x + w, y, rgba(60, 52, 90, clamp8(160.0f * alphaMult)), x + w, baseY, rgba(60, 52, 90, clamp8(160.0f * alphaMult)), 1.0f, z + 0.025f);
+}
+
+// Indicador de métrica (CS, AR, OD, HP) con etiqueta, valor y barra sutil
+inline void metricGauge(float x, float y, const char* label, float val, float maxVal, C2D_TextBuf textBuf, float z = 0.5f) {
+    if (textBuf && label) {
+        char buf[16];
+        std::snprintf(buf, sizeof(buf), "%s %.1f", label, val);
+        C2D_Text t;
+        C2D_TextParse(&t, textBuf, buf);
+        C2D_TextOptimize(&t);
+        C2D_DrawText(&t, C2D_WithColor, x, y, z + 0.02f, 0.32f, 0.32f, rgba(235, 230, 255));
+    }
+    float barW = 38.0f;
+    float barH = 4.0f;
+    float ratio = std::max(0.0f, std::min(1.0f, val / maxVal));
+    pill(x, y + 11.0f, barW, barH, z + 0.01f, rgba(28, 22, 44, 240));
+    if (ratio > 0.02f) {
+        pill(x, y + 11.0f, std::max(barH, barW * ratio), barH, z + 0.02f, rgba(56, 210, 255));
+    }
+}
+
+// Pastilla de dificultad con estrellas y nombre
+inline void diffBadge(float x, float y, float stars, const char* name, C2D_TextBuf textBuf, bool active = false, float z = 0.5f) {
+    float w = 78.0f;
+    float h = 20.0f;
+    u32 bg = active ? rgba(25, 75, 45, 245) : rgba(24, 20, 38, 230);
+    u32 bdr = active ? rgba(46, 213, 115) : rgba(65, 55, 85);
+    panel(x, y, w, h, z, bg, bdr);
+    if (active) {
+        glow(x + w * 0.5f, y + h * 0.5f, z - 0.01f, 16.0f, rgba(46, 213, 115, 80), 2);
+    }
+    if (textBuf) {
+        if (name && name[0]) {
+            C2D_Text t;
+            C2D_TextParse(&t, textBuf, name);
+            C2D_TextOptimize(&t);
+            C2D_DrawText(&t, C2D_WithColor, x + 5.0f, y + 2.0f, z + 0.02f, 0.28f, 0.28f, rgba(255, 255, 255));
+        }
+        char sBuf[16];
+        std::snprintf(sBuf, sizeof(sBuf), "*%.2f", stars);
+        C2D_Text tS;
+        C2D_TextParse(&tS, textBuf, sBuf);
+        C2D_TextOptimize(&tS);
+        C2D_DrawText(&tS, C2D_WithColor, x + 5.0f, y + 10.5f, z + 0.02f, 0.28f, 0.28f, active ? rgba(46, 213, 115) : rgba(255, 195, 40));
+    }
 }
 
 } // namespace Ui

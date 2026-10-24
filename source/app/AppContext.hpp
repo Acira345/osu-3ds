@@ -117,6 +117,8 @@ struct AppContext {
     float screenFade = 1.0f;
 
     int mainMenuOption = 0;
+    bool mainMenuExpanded = false;
+    float mainMenuExpandAnim = 0.0f;
     int settingsOption = 0;
     int capturingKeyIndex = -1;
     int settingsControlsMode = MODE_STD;
