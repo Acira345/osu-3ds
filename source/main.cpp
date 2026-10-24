@@ -721,9 +721,9 @@ int main(int argc, char* argv[]) {
         std::snprintf(inputBuf, sizeof(inputBuf), "%s", songMgr.searchQuery.c_str());
         swkbdInit(&swkbd, SWKBD_TYPE_NORMAL, 2, 32);
         swkbdSetInitialText(&swkbd, inputBuf);
-        swkbdSetHintText(&swkbd, "Buscar titulo, artista o mapper...");
-        swkbdSetButton(&swkbd, SWKBD_BUTTON_LEFT, "Limpiar", false);
-        swkbdSetButton(&swkbd, SWKBD_BUTTON_RIGHT, "Buscar", true);
+        swkbdSetHintText(&swkbd, LOC(STR_SEARCH_SWKBD_HINT));
+        swkbdSetButton(&swkbd, SWKBD_BUTTON_LEFT, LOC(STR_CLEAR), false);
+        swkbdSetButton(&swkbd, SWKBD_BUTTON_RIGHT, LOC(STR_SEARCH), true);
         SwkbdButton btn = swkbdInputText(&swkbd, inputBuf, sizeof(inputBuf));
         if (btn == SWKBD_BUTTON_RIGHT) {
             songMgr.searchQuery = Beatmap::trim(inputBuf);
@@ -1211,7 +1211,8 @@ int main(int argc, char* argv[]) {
 
             Ui::panel(10.0f, 186.0f, 300.0f, 46.0f, 0.20f, Ui::rgba(20, 18, 34, 240), clr300);
             char summary1[96];
-            std::snprintf(summary1, sizeof(summary1), "Modo: %s  •  Area: %d%%  •  Offset: %+dms",
+            std::snprintf(summary1, sizeof(summary1), "%s: %s  •  Area: %d%%  •  Offset: %+dms",
+                LOC(STR_MODE),
                 settings.getShortInputModeLabel(),
                 static_cast<int>(std::round(settings.tabletScale * 100.0f)),
                 settings.audioOffsetMs);
@@ -1252,7 +1253,7 @@ int main(int argc, char* argv[]) {
 
             if (triggerRescan) {
                 audio.playHitSound(2);
-                wifiServer.statusText = "Actualizando biblioteca...";
+                wifiServer.statusText = LOC(STR_WIFI_UPDATING_LIB);
                 OszExtractor::extractAllPendingOsz("/osu/songs", "/osu/songs");
                 OszExtractor::extractAllPendingOsk("/osu/skins", "/osu/skins");
                 songMgr.initAndScan(&scoreMgr);
@@ -1260,7 +1261,7 @@ int main(int argc, char* argv[]) {
                 selectedSet = 0;
                 selectedDiff = 0;
                 char rescanMsg[96];
-                std::snprintf(rescanMsg, sizeof(rescanMsg), "✓ Biblioteca actualizada: %d canciones", static_cast<int>(songMgr.sets.size()));
+                std::snprintf(rescanMsg, sizeof(rescanMsg), LOC(STR_WIFI_LIB_UPDATED), static_cast<int>(songMgr.sets.size()));
                 wifiServer.statusText = rescanMsg;
                 if (!wifiServer.isRunning()) {
                     wifiServer.restart();
@@ -1344,7 +1345,7 @@ int main(int argc, char* argv[]) {
                     drawCenteredText(textBuf, 83.0f, 105.0f, 0.40f, clrWhite, "Wi-Fi...");
                 } else {
                     drawCenteredText(textBuf, 83.0f, 85.0f, 0.40f, clrCursor, LOC(STR_WIFI_SEARCHING));
-                    drawCenteredText(textBuf, 83.0f, 105.0f, 0.40f, clrWhite, "Red Wi-Fi...");
+                    drawCenteredText(textBuf, 83.0f, 105.0f, 0.40f, clrWhite, LOC(STR_WIFI_NETWORK));
                 }
             }
 
@@ -1842,12 +1843,9 @@ int main(int argc, char* argv[]) {
                     float panH = 178.0f;
                     Ui::panel(panX, panY, panW, panH, 0.14f, Ui::rgba(18, 14, 28, 240), Ui::rgba(65, 52, 95));
 
-                    const char* mTitles[4] = {
-                        "PREVISUALIZACION: osu! (Standard)",
-                        "PREVISUALIZACION: osu!taiko",
-                        "PREVISUALIZACION: osu!catch (Catch the Beat)",
-                        "PREVISUALIZACION: osu!mania (4K)"
-                    };
+                    const char* subNames[4] = { "osu! (Standard)", "osu!taiko", "osu!catch", "osu!mania (4K)" };
+                    char mTitleBuf[64];
+                    std::snprintf(mTitleBuf, sizeof(mTitleBuf), "%s: %s", LOC(STR_PREVIEW), subNames[settingsControlsMode]);
                     u32 mTitleColors[4] = {
                         Ui::rgba(255, 102, 171),
                         Ui::rgba(255, 75, 80),
@@ -1855,12 +1853,12 @@ int main(int argc, char* argv[]) {
                         Ui::rgba(60, 205, 255)
                     };
 
-                    drawTextWithShadow(textBuf, panX + 10.0f, panY + 5.0f, 0.42f, mTitleColors[settingsControlsMode], mTitles[settingsControlsMode], 0.16f);
-                    drawTextWithShadow(textBuf, panX + 10.0f, panY + 19.0f, 0.31f, Ui::rgba(200, 195, 225), "Prueba tus botones en vivo o mira la demostracion", 0.16f);
+                    drawTextWithShadow(textBuf, panX + 10.0f, panY + 5.0f, 0.42f, mTitleColors[settingsControlsMode], mTitleBuf, 0.16f);
+                    drawTextWithShadow(textBuf, panX + 10.0f, panY + 19.0f, 0.31f, Ui::rgba(200, 195, 225), LOC(STR_CTRL_HELP_LIVE), 0.16f);
 
                     if (capturingKeyIndex != -1) {
                         Ui::pill(panX + 180.0f, panY + 4.0f, 186.0f, 20.0f, 0.90f, Ui::rgba(255, 180, 40, 240));
-                        drawCenteredTextWithShadow(textBuf, panX + 273.0f, panY + 14.0f, 0.32f, clrBgDark, "ASIGNANDO: Pulsa un boton", 0.95f);
+                        drawCenteredTextWithShadow(textBuf, panX + 273.0f, panY + 14.0f, 0.32f, clrBgDark, LOC(STR_CTRL_ASSIGNING), 0.95f);
                     }
 
                     if (settingsControlsMode == MODE_STD) {
@@ -1886,10 +1884,10 @@ int main(int argc, char* argv[]) {
                         std::string sSm = truncateString(GameSettings::formatKeyMask(settings.keyOsuSmoke), 14);
                         std::string sRt = truncateString(GameSettings::formatKeyMask(settings.keyQuickRetry), 14);
 
-                        drawKeyBadge(hudX, hudY,        "Tecla 1 (K1)", sK1.c_str(), k1Active, Ui::rgba(180, 70, 240));
-                        drawKeyBadge(hudX, hudY + 33.0f, "Tecla 2 (K2)", sK2.c_str(), k2Active, Ui::rgba(255, 95, 180));
-                        drawKeyBadge(hudX, hudY + 66.0f, "Humo (Smoke)",  sSm.c_str(), smokeActive, Ui::rgba(240, 200, 50));
-                        drawKeyBadge(hudX, hudY + 99.0f, "Reintento",     sRt.c_str(), retryActive, Ui::rgba(255, 75, 75));
+                        drawKeyBadge(hudX, hudY,        LOC(STR_KEY_K1), sK1.c_str(), k1Active, Ui::rgba(180, 70, 240));
+                        drawKeyBadge(hudX, hudY + 33.0f, LOC(STR_KEY_K2), sK2.c_str(), k2Active, Ui::rgba(255, 95, 180));
+                        drawKeyBadge(hudX, hudY + 66.0f, LOC(STR_KEY_SMOKE),  sSm.c_str(), smokeActive, Ui::rgba(240, 200, 50));
+                        drawKeyBadge(hudX, hudY + 99.0f, LOC(STR_KEY_RETRY),     sRt.c_str(), retryActive, Ui::rgba(255, 75, 75));
 
                         float pfX = panX + 128.0f;
                         float pfY = panY + 34.0f;
@@ -1999,10 +1997,10 @@ int main(int argc, char* argv[]) {
                             drawCenteredText(textBuf, cx + cW * 0.5f, rowY + 41.0f, 0.26f, clrWhite, kStr.c_str(), 0.20f);
                         };
 
-                        drawTaikoCard(trkX,               "DON IZQ",   "Centro Rojo", settings.keyTaikoDonLeft,    Ui::rgba(245, 60, 65),  dLeftDown);
-                        drawTaikoCard(trkX + cW + 4.0f,   "DON DER",   "Centro Rojo", settings.keyTaikoDonRight,   Ui::rgba(245, 60, 65),  dRightDown);
-                        drawTaikoCard(trkX + (cW+4.0f)*2, "KATSU IZQ", "Aro Azul",    settings.keyTaikoKatsuLeft,  Ui::rgba(45, 135, 255), kLeftDown);
-                        drawTaikoCard(trkX + (cW+4.0f)*3, "KATSU DER", "Aro Azul",    settings.keyTaikoKatsuRight, Ui::rgba(45, 135, 255), kRightDown);
+                        drawTaikoCard(trkX,               "DON IZQ",   LOC(STR_TAIKO_RED), settings.keyTaikoDonLeft,    Ui::rgba(245, 60, 65),  dLeftDown);
+                        drawTaikoCard(trkX + cW + 4.0f,   "DON DER",   LOC(STR_TAIKO_RED), settings.keyTaikoDonRight,   Ui::rgba(245, 60, 65),  dRightDown);
+                        drawTaikoCard(trkX + (cW+4.0f)*2, "KATSU IZQ", LOC(STR_TAIKO_BLUE), settings.keyTaikoKatsuLeft,  Ui::rgba(45, 135, 255), kLeftDown);
+                        drawTaikoCard(trkX + (cW+4.0f)*3, "KATSU DER", LOC(STR_TAIKO_BLUE), settings.keyTaikoKatsuRight, Ui::rgba(45, 135, 255), kRightDown);
                     }
                     else if (settingsControlsMode == MODE_CATCH) {
                         float hudX = panX + 10.0f;
@@ -2027,10 +2025,10 @@ int main(int argc, char* argv[]) {
                         std::string sD = truncateString(GameSettings::formatKeyMask(settings.keyCatchDash), 13);
                         std::string sRt = truncateString(GameSettings::formatKeyMask(settings.keyQuickRetry), 13);
 
-                        drawCatchBadge(hudX, hudY,        "Mover Izquierda", sL.c_str(), cLeftActive, Ui::rgba(50, 210, 120));
-                        drawCatchBadge(hudX, hudY + 33.0f, "Mover Derecha",   sR.c_str(), cRightActive, Ui::rgba(50, 210, 120));
-                        drawCatchBadge(hudX, hudY + 66.0f, "Acelerar (Dash)", sD.c_str(), cDashActive, Ui::rgba(255, 175, 30));
-                        drawCatchBadge(hudX, hudY + 99.0f, "Reintento",       sRt.c_str(), cRetryActive, Ui::rgba(255, 75, 75));
+                        drawCatchBadge(hudX, hudY,        LOC(STR_KEY_MOVE_L), sL.c_str(), cLeftActive, Ui::rgba(50, 210, 120));
+                        drawCatchBadge(hudX, hudY + 33.0f, LOC(STR_KEY_MOVE_R), sR.c_str(), cRightActive, Ui::rgba(50, 210, 120));
+                        drawCatchBadge(hudX, hudY + 66.0f, LOC(STR_KEY_DASH),   sD.c_str(), cDashActive, Ui::rgba(255, 175, 30));
+                        drawCatchBadge(hudX, hudY + 99.0f, LOC(STR_KEY_RETRY),  sRt.c_str(), cRetryActive, Ui::rgba(255, 75, 75));
 
                         float stX = panX + 128.0f;
                         float stY = panY + 34.0f;
@@ -2091,10 +2089,14 @@ int main(int argc, char* argv[]) {
                         std::string sC3 = truncateString(GameSettings::formatKeyMask(settings.keyManiaCol3), 13);
                         std::string sC4 = truncateString(GameSettings::formatKeyMask(settings.keyManiaCol4), 13);
 
-                        drawManiaBadge(hudX, hudY,        "Columna 1", sC1.c_str(), col1Active, Ui::rgba(50, 160, 255));
-                        drawManiaBadge(hudX, hudY + 33.0f, "Columna 2", sC2.c_str(), col2Active, Ui::rgba(235, 235, 245));
-                        drawManiaBadge(hudX, hudY + 66.0f, "Columna 3", sC3.c_str(), col3Active, Ui::rgba(235, 235, 245));
-                        drawManiaBadge(hudX, hudY + 99.0f, "Columna 4", sC4.c_str(), col4Active, Ui::rgba(50, 160, 255));
+                        char colBuf[4][32];
+                        for (int c = 0; c < 4; ++c) {
+                            std::snprintf(colBuf[c], sizeof(colBuf[c]), LOC(STR_KEY_COL_FMT), c + 1);
+                        }
+                        drawManiaBadge(hudX, hudY,        colBuf[0], sC1.c_str(), col1Active, Ui::rgba(50, 160, 255));
+                        drawManiaBadge(hudX, hudY + 33.0f, colBuf[1], sC2.c_str(), col2Active, Ui::rgba(235, 235, 245));
+                        drawManiaBadge(hudX, hudY + 66.0f, colBuf[2], sC3.c_str(), col3Active, Ui::rgba(235, 235, 245));
+                        drawManiaBadge(hudX, hudY + 99.0f, colBuf[3], sC4.c_str(), col4Active, Ui::rgba(50, 160, 255));
 
                         float mStageX = panX + 158.0f;
                         float mStageY = panY + 34.0f;
@@ -2208,7 +2210,7 @@ int main(int argc, char* argv[]) {
                             Ui::sliderBar(cx + 230.0f, cy + sldYOff, 134.0f, 10.0f, 0.25f, ratio, sel ? clrCursor : clrPrimary, sel);
                         } else if (optIdx == 10) { // Offset de Audio
                             drawText(textBuf, cx + 12.0f, cy + titleYOff, 0.44f, sel ? clrWhite : clrCursor, LOC(STR_SET_OFFSET));
-                            char desc[64]; std::snprintf(desc, sizeof(desc), "%+d ms  (Pulsa X o A para Calibrar)", settings.audioOffsetMs);
+                            char desc[64]; std::snprintf(desc, sizeof(desc), LOC(STR_OFFSET_CALIB_HINT), settings.audioOffsetMs);
                             drawText(textBuf, cx + 12.0f, cy + descYOff, 0.35f, clr100, desc);
                             float ratio = (settings.audioOffsetMs + 150) / 300.0f;
                             Ui::sliderBar(cx + 230.0f, cy + sldYOff, 134.0f, 10.0f, 0.25f, ratio, sel ? clrCursor : clr300, sel);
@@ -2250,7 +2252,7 @@ int main(int argc, char* argv[]) {
                             Ui::toggleSwitch(cx + 312.0f, cy + swYOff, 48.0f, 18.0f, 0.25f, settings.showHit300, clr100);
                         } else if (optIdx == 16) { // Fondo Taiko
                             drawText(textBuf, cx + 12.0f, cy + titleYOff, 0.44f, sel ? clrWhite : clrCursor, LOC(STR_SET_TAIKO_BG));
-                            drawText(textBuf, cx + 12.0f, cy + descYOff, 0.35f, clrMuted, "Festivo / Imagen / Video");
+                            drawText(textBuf, cx + 12.0f, cy + descYOff, 0.35f, clrMuted, LOC(STR_SET_TAIKO_BG_DESC));
                             u32 bClr = (settings.taikoBgMode == 0) ? Ui::rgba(225, 145, 25) : ((settings.taikoBgMode == 1) ? Ui::rgba(45, 130, 215) : Ui::rgba(165, 55, 185));
                             Ui::pill(cx + 205.0f, cy + ctrlYOff, 160.0f, 22.0f, 0.25f, bClr);
                             drawCenteredText(textBuf, cx + 285.0f, cy + ctrlYOff + 11.0f, 0.34f, clrWhite, settings.getTaikoBgModeName(), 0.85f);
@@ -2287,33 +2289,36 @@ int main(int argc, char* argv[]) {
                     int cIdx = std::max(0, std::min(3, capturingKeyIndex - 4));
                     const char* capModeName = (settingsControlsMode == MODE_TAIKO) ? "TAIKO" : ((settingsControlsMode == MODE_CATCH) ? "CATCH" : ((settingsControlsMode == MODE_MANIA) ? "MANIA" : "STANDARD"));
                     const char* capRowName = "CONTROL";
+                    char maniaCap[4][32];
                     if (settingsControlsMode == MODE_STD) {
-                        const char* n[4] = { "TECLA 1 (K1)", "TECLA 2 (K2)", "HUMO (SMOKE)", "REINICIO RAPIDO" };
+                        const char* n[4] = { LOC(STR_KEY_K1), LOC(STR_KEY_K2), LOC(STR_KEY_SMOKE), LOC(STR_KEY_RETRY) };
                         capRowName = n[cIdx];
                     } else if (settingsControlsMode == MODE_TAIKO) {
-                        const char* n[4] = { "DON IZQUIERDO (ROJO)", "DON DERECHO (ROJO)", "KATSU IZQUIERDO (AZUL)", "KATSU DERECHO (AZUL)" };
+                        const char* n[4] = { LOC(STR_KEY_DON_L), LOC(STR_KEY_DON_R), LOC(STR_KEY_KAT_L), LOC(STR_KEY_KAT_R) };
                         capRowName = n[cIdx];
                     } else if (settingsControlsMode == MODE_CATCH) {
-                        const char* n[4] = { "MOVER IZQUIERDA", "MOVER DERECHA", "ACELERAR (DASH)", "REINICIO RAPIDO" };
+                        const char* n[4] = { LOC(STR_KEY_MOVE_L), LOC(STR_KEY_MOVE_R), LOC(STR_KEY_DASH), LOC(STR_KEY_RETRY) };
                         capRowName = n[cIdx];
                     } else if (settingsControlsMode == MODE_MANIA) {
-                        const char* n[4] = { "COLUMNA 1 (IZQ)", "COLUMNA 2 (C-IZQ)", "COLUMNA 3 (C-DER)", "COLUMNA 4 (DER)" };
-                        capRowName = n[cIdx];
+                        for (int c = 0; c < 4; ++c) {
+                            std::snprintf(maniaCap[c], sizeof(maniaCap[c]), LOC(STR_KEY_COL_FMT), c + 1);
+                        }
+                        capRowName = maniaCap[cIdx];
                     }
                     char capHead[64];
-                    std::snprintf(capHead, sizeof(capHead), "ASIGNANDO [%s]", capModeName);
+                    std::snprintf(capHead, sizeof(capHead), "%s [%s]", LOC(STR_CTRL_ASSIGNING), capModeName);
                     drawCenteredText(textBuf, 200.0f + dCap, 72.0f, 0.48f, clrCursor, capHead, 0.99f);
                     drawCenteredText(textBuf, 200.0f + dCap, 96.0f, 0.44f, clrWhite, capRowName, 0.99f);
-                    drawCenteredText(textBuf, 200.0f + dCap, 126.0f, 0.38f, clr100, "Pulsa cualquier boton de la 3DS...", 0.99f);
-                    drawCenteredText(textBuf, 200.0f + dCap, 152.0f, 0.32f, clrMuted, "B o Tocar pantalla: Cancelar", 0.99f);
+                    drawCenteredText(textBuf, 200.0f + dCap, 126.0f, 0.38f, clr100, LOC(STR_CTRL_PRESS_ANY), 0.99f);
+                    drawCenteredText(textBuf, 200.0f + dCap, 152.0f, 0.32f, clrMuted, LOC(STR_CTRL_CANCEL_HINT), 0.99f);
                 }
 
                 if (calibrationMode) {
                     float dCal = eyeSign * slider3D * 4.5f;
                     C2D_DrawRectSolid(0.0f, 0.0f, 0.88f, 400.0f, 240.0f, Ui::rgba(8, 6, 16, 185));
                     Ui::panel(30.0f + dCal, 52.0f, 340.0f, 128.0f, 0.90f, Ui::rgba(22, 18, 38, 250), clr300);
-                    drawCenteredText(textBuf, 200.0f + dCal, 70.0f, 0.50f, clrCursor, "ASISTENTE DE CALIBRACION (120 BPM)", 0.98f);
-                    drawCenteredText(textBuf, 200.0f + dCal, 94.0f, 0.40f, clrWhite, "Pulsa A o L al ritmo del sonido de metronomo", 0.98f);
+                    drawCenteredText(textBuf, 200.0f + dCal, 70.0f, 0.50f, clrCursor, LOC(STR_CALIB_TITLE), 0.98f);
+                    drawCenteredText(textBuf, 200.0f + dCal, 94.0f, 0.40f, clrWhite, LOC(STR_CALIB_DESC), 0.98f);
 
                     u64 elapsed = osGetTime() - calibStartTick;
                     float beatPhase = (elapsed % 500) / 500.0f;
@@ -2321,10 +2326,10 @@ int main(int argc, char* argv[]) {
                     Ui::ring(200.0f + dCal, 122.0f, 0.96f, pulseR, 2.0f, clr300, 20);
 
                     char calStr[96];
-                    std::snprintf(calStr, sizeof(calStr), "Muestras: %d/12 | Offset Calculado: %+d ms",
+                    std::snprintf(calStr, sizeof(calStr), LOC(STR_CALIB_STATUS_FMT),
                         static_cast<int>(calibSamples.size()), settings.audioOffsetMs);
                     drawCenteredText(textBuf, 200.0f + dCal, 146.0f, 0.44f, clr100, calStr, 0.98f);
-                    drawCenteredText(textBuf, 200.0f + dCal, 166.0f, 0.38f, clr300, "Pulsa X para terminar y aplicar", 0.98f);
+                    drawCenteredText(textBuf, 200.0f + dCal, 166.0f, 0.38f, clr300, LOC(STR_CALIB_APPLY_HINT), 0.98f);
                 }
 
                 Ui::gradV(0.0f, 212.0f, 400.0f, 28.0f, 0.3f, Ui::rgba(18, 15, 32, 170), Ui::rgba(18, 15, 32, 250));
@@ -2375,8 +2380,8 @@ int main(int argc, char* argv[]) {
             if (activeTab == 0) { // Controles / Tablet
                 if (settings.playOnBottomScreen) {
                     Ui::panel(10.0f, 36.0f, 300.0f, 162.0f, 0.15f, Ui::rgba(28, 22, 48, 225), clr100);
-                    drawCenteredText(textBuf, 160.0f, 52.0f, 0.44f, clr100, "MODO TACTIL DIRECTO 1:1");
-                    drawCenteredText(textBuf, 160.0f, 72.0f, 0.36f, clrWhite, "Los circulos aparecen aqui para tocarlos directamente!");
+                    drawCenteredText(textBuf, 160.0f, 52.0f, 0.44f, clr100, LOC(STR_CTRL_TOUCH_1TO1));
+                    drawCenteredText(textBuf, 160.0f, 72.0f, 0.36f, clrWhite, LOC(STR_CTRL_TOUCH_1TO1_DESC));
                     drawRing(160.0f, 122.0f, 22.0f, 2.5f, clrPrimary, 24, 0.3f);
                     C2D_DrawCircleSolid(160.0f, 122.0f, 0.25f, 22.0f, Ui::withAlpha(clrPrimary, 140));
                     drawCenteredText(textBuf, 160.0f, 122.0f, 0.55f, clrWhite, "1", 0.35f);
@@ -2389,7 +2394,7 @@ int main(int argc, char* argv[]) {
                     drawRing(settings.tabletCenterX, settings.tabletCenterY, 7.0f, 1.5f, clrCursor, 18, 0.3f);
 
                     char areaCaption[64];
-                    std::snprintf(areaCaption, sizeof(areaCaption), "AREA ACTIVA %d%% (%dx%d)",
+                    std::snprintf(areaCaption, sizeof(areaCaption), LOC(STR_TABLET_AREA_FMT),
                         static_cast<int>(std::round(settings.tabletScale * 100.0f)), (int)rw, (int)rh);
                     drawCenteredText(textBuf, settings.tabletCenterX, std::max(40.0f, ry + 14.0f), 0.38f, clrWhite, areaCaption);
                 }
@@ -2418,20 +2423,20 @@ int main(int argc, char* argv[]) {
                 u32 actColors[4];
 
                 if (settingsControlsMode == MODE_STD) {
-                    kShortNames[0] = "K1 Golpe";   kMasks[0] = settings.keyOsuK1;      actColors[0] = Ui::rgba(180, 70, 240);
-                    kShortNames[1] = "K2 Golpe";   kMasks[1] = settings.keyOsuK2;      actColors[1] = Ui::rgba(255, 95, 180);
-                    kShortNames[2] = "Humo";       kMasks[2] = settings.keyOsuSmoke;   actColors[2] = Ui::rgba(240, 200, 50);
-                    kShortNames[3] = "Retry";      kMasks[3] = settings.keyQuickRetry; actColors[3] = Ui::rgba(255, 75, 75);
+                    kShortNames[0] = "K1";         kMasks[0] = settings.keyOsuK1;      actColors[0] = Ui::rgba(180, 70, 240);
+                    kShortNames[1] = "K2";         kMasks[1] = settings.keyOsuK2;      actColors[1] = Ui::rgba(255, 95, 180);
+                    kShortNames[2] = LOC(STR_KEY_SMOKE); kMasks[2] = settings.keyOsuSmoke;   actColors[2] = Ui::rgba(240, 200, 50);
+                    kShortNames[3] = LOC(STR_KEY_RETRY); kMasks[3] = settings.keyQuickRetry; actColors[3] = Ui::rgba(255, 75, 75);
                 } else if (settingsControlsMode == MODE_TAIKO) {
-                    kShortNames[0] = "Don Izq";    kMasks[0] = settings.keyTaikoDonLeft;    actColors[0] = Ui::rgba(245, 60, 65);
-                    kShortNames[1] = "Don Der";    kMasks[1] = settings.keyTaikoDonRight;   actColors[1] = Ui::rgba(245, 60, 65);
-                    kShortNames[2] = "Katsu Izq";  kMasks[2] = settings.keyTaikoKatsuLeft;  actColors[2] = Ui::rgba(45, 135, 255);
-                    kShortNames[3] = "Katsu Der";  kMasks[3] = settings.keyTaikoKatsuRight; actColors[3] = Ui::rgba(45, 135, 255);
+                    kShortNames[0] = LOC(STR_KEY_DON_L);    kMasks[0] = settings.keyTaikoDonLeft;    actColors[0] = Ui::rgba(245, 60, 65);
+                    kShortNames[1] = LOC(STR_KEY_DON_R);    kMasks[1] = settings.keyTaikoDonRight;   actColors[1] = Ui::rgba(245, 60, 65);
+                    kShortNames[2] = LOC(STR_KEY_KAT_L);  kMasks[2] = settings.keyTaikoKatsuLeft;  actColors[2] = Ui::rgba(45, 135, 255);
+                    kShortNames[3] = LOC(STR_KEY_KAT_R);  kMasks[3] = settings.keyTaikoKatsuRight; actColors[3] = Ui::rgba(45, 135, 255);
                 } else if (settingsControlsMode == MODE_CATCH) {
-                    kShortNames[0] = "Mover Izq";  kMasks[0] = settings.keyCatchLeft;  actColors[0] = Ui::rgba(50, 210, 120);
-                    kShortNames[1] = "Mover Der";  kMasks[1] = settings.keyCatchRight; actColors[1] = Ui::rgba(50, 210, 120);
-                    kShortNames[2] = "Dash";       kMasks[2] = settings.keyCatchDash;  actColors[2] = Ui::rgba(255, 175, 30);
-                    kShortNames[3] = "Retry";      kMasks[3] = settings.keyQuickRetry; actColors[3] = Ui::rgba(255, 75, 75);
+                    kShortNames[0] = LOC(STR_KEY_MOVE_L);  kMasks[0] = settings.keyCatchLeft;  actColors[0] = Ui::rgba(50, 210, 120);
+                    kShortNames[1] = LOC(STR_KEY_MOVE_R);  kMasks[1] = settings.keyCatchRight; actColors[1] = Ui::rgba(50, 210, 120);
+                    kShortNames[2] = LOC(STR_KEY_DASH);    kMasks[2] = settings.keyCatchDash;   actColors[2] = Ui::rgba(255, 175, 30);
+                    kShortNames[3] = LOC(STR_KEY_RETRY);   kMasks[3] = settings.keyQuickRetry;  actColors[3] = Ui::rgba(255, 75, 75);
                 } else {
                     kShortNames[0] = "Col 1";      kMasks[0] = settings.keyManiaCol1;  actColors[0] = Ui::rgba(50, 160, 255);
                     kShortNames[1] = "Col 2";      kMasks[1] = settings.keyManiaCol2;  actColors[1] = Ui::rgba(235, 235, 245);
@@ -2451,7 +2456,7 @@ int main(int argc, char* argv[]) {
                     u32 pillBg = cap ? Ui::rgba(255, 180, 40) : (sel ? Ui::rgba(52, 40, 85, 250) : Ui::rgba(24, 20, 38, 230));
                     Ui::panel(bx, by, bw, bh, 0.15f, pillBg, cap ? clrWhite : (sel ? clrCursor : actColors[i]));
                     drawCenteredTextWithShadow(textBuf, bx + bw * 0.5f, by + 4.5f, 0.31f, cap ? clrBgDark : (sel ? clrWhite : actColors[i]), kShortNames[i], 0.85f);
-                    std::string mStr = cap ? "PULSA..." : truncateString(GameSettings::formatKeyMask(kMasks[i]), 11);
+                    std::string mStr = cap ? LOC(STR_PRESS_SHORT) : truncateString(GameSettings::formatKeyMask(kMasks[i]), 11);
                     drawCenteredTextWithShadow(textBuf, bx + bw * 0.5f, by + 14.5f, 0.28f, cap ? clrBgDark : (sel ? clrCursor : Ui::rgba(235, 230, 255)), mStr.c_str(), 0.85f);
 
                     if (touchJustDown && touch.px >= bx && touch.px <= bx + bw && touch.py >= by && touch.py <= by + bh) {
@@ -2473,18 +2478,18 @@ int main(int argc, char* argv[]) {
                 if (capturingKeyIndex != -1) {
                     int cIdx = std::max(0, std::min(3, capturingKeyIndex - 4));
                     Ui::glow(scX + scW * 0.5f, scY + scH * 0.5f, 0.15f, 32.0f, Ui::rgba(255, 180, 40, 60), 2);
-                    drawCenteredTextWithShadow(textBuf, scX + scW * 0.5f, scY + 14.0f, 0.35f, clrCursor, "ASIGNANDO BOTON", 0.90f);
+                    drawCenteredTextWithShadow(textBuf, scX + scW * 0.5f, scY + 14.0f, 0.35f, clrCursor, LOC(STR_CTRL_REASSIGN_TITLE), 0.90f);
                     drawCenteredTextWithShadow(textBuf, scX + scW * 0.5f, scY + 32.0f, 0.40f, clrWhite, kShortNames[cIdx], 0.90f);
-                    drawCenteredTextWithShadow(textBuf, scX + scW * 0.5f, scY + 50.0f, 0.33f, clr100, "Pulsa un boton", 0.90f);
-                    drawCenteredTextWithShadow(textBuf, scX + scW * 0.5f, scY + 68.0f, 0.30f, clrWhite, "B: Cancelar", 0.90f);
+                    drawCenteredTextWithShadow(textBuf, scX + scW * 0.5f, scY + 50.0f, 0.33f, clr100, LOC(STR_CTRL_PRESS_ANY), 0.90f);
+                    drawCenteredTextWithShadow(textBuf, scX + scW * 0.5f, scY + 68.0f, 0.30f, clrWhite, LOC(STR_CTRL_CANCEL_HINT), 0.90f);
                 } else {
                     int selIdx = std::max(0, std::min(3, settingsOption - 4));
                     drawCenteredTextWithShadow(textBuf, scX + scW * 0.5f, scY + 12.0f, 0.35f, subModeColors[settingsControlsMode], subModeNames[settingsControlsMode], 0.90f);
                     drawCenteredTextWithShadow(textBuf, scX + scW * 0.5f, scY + 28.0f, 0.36f, clrWhite, kShortNames[selIdx], 0.90f);
                     std::string curKeyFmt = GameSettings::formatKeyMask(kMasks[selIdx]);
                     drawCenteredTextWithShadow(textBuf, scX + scW * 0.5f, scY + 44.0f, 0.33f, clrCursor, curKeyFmt.c_str(), 0.90f);
-                    drawCenteredTextWithShadow(textBuf, scX + scW * 0.5f, scY + 62.0f, 0.32f, Ui::rgba(140, 240, 255), "PULSA [A] O TOCA", 0.90f);
-                    drawCenteredTextWithShadow(textBuf, scX + scW * 0.5f, scY + 74.0f, 0.30f, clrWhite, "PARA REASIGNAR", 0.90f);
+                    drawCenteredTextWithShadow(textBuf, scX + scW * 0.5f, scY + 62.0f, 0.32f, Ui::rgba(140, 240, 255), LOC(STR_CTRL_REASSIGN_HINT), 0.90f);
+                    drawCenteredTextWithShadow(textBuf, scX + scW * 0.5f, scY + 74.0f, 0.30f, clrWhite, LOC(STR_CTRL_REASSIGN_SUB), 0.90f);
                 }
 
                 auto getBtnClr = [&](uint32_t mask, u32 defClr) -> u32 {
@@ -2722,7 +2727,7 @@ int main(int argc, char* argv[]) {
             if (capturingKeyIndex != -1 && activeTab != 1) {
                 C2D_DrawRectSolid(0.0f, 0.0f, 0.88f, 320.0f, 240.0f, Ui::rgba(8, 6, 16, 215));
                 Ui::panel(20.0f, 50.0f, 280.0f, 140.0f, 0.90f, Ui::rgba(26, 20, 44, 250), clrCursor);
-                const char* capNames[4] = { "TECLA 1 (K1)", "TECLA 2 (K2)", "HUMO (SMOKE)", "REINICIO RAPIDO" };
+                const char* capNames[4] = { LOC(STR_KEY_K1), LOC(STR_KEY_K2), LOC(STR_KEY_SMOKE), LOC(STR_KEY_RETRY) };
                 int cIdx = std::max(0, std::min(3, capturingKeyIndex - 4));
                 drawCenteredText(textBuf, 160.0f, 72.0f, 0.48f, clrCursor, LOC(STR_CTRL_ASSIGN_KEY_TITLE), 0.95f);
                 drawCenteredText(textBuf, 160.0f, 96.0f, 0.42f, clrWhite, capNames[cIdx], 0.95f);
@@ -3478,15 +3483,15 @@ int main(int argc, char* argv[]) {
                 drawCenteredText(textBuf, 31.0f, 15.0f, 0.37f, clrWhite, "osu!", 0.9f);
                 if (multiMgr.inMultiplayer) {
                     const char* sTitle = (multiPickerAction == PICKER_ACTION_QUEUE)
-                        ? "SALA MULTI: ENCOLAR CANCION"
-                        : "SALA MULTI: ELEGIR MAPA ACTIVO";
+                        ? LOC(STR_SONG_MULTI_QUEUE)
+                        : LOC(STR_SONG_MULTI_PICK);
                     drawText(textBuf, 58.0f, 7.5f, 0.44f, clrCursor, sTitle, 0.9f);
                 } else {
                     drawText(textBuf, 58.0f, 7.5f, 0.44f, clrWhite, LOC(STR_SONG_SELECT_TITLE), 0.9f);
                 }
 
                 if (searchKeyboardOpen) {
-                    std::string fBadge = songMgr.searchQuery.empty() ? "Buscador..." : truncateString(songMgr.searchQuery, 12);
+                    std::string fBadge = songMgr.searchQuery.empty() ? std::string(LOC(STR_SEARCH)) + "..." : truncateString(songMgr.searchQuery, 12);
                     Ui::pill(210.0f, 6.0f, 130.0f, 18.0f, 0.32f, Ui::rgba(255, 102, 171, 230));
                     drawCenteredTextWithShadow(textBuf, 275.0f, 15.0f, 0.34f, clrWhite, fBadge.c_str(), 0.9f);
                 } else if (!songMgr.searchQuery.empty()) {
@@ -3515,8 +3520,8 @@ int main(int argc, char* argv[]) {
                         drawText(textBuf, 56.0f + dEmpty, 108.0f, 0.46f, clrWhite, truncateString("\"" + songMgr.searchQuery + "\"", 34).c_str());
                         drawText(textBuf, 56.0f + dEmpty, 134.0f, 0.40f, clr300, LOC(STR_SONG_TAP_SEARCH_CLEAR));
                     } else {
-                        drawText(textBuf, 56.0f + dEmpty, 82.0f, 0.5f, clrMiss, "No se encontraron beatmaps (.osu / .osz)");
-                        drawText(textBuf, 56.0f + dEmpty, 110.0f, 0.43f, clrWhite, "Coloca carpetas o archivos .osz en:");
+                        drawText(textBuf, 56.0f + dEmpty, 82.0f, 0.5f, clrMiss, LOC(STR_SONG_NO_BEATMAPS));
+                        drawText(textBuf, 56.0f + dEmpty, 110.0f, 0.43f, clrWhite, LOC(STR_SONG_PUT_FILES));
                         drawText(textBuf, 56.0f + dEmpty, 130.0f, 0.45f, clr300, "sdmc:/3ds/osu-3ds/songs/");
                     }
                 } else {
@@ -3573,7 +3578,7 @@ int main(int argc, char* argv[]) {
                             std::string diffName = cs.difficulties[dIdx].version;
                             std::string creatorName = cs.difficulties[dIdx].creator;
                             drawText(textBuf, cx + 14.0f, cardY + 33.0f, 0.28f, Ui::rgba(255, 224, 120, 255),
-                                     truncateString("[" + diffName + "] por " + creatorName, 28).c_str(), 0.15f);
+                                     truncateString("[" + diffName + "] " + std::string(LOC(STR_BY)) + " " + creatorName, 28).c_str(), 0.15f);
                         }
 
                         // Pastilla de estrellas a la derecha estilo tarjeta de sala multijugador
@@ -3595,7 +3600,7 @@ int main(int argc, char* argv[]) {
                     drawText(textBuf, 16.0f + dInfo, 58.0f, 0.40f, clrCursor, truncateString(curSet.artist, 26).c_str(), 0.6f);
                     if (totalDiffs > 0) {
                         const auto& dd = curSet.difficulties[dIdx];
-                        drawText(textBuf, 16.0f + dInfo, 73.0f, 0.34f, clrMuted, truncateString("Mapa por " + dd.creator, 28).c_str(), 0.6f);
+                        drawText(textBuf, 16.0f + dInfo, 73.0f, 0.34f, clrMuted, truncateString(std::string(LOC(STR_SONG_MAP_BY)) + " " + dd.creator, 28).c_str(), 0.6f);
                         char cnt[64];
                         float liveBpm = dd.getBPM(getModsSpeedMultiplier(settings.activeMods));
                         std::snprintf(cnt, sizeof(cnt), "%.0f BPM | %dc %ds%s",
@@ -3701,7 +3706,7 @@ int main(int argc, char* argv[]) {
                 } else {
                     bool showCursor = (animTick / 20) % 2 == 0;
                     drawTextWithShadow(textBuf, 27.0f, 7.0f, 0.35f, Ui::rgba(160, 150, 185),
-                        showCursor ? "Escribe o toca un filtro...|" : "Escribe o toca un filtro...", 0.62f);
+                        showCursor ? (std::string(LOC(STR_SEARCH_PLACEHOLDER)) + "|").c_str() : LOC(STR_SEARCH_PLACEHOLDER), 0.62f);
                 }
 
                 // Botón Limpiar [X]
@@ -3727,7 +3732,7 @@ int main(int argc, char* argv[]) {
                 Ui::panel(4.0f, 34.0f, 40.0f, 17.0f, 0.55f,
                     noFilter ? Ui::rgba(75, 45, 110, 240) : Ui::rgba(24, 20, 38, 230),
                     noFilter ? clrCursor : Ui::rgba(60, 52, 80));
-                drawCenteredTextWithShadow(textBuf, 24.0f, 42.5f, 0.28f, noFilter ? clrWhite : Ui::rgba(195, 185, 220), "TODOS", 0.62f);
+                drawCenteredTextWithShadow(textBuf, 24.0f, 42.5f, 0.28f, noFilter ? clrWhite : Ui::rgba(195, 185, 220), LOC(STR_SONG_ALL), 0.62f);
 
                 // Chip STD
                 Ui::panel(47.0f, 34.0f, 32.0f, 17.0f, 0.55f,
@@ -3818,7 +3823,7 @@ int main(int argc, char* argv[]) {
 
                 // Fila 4: Acciones inferiores (y: 194..236)
                 drawSearchKey(40, 4.0f, 194.0f, 56.0f, 42.0f, LOC(STR_CLEAR), 0.30f, Ui::rgba(52, 22, 38, 255), Ui::rgba(255, 90, 110));
-                drawSearchKey(41, 63.0f, 194.0f, 142.0f, 42.0f, "ESPACIO", 0.35f, Ui::rgba(36, 30, 56, 255), Ui::rgba(90, 80, 125));
+                drawSearchKey(41, 63.0f, 194.0f, 142.0f, 42.0f, LOC(STR_SPACE), 0.35f, Ui::rgba(36, 30, 56, 255), Ui::rgba(90, 80, 125));
                 drawSearchKey(42, 208.0f, 194.0f, 52.0f, 42.0f, LOC(STR_DELETE), 0.30f, Ui::rgba(56, 24, 42, 255), Ui::rgba(255, 120, 140));
                 drawSearchKey(43, 263.0f, 194.0f, 53.0f, 42.0f, "OK", 0.36f, Ui::rgba(22, 68, 42, 255), clr100);
             } else if (modMenuOpen) {
@@ -3841,7 +3846,7 @@ int main(int argc, char* argv[]) {
                 Ui::pill(222.0f, 9.0f, 88.0f, 16.0f, 0.14f, Ui::rgba(30, 24, 48, 220));
                 drawCenteredText(textBuf, 266.0f, 17.0f, 0.34f, multClr, multStr, 0.16f);
 
-                drawText(textBuf, 12.0f, 28.0f, 0.28f, clrMuted, "A/Touch: Alternar | Y: Limpiar | B: Cerrar", 0.16f);
+                drawText(textBuf, 12.0f, 28.0f, 0.28f, clrMuted, LOC(STR_MODS_CONTROLS_HINT), 0.16f);
 
                 // Cuadrícula 5x3 de los 15 Modificadores
                 for (int m = 0; m < 15; ++m) {
@@ -3866,7 +3871,7 @@ int main(int argc, char* argv[]) {
                     }
                     drawRectOutline(mx, my, 56.0f, 39.0f, cursorOn ? 1.8f : 1.0f, cursorOn ? clrCursor : (active ? mClr : Ui::rgba(55, 48, 80)), 0.24f);
                     drawCenteredText(textBuf, mx + 28.0f, my + 13.0f, 0.48f, isDisallowedInMulti ? clrMiss : (active ? clrWhite : Ui::brighten(mClr, 1.25f)), modTable[m].code, 0.25f);
-                    drawCenteredText(textBuf, mx + 28.0f, my + 28.0f, 0.29f, isDisallowedInMulti ? clrMiss : (active ? clrWhite : clrMuted), isDisallowedInMulti ? "NO DISP" : modTable[m].shortName, 0.25f);
+                    drawCenteredText(textBuf, mx + 28.0f, my + 28.0f, 0.29f, isDisallowedInMulti ? clrMiss : (active ? clrWhite : clrMuted), isDisallowedInMulti ? LOC(STR_NOT_AVAIL) : Localization::getIndexed(Localization::STR_MOD_NAME_0, m), 0.25f);
                 }
 
                 // Panel inferior con descripción enriquecida del mod seleccionado
@@ -3885,10 +3890,10 @@ int main(int argc, char* argv[]) {
                 // Insignia de estado ACTIVO / INACTIVO
                 bool isSelDisallowed = multiMgr.inMultiplayer && (curDef.bit == MOD_AUTO || curDef.bit == MOD_RX || curDef.bit == MOD_AP);
                 Ui::pill(242.0f, 179.0f, 62.0f, 14.0f, 0.24f, isSelDisallowed ? Ui::rgba(60, 20, 25, 235) : (curActive ? Ui::rgba(25, 75, 45, 235) : Ui::rgba(35, 30, 50, 235)));
-                drawCenteredText(textBuf, 273.0f, 186.0f, 0.29f, isSelDisallowed ? clrMiss : (curActive ? clr100 : clrMuted), isSelDisallowed ? "NO DISP" : (curActive ? "ACTIVO" : "INACTIVO"), 0.26f);
+                drawCenteredText(textBuf, 273.0f, 186.0f, 0.29f, isSelDisallowed ? clrMiss : (curActive ? clr100 : clrMuted), isSelDisallowed ? LOC(STR_NOT_AVAIL) : (curActive ? LOC(STR_ON) : LOC(STR_OFF)), 0.26f);
 
                 // Texto descriptivo del efecto del mod
-                drawText(textBuf, 14.0f, 196.0f, 0.33f, Ui::rgba(220, 215, 240), curDef.desc, 0.26f);
+                drawText(textBuf, 14.0f, 196.0f, 0.33f, Ui::rgba(220, 215, 240), Localization::getIndexed(Localization::STR_MOD_DESC_0, selM), 0.26f);
                 if (isSelDisallowed) {
                     drawText(textBuf, 14.0f, 213.0f, 0.28f, clrMiss, LOC(STR_MODS_NOT_ONLINE), 0.26f);
                 } else {
@@ -3988,7 +3993,7 @@ int main(int argc, char* argv[]) {
                         drawCenteredTextWithShadow(textBuf, 280.0f, 62.5f, 0.28f, clrWhite, rankingExpanded ? LOC(STR_COLLAPSE) : LOC(STR_EXPAND));
                     } else {
                         Ui::pill(248.0f, 56.0f, 64.0f, 15.0f, 0.22f, Ui::rgba(45, 32, 60, 220));
-                        drawCenteredTextWithShadow(textBuf, 280.0f, 62.5f, 0.28f, Ui::rgba(255, 175, 215), "Ver Top >");
+                        drawCenteredTextWithShadow(textBuf, 280.0f, 62.5f, 0.28f, Ui::rgba(255, 175, 215), LOC(STR_SONG_VIEW_TOP));
                     }
 
                     if (songSelectTab == 0) {
@@ -4000,7 +4005,7 @@ int main(int argc, char* argv[]) {
 
                         // Chip "MEJOR RECORD"
                         Ui::pill(14.0f, 77.0f, 68.0f, 12.0f, 0.25f, Ui::rgba(75, 32, 95, 235));
-                        drawCenteredTextWithShadow(textBuf, 48.0f, 83.0f, 0.28f, Ui::rgba(255, 140, 205), "MEJOR RECORD");
+                        drawCenteredTextWithShadow(textBuf, 48.0f, 83.0f, 0.28f, Ui::rgba(255, 140, 205), LOC(STR_SONG_BEST_RECORD));
 
                         if (rec) {
                             // Puntuación numérica con formato
@@ -4032,7 +4037,7 @@ int main(int argc, char* argv[]) {
                         } else {
                             drawCenteredTextWithShadow(textBuf, 160.0f, 85.0f, 0.38f, clrWhite, LOC(STR_SONG_NO_RECORDS_YET));
                             char ssMaxStr[64];
-                            std::snprintf(ssMaxStr, sizeof(ssMaxStr), "Max SS: %.0f pp  •  %d Objetos  •  ¡Juegala ahora!", maxSSPP, d.totalObjects());
+                            std::snprintf(ssMaxStr, sizeof(ssMaxStr), "Max SS: %.0f pp  •  %d %s  •  %s", maxSSPP, d.totalObjects(), LOC(STR_OBJECTS), LOC(STR_SONG_PLAY_NOW));
                             drawCenteredTextWithShadow(textBuf, 160.0f, 99.0f, 0.30f, Ui::rgba(255, 225, 95), ssMaxStr);
                         }
 
@@ -4183,8 +4188,8 @@ int main(int argc, char* argv[]) {
                     }
                 } else {
                     Ui::panel(8.0f, 6.0f, 304.0f, 136.0f, 0.15f, Ui::rgba(20, 16, 32, 245), Ui::rgba(50, 42, 75));
-                    drawCenteredText(textBuf, 160.0f, 55.0f, 0.44f, clrCursor, "No hay canciones con este filtro");
-                    drawCenteredText(textBuf, 160.0f, 80.0f, 0.36f, clrWhite, "Toca BUSCAR abajo para limpiar");
+                    drawCenteredText(textBuf, 160.0f, 55.0f, 0.44f, clrCursor, LOC(STR_SONG_NO_FILTER_MATCH));
+                    drawCenteredText(textBuf, 160.0f, 80.0f, 0.36f, clrWhite, LOC(STR_SONG_TAP_SEARCH_CLEAR));
                 }
 
                 // =========================================================================
@@ -4214,27 +4219,27 @@ int main(int argc, char* argv[]) {
                         if (multiMgr.inMultiplayer) {
                             accentClr = clrCursor;
                             bgBase    = Ui::rgba(22, 45, 65, 245);
-                            cardTitle = "SALA";
-                            std::snprintf(cardSub, sizeof(cardSub), "%s", multiMgr.isHost() ? "Host" : "Invitado");
+                            cardTitle = LOC(STR_CARD_ROOM);
+                            std::snprintf(cardSub, sizeof(cardSub), "%s", multiMgr.isHost() ? LOC(STR_CARD_HOST) : LOC(STR_CARD_GUEST));
                             subClr = clrCursor;
                         } else {
                             bool bTactil = settings.playOnBottomScreen;
                             accentClr = bTactil ? clr100 : clrPrimary;
                             bgBase    = bTactil ? Ui::rgba(24, 52, 40, 245) : Ui::rgba(36, 26, 64, 245);
-                            cardTitle = bTactil ? "TACTIL" : "TABLET";
-                            std::snprintf(cardSub, sizeof(cardSub), "%s", bTactil ? "Abajo" : "Arriba");
+                            cardTitle = bTactil ? LOC(STR_CARD_TOUCH) : LOC(STR_CARD_TABLET);
+                            std::snprintf(cardSub, sizeof(cardSub), "%s", bTactil ? LOC(STR_CARD_DOWN) : LOC(STR_CARD_UP));
                             subClr = bTactil ? Ui::rgba(140, 245, 140) : Ui::rgba(195, 175, 255);
                         }
                     } else if (k == 1) { // BUSCAR
                         bool hasFilter = !songMgr.searchQuery.empty();
                         accentClr = hasFilter ? clrCursor : Ui::rgba(0, 216, 240);
                         bgBase    = hasFilter ? Ui::rgba(22, 45, 65, 245) : Ui::rgba(18, 26, 42, 245);
-                        cardTitle = "BUSCAR";
+                        cardTitle = LOC(STR_SEARCH);
                         if (hasFilter) {
                             std::snprintf(cardSub, sizeof(cardSub), "%s", truncateString(songMgr.searchQuery, 7).c_str());
                             subClr = clrCursor;
                         } else {
-                            std::snprintf(cardSub, sizeof(cardSub), "Filtro");
+                            std::snprintf(cardSub, sizeof(cardSub), "%s", LOC(STR_CARD_FILTER));
                             subClr = clrMuted;
                         }
                     } else if (k == 2) { // MODS
@@ -4253,11 +4258,11 @@ int main(int argc, char* argv[]) {
                     } else if (k == 3) { // ORDEN
                         accentClr = Ui::rgba(165, 120, 255);
                         bgBase    = Ui::rgba(26, 22, 46, 245);
-                        cardTitle = "ORDEN";
-                        if (songMgr.sortMode == SORT_BY_TITLE)       std::snprintf(cardSub, sizeof(cardSub), "Titulo");
-                        else if (songMgr.sortMode == SORT_BY_ARTIST) std::snprintf(cardSub, sizeof(cardSub), "Artista");
-                        else if (songMgr.sortMode == SORT_BY_STARS)  std::snprintf(cardSub, sizeof(cardSub), "Dificult.");
-                        else                                         std::snprintf(cardSub, sizeof(cardSub), "Record");
+                        cardTitle = LOC(STR_CARD_ORDER);
+                        if (songMgr.sortMode == SORT_BY_TITLE)       std::snprintf(cardSub, sizeof(cardSub), "%s", LOC(STR_CARD_TITLE));
+                        else if (songMgr.sortMode == SORT_BY_ARTIST) std::snprintf(cardSub, sizeof(cardSub), "%s", LOC(STR_CARD_ARTIST));
+                        else if (songMgr.sortMode == SORT_BY_STARS)  std::snprintf(cardSub, sizeof(cardSub), "%s", LOC(STR_CARD_STARS));
+                        else                                         std::snprintf(cardSub, sizeof(cardSub), "%s", LOC(STR_CARD_RECORD));
                         subClr = Ui::rgba(205, 185, 255);
                     } else if (k == 4) { // MODOS DE JUEGO (STD / TAIKO / CATCH / MANIA)
                         if (multiMgr.inMultiplayer) {
@@ -4267,7 +4272,7 @@ int main(int argc, char* argv[]) {
                             std::snprintf(cardSub, sizeof(cardSub), "Lobby");
                             subClr    = Ui::rgba(215, 160, 255);
                         } else {
-                            cardTitle = "MODO";
+                            cardTitle = LOC(STR_MODE);
                             int curM = settings.gameMode;
                             if (curM == MODE_TAIKO) {
                                 accentClr = Ui::rgba(255, 75, 80);
@@ -4287,7 +4292,7 @@ int main(int argc, char* argv[]) {
                             } else {
                                 accentClr = Ui::rgba(255, 102, 171);
                                 bgBase    = Ui::rgba(48, 18, 38, 245);
-                                std::snprintf(cardSub, sizeof(cardSub), "Standard");
+                                std::snprintf(cardSub, sizeof(cardSub), "%s", LOC(STR_CARD_STANDARD));
                                 subClr    = Ui::rgba(255, 180, 215);
                             }
                         }
@@ -4549,8 +4554,9 @@ int main(int argc, char* argv[]) {
                 Ui::gradV(0.0f, 0.0f, 400.0f, 30.0f, 0.3f, Ui::rgba(18, 15, 32, 245), Ui::rgba(18, 15, 32, 150));
                 C2D_DrawRectSolid(0.0f, 29.0f, 0.31f, 400.0f, 1.5f, Ui::withAlpha(gradeClr, 220));
                 const char* resTitle = stageFailed ? LOC(STR_RESULTS_FAILED) : (newRecordAchieved ? LOC(STR_RESULTS_NEW_RECORD) : LOC(STR_RESULTS_TITLE));
+                std::string taikoFailTitle = std::string(LOC(STR_RESULTS_FAILED)) + " (ざんねん...)";
                 if (isTaikoPlay) {
-                    if (stageFailed || hp < 0.70f) resTitle = "FALLIDA... (ざんねん...)";
+                    if (stageFailed || hp < 0.70f) resTitle = taikoFailTitle.c_str();
                     else if (countMiss == 0) resTitle = "DON-DERFUL! FULL COMBO! (フルコンボ!)";
                     else resTitle = "CLEAR! (クリア!)";
                 }
@@ -4646,7 +4652,7 @@ int main(int argc, char* argv[]) {
                 // Contadores de golpes adaptados a cada modo de juego
                 const char* hitLbl[4] = { "300", "100", "50", "X" };
                 const char* taikoHitLbl[4] = { "良 GOOD", "可 OK", "不可 MISS", "連打 ROLLS" };
-                const char* catchHitLbl[4] = { "FRUTAS", "GOTAS", "GOTITAS", "MISS" };
+                const char* catchHitLbl[4] = { LOC(STR_CATCH_FRUITS), LOC(STR_CATCH_DROPS), LOC(STR_CATCH_DROPLETS), "MISS" };
                 const char* maniaHitLbl[4] = { "MAX 300", "100", "50", "MISS" };
 
                 int hitCnt[4] = { count300, count100, count50, countMiss };
@@ -4857,7 +4863,7 @@ int main(int argc, char* argv[]) {
             Ui::button(8.0f, 204.0f, 96.0f, 30.0f, 0.22f, Ui::rgba(20, 36, 60, 240), Ui::rgba(40, 180, 240), false);
             Ui::pill(14.0f, 210.0f, 18.0f, 18.0f, 0.24f, Ui::rgba(40, 180, 240));
             drawCenteredText(textBuf, 23.0f, 219.0f, 0.28f, Ui::rgba(0, 0, 0, 240), "X", 0.28f);
-            drawTextWithShadow(textBuf, 36.0f, 211.0f, 0.32f, clrWhite, (resultsBottomTab == 0) ? "VER TOP" : "CURVA", 0.28f);
+            drawTextWithShadow(textBuf, 36.0f, 211.0f, 0.32f, clrWhite, (resultsBottomTab == 0) ? LOC(STR_RESULTS_VIEW_TOP) : LOC(STR_RESULTS_STRAIN_CURVE), 0.28f);
 
             // Botón 2: Reintentar [A] (resaltado con brillo verde como en multijugador)
             Ui::button(111.0f, 204.0f, 98.0f, 30.0f, 0.22f, Ui::rgba(22, 52, 32, 245), Ui::rgba(30, 200, 85), true);
@@ -5096,7 +5102,7 @@ int main(int argc, char* argv[]) {
                 drawText(textBuf, 78.0f + dBar, 10.0f, 0.44f, clrWhite, topTitle, 0.30f);
 
                 char roomBadge[32];
-                std::snprintf(roomBadge, sizeof(roomBadge), "[%d Salas]", static_cast<int>(multiMgr.discoveredRooms.size()));
+                std::snprintf(roomBadge, sizeof(roomBadge), LOC(STR_MULTI_ROOMS_COUNT), static_cast<int>(multiMgr.discoveredRooms.size()));
                 Ui::pill(280.0f + dBar, 8.0f, 58.0f, 18.0f, 0.25f, Ui::rgba(40, 215, 235));
                 drawCenteredText(textBuf, 309.0f + dBar, 16.0f, 0.30f, Ui::rgba(0, 0, 0, 240), roomBadge, 0.30f);
 
@@ -5113,15 +5119,15 @@ int main(int argc, char* argv[]) {
                     renderWifiBars(cx - 9.0f, cy - 6.0f, 3, Ui::rgba(40, 215, 235), Ui::rgba(70, 70, 95));
 
                     if (multiMgr.netMode == MultiNetworkMode::NET_MODE_UDS) {
-                        drawCenteredText(textBuf, cx, 126.0f, 0.42f, clrWhite, "Buscando 3DS cercanas por UDS Inalambrico...", 0.25f);
-                        drawCenteredText(textBuf, cx, 146.0f, 0.32f, clrMuted, "No se requiere conexion a internet ni router Wi-Fi.", 0.25f);
-                        drawCenteredText(textBuf, cx, 166.0f, 0.33f, Ui::rgba(255, 195, 45), "Pulsa [X] o toca el boton inferior para CREAR UNA SALA.", 0.25f);
-                        drawCenteredText(textBuf, cx, 182.0f, 0.29f, clrMuted, "Cualquier otra 3DS podra unirse y auto-descargar mapas.", 0.25f);
+                        drawCenteredText(textBuf, cx, 126.0f, 0.42f, clrWhite, LOC(STR_MULTI_SEARCH_UDS), 0.25f);
+                        drawCenteredText(textBuf, cx, 146.0f, 0.32f, clrMuted, LOC(STR_MULTI_NO_NET_REQ), 0.25f);
+                        drawCenteredText(textBuf, cx, 166.0f, 0.33f, Ui::rgba(255, 195, 45), LOC(STR_MULTI_PRESS_X_CREATE), 0.25f);
+                        drawCenteredText(textBuf, cx, 182.0f, 0.29f, clrMuted, LOC(STR_MULTI_ANY_JOIN), 0.25f);
                     } else {
-                        drawCenteredText(textBuf, cx, 126.0f, 0.42f, clrWhite, "Buscando salas en la red local LAN...", 0.25f);
-                        drawCenteredText(textBuf, cx, 146.0f, 0.32f, clrMuted, "No hay partidas activas transmitiendo por ahora.", 0.25f);
-                        drawCenteredText(textBuf, cx, 166.0f, 0.33f, Ui::rgba(255, 195, 45), "Pulsa [X] o toca el boton inferior para CREAR UNA SALA.", 0.25f);
-                        drawCenteredText(textBuf, cx, 182.0f, 0.29f, clrMuted, "Tu sala aparecera al instante a los demas jugadores.", 0.25f);
+                        drawCenteredText(textBuf, cx, 126.0f, 0.42f, clrWhite, LOC(STR_MULTI_SEARCH_LAN), 0.25f);
+                        drawCenteredText(textBuf, cx, 146.0f, 0.32f, clrMuted, LOC(STR_MULTI_NO_ACTIVE_ROOMS), 0.25f);
+                        drawCenteredText(textBuf, cx, 166.0f, 0.33f, Ui::rgba(255, 195, 45), LOC(STR_MULTI_PRESS_X_CREATE), 0.25f);
+                        drawCenteredText(textBuf, cx, 182.0f, 0.29f, clrMuted, LOC(STR_MULTI_ROOM_WILL_APPEAR), 0.25f);
                     }
                 } else {
                     // Columna Izquierda: Tarjetas de Salas (hasta 3 visibles)
@@ -5171,17 +5177,17 @@ int main(int argc, char* argv[]) {
                     Ui::panel(px, py, pw, ph, 0.20f, Ui::rgba(22, 19, 36, 245), Ui::rgba(40, 215, 235));
 
                     const auto& selRm = multiMgr.discoveredRooms[multiMgr.selectedRoomIndex];
-                    drawText(textBuf, px + 8.0f, py + 8.0f, 0.36f, Ui::rgba(40, 215, 235), "DETALLES", 0.25f);
+                    drawText(textBuf, px + 8.0f, py + 8.0f, 0.36f, Ui::rgba(40, 215, 235), LOC(STR_MULTI_DETAILS), 0.25f);
                     drawText(textBuf, px + 8.0f, py + 26.0f, 0.30f, clrWhite, ("Host: " + truncateString(selRm.hostName, 12)).c_str(), 0.25f);
 
-                    const char* wcStr = (selRm.winCondition == WIN_SCORE) ? "Puntos" :
-                                        ((selRm.winCondition == WIN_ACCURACY) ? "Precision" : "Combo");
-                    drawText(textBuf, px + 8.0f, py + 42.0f, 0.28f, clrMuted, ("Regla: " + std::string(wcStr)).c_str(), 0.25f);
+                    const char* wcStr = (selRm.winCondition == WIN_SCORE) ? LOC(STR_SCORE) :
+                                        ((selRm.winCondition == WIN_ACCURACY) ? LOC(STR_ACCURACY) : LOC(STR_MAX_COMBO));
+                    drawText(textBuf, px + 8.0f, py + 42.0f, 0.28f, clrMuted, (std::string(LOC(STR_MULTI_RULE)) + ": " + std::string(wcStr)).c_str(), 0.25f);
 
                     const char* mmStr = (selRm.modMode == MODS_HOST_ONLY) ? "Host Only" : "FreeMod";
-                    drawText(textBuf, px + 8.0f, py + 56.0f, 0.28f, clrMuted, ("Mods: " + std::string(mmStr)).c_str(), 0.25f);
+                    drawText(textBuf, px + 8.0f, py + 56.0f, 0.28f, clrMuted, (std::string(LOC(STR_MULTI_MODS_LABEL)) + ": " + std::string(mmStr)).c_str(), 0.25f);
 
-                    drawText(textBuf, px + 8.0f, py + 74.0f, 0.30f, Ui::rgba(255, 195, 45), "Mapa:", 0.25f);
+                    drawText(textBuf, px + 8.0f, py + 74.0f, 0.30f, Ui::rgba(255, 195, 45), LOC(STR_MULTI_MAP_LABEL), 0.25f);
                     drawText(textBuf, px + 8.0f, py + 88.0f, 0.29f, clrWhite, truncateString(selRm.mapTitle, 15).c_str(), 0.25f);
                     drawText(textBuf, px + 8.0f, py + 102.0f, 0.26f, clrMuted, truncateString(selRm.mapArtist, 17).c_str(), 0.25f);
                     drawText(textBuf, px + 8.0f, py + 116.0f, 0.26f, clrMuted, truncateString(selRm.mapVersion, 17).c_str(), 0.25f);
@@ -5225,18 +5231,18 @@ int main(int argc, char* argv[]) {
             // Botón Alternar Modo (UDS / LAN)
             bool isModeUds = (multiMgr.netMode == MultiNetworkMode::NET_MODE_UDS);
             Ui::panel(148.0f, 4.0f, 74.0f, 22.0f, 0.20f, Ui::rgba(28, 24, 44, 240), isModeUds ? Ui::rgba(40, 215, 235) : Ui::rgba(255, 150, 40));
-            drawCenteredText(textBuf, 185.0f, 13.0f, 0.28f, isModeUds ? Ui::rgba(40, 215, 235) : Ui::rgba(255, 150, 40), isModeUds ? "MODO: UDS" : "MODO: LAN", 0.25f);
+            drawCenteredText(textBuf, 185.0f, 13.0f, 0.28f, isModeUds ? Ui::rgba(40, 215, 235) : Ui::rgba(255, 150, 40), isModeUds ? (std::string(LOC(STR_MODE)) + ": UDS").c_str() : (std::string(LOC(STR_MODE)) + ": LAN").c_str(), 0.25f);
 
             // Botón Refrescar
             Ui::panel(226.0f, 4.0f, 84.0f, 22.0f, 0.20f, Ui::rgba(30, 26, 46, 240), Ui::rgba(40, 215, 235));
-            drawCenteredText(textBuf, 268.0f, 13.0f, 0.29f, Ui::rgba(40, 215, 235), "/ BUSCAR", 0.25f);
+            drawCenteredText(textBuf, 268.0f, 13.0f, 0.29f, Ui::rgba(40, 215, 235), LOC(STR_SEARCH), 0.25f);
 
             // Contenedor de la lista de salas
             if (multiMgr.discoveredRooms.empty()) {
                 Ui::panel(10.0f, 36.0f, 300.0f, 138.0f, 0.20f, Ui::rgba(22, 19, 36, 240), Ui::rgba(45, 40, 65));
-                drawCenteredText(textBuf, 160.0f, 75.0f, 0.38f, clrWhite, "Ninguna sala encontrada", 0.25f);
-                drawCenteredText(textBuf, 160.0f, 98.0f, 0.31f, clrMuted, "Crea tu sala tocando el boton verde inferior.", 0.25f);
-                drawCenteredText(textBuf, 160.0f, 116.0f, 0.31f, Ui::rgba(40, 215, 235), "Cualquier 3DS conectada podra unirse al instante.", 0.25f);
+                drawCenteredText(textBuf, 160.0f, 75.0f, 0.38f, clrWhite, LOC(STR_MULTI_NO_ROOMS_FOUND), 0.25f);
+                drawCenteredText(textBuf, 160.0f, 98.0f, 0.31f, clrMuted, LOC(STR_MULTI_CREATE_ROOM_TOUCH), 0.25f);
+                drawCenteredText(textBuf, 160.0f, 116.0f, 0.31f, Ui::rgba(40, 215, 235), LOC(STR_MULTI_ANY_3DS_JOIN), 0.25f);
             } else {
                 int startIdx = 0;
                 if (multiMgr.selectedRoomIndex >= 3) startIdx = multiMgr.selectedRoomIndex - 2;
@@ -5275,7 +5281,7 @@ int main(int argc, char* argv[]) {
             Ui::pill(16.0f, 192.0f, 18.0f, 18.0f, 0.24f, Ui::rgba(65, 55, 85));
             drawCenteredText(textBuf, 25.0f, 201.0f, 0.28f, clrWhite, "B", 0.28f);
             drawTextWithShadow(textBuf, 38.0f, 193.0f, 0.32f, clrMuted, LOC(STR_BACK), 0.28f);
-            drawTextWithShadow(textBuf, 38.0f, 207.0f, 0.26f, clrMuted, "Menu", 0.28f);
+            drawTextWithShadow(textBuf, 38.0f, 207.0f, 0.26f, clrMuted, LOC(STR_MENU_SHORT), 0.28f);
 
             Ui::button(84.0f, 186.0f, 226.0f, 44.0f, 0.20f, Ui::rgba(25, 140, 65, 250), Ui::rgba(140, 255, 180), true);
             Ui::pill(92.0f, 196.0f, 24.0f, 22.0f, 0.25f, Ui::rgba(140, 255, 180));
@@ -5626,8 +5632,8 @@ int main(int argc, char* argv[]) {
                 drawCenteredText(textBuf, 41.0f + dBar, 17.0f, 0.36f, clrWhite, "osu!3DS", 0.30f);
 
                 const char* lobbyTitle = (multiMgr.netMode == MultiNetworkMode::NET_MODE_UDS)
-                    ? "SALA INALAMBRICA (UDS)"
-                    : "SALA MULTIJUGADOR (LAN)";
+                    ? LOC(STR_MULTI_ROOMS_UDS)
+                    : LOC(STR_MULTI_ROOMS_LAN);
                 drawText(textBuf, 78.0f + dBar, 11.0f, 0.44f, clrWhite, lobbyTitle, 0.30f);
 
                 char slotBadge[16];
@@ -5636,8 +5642,10 @@ int main(int argc, char* argv[]) {
                 drawCenteredText(textBuf, 266.0f + dBar, 17.0f, 0.32f, clrWhite, slotBadge, 0.30f);
 
                 // Regla de sala en la esquina superior derecha
-                const char* ruleLabel = (multiMgr.winCondition == WIN_SCORE) ? "Regla: Puntuacion" :
-                                        ((multiMgr.winCondition == WIN_ACCURACY) ? "Regla: Precision (Acc %)" : "Regla: Max Combo");
+                const char* winCritName = (multiMgr.winCondition == WIN_SCORE) ? LOC(STR_SCORE) :
+                                        ((multiMgr.winCondition == WIN_ACCURACY) ? LOC(STR_ACCURACY) : LOC(STR_MAX_COMBO));
+                char ruleLabel[64];
+                std::snprintf(ruleLabel, sizeof(ruleLabel), "%s: %s", LOC(STR_MULTI_RULE), winCritName);
                 Ui::pill(296.0f + dBar, 9.0f, 96.0f, 18.0f, 0.25f, Ui::rgba(45, 38, 20, 220));
                 drawRectOutline(296.0f + dBar, 9.0f, 96.0f, 18.0f, 1.2f, Ui::rgba(255, 195, 45), 0.26f);
                 drawCenteredText(textBuf, 344.0f + dBar, 17.0f, 0.30f, Ui::rgba(255, 205, 50), ruleLabel, 0.30f);
@@ -5667,19 +5675,19 @@ int main(int argc, char* argv[]) {
                             drawCenteredText(textBuf, cx + 114.0f, cy + 12.0f, 0.28f, clrWhite, "HOST", 0.30f);
                         } else if (p.isLocal) {
                             Ui::pill(cx + 96.0f, cy + 6.0f, 26.0f, 13.0f, 0.26f, Ui::rgba(40, 215, 235));
-                            drawCenteredText(textBuf, cx + 109.0f, cy + 12.0f, 0.28f, Ui::rgba(0, 0, 0, 240), "TU", 0.30f);
+                            drawCenteredText(textBuf, cx + 109.0f, cy + 12.0f, 0.28f, Ui::rgba(0, 0, 0, 240), LOC(STR_MULTI_YOU), 0.30f);
                         }
 
                         // Subtítulo: Mods equipados y Ping
                         char subStr[48];
-                        std::string modStr = (p.activeMods != MOD_NONE) ? formatModsString(p.activeMods) : "Sin Mods";
+                        std::string modStr = (p.activeMods != MOD_NONE) ? formatModsString(p.activeMods) : "None";
                         std::snprintf(subStr, sizeof(subStr), "+%s . %ums", modStr.c_str(), p.pingMs);
                         drawText(textBuf, cx + 8.0f, cy + 22.0f, 0.32f, clrMuted, subStr, 0.25f);
 
                         // Píldora de estado en la derecha de la tarjeta
                         if (p.status == STATUS_READY) {
                             Ui::pill(cx + cw - 52.0f, cy + 12.0f, 44.0f, 17.0f, 0.26f, Ui::rgba(30, 165, 80));
-                            drawCenteredText(textBuf, cx + cw - 30.0f, cy + 20.0f, 0.32f, clrWhite, "LISTO", 0.30f);
+                            drawCenteredText(textBuf, cx + cw - 30.0f, cy + 20.0f, 0.32f, clrWhite, LOC(STR_READY), 0.30f);
                         } else if (p.status == STATUS_DOWNLOADING) {
                             char dlPill[16];
                             std::snprintf(dlPill, sizeof(dlPill), "%d%%", p.downloadProgress);
@@ -5690,12 +5698,12 @@ int main(int argc, char* argv[]) {
                             drawCenteredText(textBuf, cx + cw - 35.0f, cy + 20.0f, 0.30f, clrWhite, "NO MAP", 0.30f);
                         } else {
                             Ui::pill(cx + cw - 62.0f, cy + 12.0f, 54.0f, 17.0f, 0.26f, Ui::rgba(45, 40, 60));
-                            drawCenteredText(textBuf, cx + cw - 35.0f, cy + 20.0f, 0.30f, clrMuted, "ESPERANDO", 0.30f);
+                            drawCenteredText(textBuf, cx + cw - 35.0f, cy + 20.0f, 0.30f, clrMuted, LOC(STR_MULTI_WAITING), 0.30f);
                         }
                     } else {
                         Ui::panel(cx, cy, cw, ch, 0.18f, Ui::rgba(16, 14, 26, 170));
                         drawRectOutline(cx, cy, cw, ch, 1.0f, Ui::rgba(40, 36, 56), 0.20f);
-                        drawCenteredText(textBuf, cx + cw * 0.5f, cy + 19.0f, 0.34f, clrMuted, "Ranura Disponible", 0.25f);
+                        drawCenteredText(textBuf, cx + cw * 0.5f, cy + 19.0f, 0.34f, clrMuted, LOC(STR_MULTI_SLOT_OPEN), 0.25f);
                     }
                 }
 
@@ -5708,11 +5716,10 @@ int main(int argc, char* argv[]) {
                 Ui::panel(rx, 34.0f, rw, 80.0f, 0.20f, Ui::rgba(20, 18, 34, 240), multiMgr.hostChangingSong ? Ui::rgba(255, 185, 45) : Ui::rgba(40, 215, 235));
                 if (multiMgr.hostChangingSong) {
                     Ui::glow(rx + rw * 0.5f, 42.0f, 0.22f, 70.0f, Ui::rgba(255, 185, 45, 90), 2);
-                    drawText(textBuf, rx + 8.0f, 38.0f, 0.32f, Ui::rgba(255, 195, 45), "CAMBIANDO MAPA...", 0.25f);
-                    drawCenteredTextWithShadow(textBuf, rx + rw * 0.5f, 62.0f, 0.38f, Ui::rgba(255, 215, 60), "El anfitrion esta", 0.25f);
-                    drawCenteredTextWithShadow(textBuf, rx + rw * 0.5f, 80.0f, 0.36f, clrWhite, "eligiendo cancion...", 0.25f);
+                    drawText(textBuf, rx + 8.0f, 38.0f, 0.32f, Ui::rgba(255, 195, 45), LOC(STR_MULTI_CHANGING_MAP), 0.25f);
+                    drawCenteredTextWithShadow(textBuf, rx + rw * 0.5f, 70.0f, 0.38f, Ui::rgba(255, 215, 60), LOC(STR_MULTI_HOST_CHOOSING), 0.25f);
                 } else {
-                    drawText(textBuf, rx + 8.0f, 38.0f, 0.32f, Ui::rgba(40, 215, 235), "SIGUIENTE MAPA", 0.25f);
+                    drawText(textBuf, rx + 8.0f, 38.0f, 0.32f, Ui::rgba(40, 215, 235), LOC(STR_MULTI_NEXT_MAP), 0.25f);
 
                     char lenStr[16];
                     std::snprintf(lenStr, sizeof(lenStr), "%d:%02d", multiMgr.activeBeatmap.lengthSec / 60, multiMgr.activeBeatmap.lengthSec % 60);
@@ -5736,16 +5743,16 @@ int main(int argc, char* argv[]) {
                 // Tarjeta 2: EN COLA (Map Queue)
                 Ui::panel(rx, 120.0f, rw, 90.0f, 0.20f, Ui::rgba(18, 16, 30, 240), Ui::rgba(85, 75, 110));
                 char qHeader[24];
-                std::snprintf(qHeader, sizeof(qHeader), "EN COLA (%d)", static_cast<int>(multiMgr.mapQueue.size()));
+                std::snprintf(qHeader, sizeof(qHeader), "%s (%d)", LOC(STR_MULTI_ENQUEUE), static_cast<int>(multiMgr.mapQueue.size()));
                 drawText(textBuf, rx + 8.0f, 124.0f, 0.32f, Ui::rgba(160, 150, 190), qHeader, 0.25f);
 
                 if (multiMgr.mapQueue.empty()) {
-                    drawCenteredTextWithShadow(textBuf, rx + rw * 0.5f, 150.0f, 0.36f, Ui::rgba(220, 215, 240), "Cola vacia", 0.25f);
+                    drawCenteredTextWithShadow(textBuf, rx + rw * 0.5f, 150.0f, 0.36f, Ui::rgba(220, 215, 240), LOC(STR_MULTI_QUEUE_EMPTY), 0.25f);
                     Ui::pill(rx + 14.0f, 168.0f, rw - 28.0f, 22.0f, 0.24f, Ui::rgba(20, 50, 75, 240));
                     drawRectOutline(rx + 14.0f, 168.0f, rw - 28.0f, 22.0f, 1.2f, Ui::rgba(40, 215, 235), 0.26f);
                     Ui::pill(rx + 20.0f, 172.0f, 14.0f, 14.0f, 0.27f, Ui::rgba(40, 215, 235));
                     drawCenteredText(textBuf, rx + 27.0f, 179.0f, 0.28f, Ui::rgba(0, 0, 0, 245), "X", 0.30f);
-                    drawTextWithShadow(textBuf, rx + 38.0f, 172.0f, 0.32f, Ui::rgba(180, 240, 255), "Pulsa para anadir", 0.30f);
+                    drawTextWithShadow(textBuf, rx + 38.0f, 172.0f, 0.32f, Ui::rgba(180, 240, 255), LOC(STR_MULTI_TAP_TO_ADD), 0.30f);
                 } else {
                     for (size_t q = 0; q < multiMgr.mapQueue.size() && q < 3; ++q) {
                         float qy = 142.0f + q * 22.0f;
@@ -5766,14 +5773,14 @@ int main(int argc, char* argv[]) {
                     drawCenteredTextWithShadow(textBuf, 200.0f + dToast, 224.0f, 0.34f, Ui::rgba(255, 230, 230), multiMgr.toastNotice.c_str(), 0.95f);
                 } else {
                     float byY = 219.0f;
-                    drawKeyBadge(textBuf, 10.0f + dBar, byY, "A", multiMgr.isHost() ? "Iniciar" : "Listo", Ui::rgba(255, 75, 80));
+                    drawKeyBadge(textBuf, 10.0f + dBar, byY, "A", multiMgr.isHost() ? LOC(STR_MULTI_START_MATCH) : LOC(STR_READY), Ui::rgba(255, 75, 80));
                     drawKeyBadge(textBuf, 88.0f + dBar, byY, "Y", "Mods", Ui::rgba(50, 215, 115));
-                    drawKeyBadge(textBuf, 158.0f + dBar, byY, "X", "Cola", Ui::rgba(50, 165, 255));
-                    drawKeyBadge(textBuf, 226.0f + dBar, byY, "B", "Salir", Ui::rgba(255, 195, 45));
+                    drawKeyBadge(textBuf, 158.0f + dBar, byY, "X", LOC(STR_MULTI_ENQUEUE), Ui::rgba(50, 165, 255));
+                    drawKeyBadge(textBuf, 226.0f + dBar, byY, "B", LOC(STR_BACK), Ui::rgba(255, 195, 45));
 
                     Ui::pill(296.0f + dBar, byY - 1.0f, 32.0f, 15.0f, 0.30f, Ui::rgba(24, 60, 85));
-                    drawCenteredText(textBuf, 312.0f + dBar, byY + 6.5f, 0.28f, Ui::rgba(40, 215, 235), "ROL", 0.32f);
-                    drawTextWithShadow(textBuf, 334.0f + dBar, byY, 0.34f, clrWhite, multiMgr.isHost() ? "Host" : "Cliente", 0.32f);
+                    drawCenteredText(textBuf, 312.0f + dBar, byY + 6.5f, 0.28f, Ui::rgba(40, 215, 235), LOC(STR_MULTI_ROLE), 0.32f);
+                    drawTextWithShadow(textBuf, 334.0f + dBar, byY, 0.34f, clrWhite, multiMgr.isHost() ? "Host" : LOC(STR_MULTI_CLIENT), 0.32f);
                 }
 
                 Ui::drawTransition(400.0f, 240.0f, screenFade, clrPrimary);
@@ -5788,8 +5795,8 @@ int main(int argc, char* argv[]) {
             if (multiQueuePickerOpen) {
                 Ui::panel(10.0f, 8.0f, 300.0f, 224.0f, 0.15f, Ui::rgba(16, 14, 28, 250), clrPrimary);
                 const char* pickerTitle = multiMgr.isHost()
-                    ? ((multiPickerAction == PICKER_ACTION_QUEUE) ? "ENCOLAR CANCION (HOST)" : "CAMBIAR CANCION ACTUAL (HOST)")
-                    : "SUGERIR CANCION PARA LA COLA";
+                    ? ((multiPickerAction == PICKER_ACTION_QUEUE) ? LOC(STR_MULTI_ADD_QUEUE) : LOC(STR_MULTI_CHANGE_MAP))
+                    : LOC(STR_MULTI_SUGGEST_MAP);
                 drawCenteredText(textBuf, 160.0f, 18.0f, 0.40f, clrWhite, pickerTitle, 0.20f);
 
                 for (int k = 0; k < 4; ++k) {
@@ -5818,31 +5825,31 @@ int main(int argc, char* argv[]) {
 
                 if (multiMgr.isHost()) {
                     Ui::button(14.0f, 198.0f, 140.0f, 28.0f, 0.20f, Ui::rgba(255, 140, 20), Ui::rgba(255, 200, 100), true);
-                    drawCenteredTextWithShadow(textBuf, 84.0f, 212.0f, 0.34f, clrWhite, "[A] MAPA ACTUAL", 0.25f);
+                    drawCenteredTextWithShadow(textBuf, 84.0f, 212.0f, 0.34f, clrWhite, LOC(STR_MULTI_CHANGE_MAP), 0.25f);
 
                     Ui::button(166.0f, 198.0f, 140.0f, 28.0f, 0.20f, Ui::rgba(40, 180, 220), Ui::rgba(160, 230, 255), false);
-                    drawCenteredTextWithShadow(textBuf, 236.0f, 212.0f, 0.34f, clrWhite, "[X] + A LA COLA", 0.25f);
+                    drawCenteredTextWithShadow(textBuf, 236.0f, 212.0f, 0.34f, clrWhite, LOC(STR_MULTI_ADD_QUEUE), 0.25f);
                 } else {
                     Ui::button(20.0f, 198.0f, 280.0f, 28.0f, 0.20f, Ui::rgba(180, 80, 240), Ui::rgba(220, 160, 255), false);
-                    drawCenteredTextWithShadow(textBuf, 160.0f, 212.0f, 0.34f, clrWhite, "[A] / [X] SUGERIR A LA COLA", 0.25f);
+                    drawCenteredTextWithShadow(textBuf, 160.0f, 212.0f, 0.34f, clrWhite, LOC(STR_MULTI_SUGGEST_MAP), 0.25f);
                 }
             } else {
-                drawTextWithShadow(textBuf, 12.0f, 10.0f, 0.42f, Ui::rgba(40, 215, 235), "PANEL TACTIL DE SALA MULTIJUGADOR", 0.20f);
+                drawTextWithShadow(textBuf, 12.0f, 10.0f, 0.42f, Ui::rgba(40, 215, 235), LOC(STR_MULTI_TOUCH_PANEL), 0.20f);
                 if (multiMgr.isHost()) {
                     Ui::pill(248.0f, 6.0f, 60.0f, 17.0f, 0.25f, Ui::rgba(255, 140, 20));
                     drawCenteredText(textBuf, 278.0f, 14.5f, 0.30f, clrWhite, "HOST", 0.30f);
                 } else {
                     Ui::pill(242.0f, 6.0f, 66.0f, 17.0f, 0.25f, Ui::rgba(40, 215, 235));
-                    drawCenteredText(textBuf, 275.0f, 14.5f, 0.30f, Ui::rgba(0, 0, 0, 240), "CLIENTE", 0.30f);
+                    drawCenteredText(textBuf, 275.0f, 14.5f, 0.30f, Ui::rgba(0, 0, 0, 240), LOC(STR_MULTI_CLIENT), 0.30f);
                 }
 
-                drawTextWithShadow(textBuf, 12.0f, 28.0f, 0.33f, Ui::rgba(215, 210, 235), "Criterio de Victoria del Podio:", 0.20f);
-                const char* critText = (multiMgr.winCondition == WIN_SCORE) ? "SCORE" :
-                                       ((multiMgr.winCondition == WIN_ACCURACY) ? "ACCURACY" : "MAX COMBO");
+                drawTextWithShadow(textBuf, 12.0f, 28.0f, 0.33f, Ui::rgba(215, 210, 235), LOC(STR_MULTI_WIN_CRITERIA), 0.20f);
+                const char* critText = (multiMgr.winCondition == WIN_SCORE) ? LOC(STR_SCORE) :
+                                       ((multiMgr.winCondition == WIN_ACCURACY) ? LOC(STR_ACCURACY) : LOC(STR_MAX_COMBO));
                 drawTextWithShadow(textBuf, 214.0f, 28.0f, 0.35f, Ui::rgba(40, 215, 235), critText, 0.20f);
 
                 // 3 Pestañas interactivas de regla de victoria
-                const char* tabNames[3] = { "Puntuacion", "Precision", "Max Combo" };
+                const char* tabNames[3] = { LOC(STR_MULTI_WIN_SCORE), LOC(STR_MULTI_WIN_ACC), LOC(STR_MULTI_WIN_COMBO) };
                 for (int t = 0; t < 3; ++t) {
                     float tx = 14.0f + t * 98.0f;
                     float ty = 46.0f;
@@ -5862,57 +5869,57 @@ int main(int argc, char* argv[]) {
                 if (multiMgr.isHost()) {
                     // Tarjeta 1: Modificadores (x: 10..104, y: 82..148)
                     Ui::panel(10.0f, 82.0f, 94.0f, 66.0f, 0.20f, Ui::rgba(22, 19, 36, 240), Ui::rgba(40, 215, 235));
-                    drawTextWithShadow(textBuf, 14.0f, 88.0f, 0.34f, clrWhite, "Modificadores", 0.25f);
+                    drawTextWithShadow(textBuf, 14.0f, 88.0f, 0.34f, clrWhite, "MODS", 0.25f);
                     std::string myMods = (multiMgr.players[multiMgr.localSlot].activeMods != MOD_NONE)
-                        ? ("+" + formatModsString(multiMgr.players[multiMgr.localSlot].activeMods)) : "Sin Mods";
+                        ? ("+" + formatModsString(multiMgr.players[multiMgr.localSlot].activeMods)) : "None";
                     Ui::pill(14.0f, 108.0f, 86.0f, 16.0f, 0.26f, Ui::rgba(40, 215, 235));
                     drawCenteredText(textBuf, 57.0f, 116.0f, 0.28f, Ui::rgba(0, 0, 0, 240), truncateString(myMods, 10).c_str(), 0.30f);
-                    drawCenteredTextWithShadow(textBuf, 57.0f, 134.0f, 0.30f, Ui::rgba(215, 210, 235), "Toca: Mods", 0.25f);
+                    drawCenteredTextWithShadow(textBuf, 57.0f, 134.0f, 0.30f, Ui::rgba(215, 210, 235), LOC(STR_MULTI_MODS_MENU), 0.25f);
 
                     // Tarjeta 2: Cambiar Canción Actual (x: 113..207, y: 82..148)
                     bool clientDownloading = multiMgr.isAnyClientDownloading();
                     u32 c2Border = clientDownloading ? Ui::rgba(140, 50, 60) : Ui::rgba(255, 140, 20);
                     Ui::panel(113.0f, 82.0f, 94.0f, 66.0f, 0.20f, Ui::rgba(22, 19, 36, 240), c2Border);
-                    drawTextWithShadow(textBuf, 117.0f, 88.0f, 0.34f, clientDownloading ? clrMiss : clrWhite, "Cambiar Mapa", 0.25f);
+                    drawTextWithShadow(textBuf, 117.0f, 88.0f, 0.34f, clientDownloading ? clrMiss : clrWhite, LOC(STR_MULTI_CHANGE_MAP), 0.25f);
                     Ui::pill(117.0f, 108.0f, 86.0f, 16.0f, 0.26f, c2Border);
-                    drawCenteredText(textBuf, 160.0f, 116.0f, 0.28f, clrWhite, clientDownloading ? "BLOQUEADO" : "MAPA ACTIVO", 0.30f);
-                    drawCenteredTextWithShadow(textBuf, 160.0f, 134.0f, 0.30f, clientDownloading ? clrMiss : Ui::rgba(215, 210, 235), clientDownloading ? "Descarga activa" : "Toca: Cambiar", 0.25f);
+                    drawCenteredText(textBuf, 160.0f, 116.0f, 0.28f, clrWhite, clientDownloading ? LOC(STR_MULTI_BLOCKED) : LOC(STR_MULTI_ACTIVE_MAP), 0.30f);
+                    drawCenteredTextWithShadow(textBuf, 160.0f, 134.0f, 0.30f, clientDownloading ? clrMiss : Ui::rgba(215, 210, 235), clientDownloading ? LOC(STR_MULTI_DL_ACTIVE) : LOC(STR_MULTI_TAP_CHANGE), 0.25f);
 
                     // Tarjeta 3: + Añadir a la Cola (x: 216..310, y: 82..148)
                     Ui::panel(216.0f, 82.0f, 94.0f, 66.0f, 0.20f, Ui::rgba(22, 19, 36, 240), Ui::rgba(180, 80, 240));
-                    drawTextWithShadow(textBuf, 220.0f, 88.0f, 0.34f, clrWhite, "+ A la Cola", 0.25f);
+                    drawTextWithShadow(textBuf, 220.0f, 88.0f, 0.34f, clrWhite, LOC(STR_MULTI_ADD_QUEUE), 0.25f);
                     Ui::pill(220.0f, 108.0f, 86.0f, 16.0f, 0.26f, Ui::rgba(180, 80, 240));
-                    drawCenteredText(textBuf, 263.0f, 116.0f, 0.28f, clrWhite, "ENCOLAR", 0.30f);
-                    drawCenteredTextWithShadow(textBuf, 263.0f, 134.0f, 0.30f, Ui::rgba(215, 210, 235), "Toca: Cola", 0.25f);
+                    drawCenteredText(textBuf, 263.0f, 116.0f, 0.28f, clrWhite, LOC(STR_MULTI_ENQUEUE), 0.30f);
+                    drawCenteredTextWithShadow(textBuf, 263.0f, 134.0f, 0.30f, Ui::rgba(215, 210, 235), LOC(STR_MULTI_TAP_QUEUE), 0.25f);
                 } else {
                     // Tarjeta 1: Modificadores (Cliente)
                     Ui::panel(12.0f, 82.0f, 142.0f, 66.0f, 0.20f, Ui::rgba(22, 19, 36, 240), Ui::rgba(40, 215, 235));
-                    drawText(textBuf, 20.0f, 88.0f, 0.36f, clrWhite, "Modificadores", 0.25f);
+                    drawText(textBuf, 20.0f, 88.0f, 0.36f, clrWhite, "MODS", 0.25f);
                     std::string myMods = (multiMgr.players[multiMgr.localSlot].activeMods != MOD_NONE)
-                        ? ("+" + formatModsString(multiMgr.players[multiMgr.localSlot].activeMods)) : "Sin Mods";
+                        ? ("+" + formatModsString(multiMgr.players[multiMgr.localSlot].activeMods)) : "None";
                     Ui::pill(92.0f, 86.0f, 56.0f, 15.0f, 0.26f, Ui::rgba(40, 215, 235));
                     drawCenteredText(textBuf, 120.0f, 93.0f, 0.26f, Ui::rgba(0, 0, 0, 240), truncateString(myMods, 7).c_str(), 0.30f);
-                    drawTextWithShadow(textBuf, 20.0f, 114.0f, 0.30f, Ui::rgba(215, 210, 235), "Toca para abrir", 0.25f);
-                    drawTextWithShadow(textBuf, 20.0f, 128.0f, 0.30f, Ui::rgba(215, 210, 235), "Menu de Mods", 0.25f);
+                    drawTextWithShadow(textBuf, 20.0f, 114.0f, 0.30f, Ui::rgba(215, 210, 235), LOC(STR_MULTI_TAP_OPEN), 0.25f);
+                    drawTextWithShadow(textBuf, 20.0f, 128.0f, 0.30f, Ui::rgba(215, 210, 235), LOC(STR_MULTI_MODS_MENU), 0.25f);
 
                     // Tarjeta 2: + Añadir Canción (Cola Cliente)
                     Ui::panel(166.0f, 82.0f, 142.0f, 66.0f, 0.20f, Ui::rgba(22, 19, 36, 240), Ui::rgba(180, 80, 240));
-                    drawTextWithShadow(textBuf, 174.0f, 88.0f, 0.36f, clrWhite, "+ Anadir Cancion", 0.25f);
+                    drawTextWithShadow(textBuf, 174.0f, 88.0f, 0.36f, clrWhite, LOC(STR_MULTI_ADD_QUEUE), 0.25f);
                     Ui::pill(268.0f, 86.0f, 34.0f, 15.0f, 0.26f, Ui::rgba(180, 80, 240));
-                    drawCenteredText(textBuf, 285.0f, 93.0f, 0.26f, clrWhite, "Cola", 0.30f);
-                    drawTextWithShadow(textBuf, 174.0f, 114.0f, 0.30f, Ui::rgba(215, 210, 235), "Sugerir beatmap", 0.25f);
-                    drawTextWithShadow(textBuf, 174.0f, 128.0f, 0.30f, Ui::rgba(215, 210, 235), "para la sala", 0.25f);
+                    drawCenteredText(textBuf, 285.0f, 93.0f, 0.26f, clrWhite, LOC(STR_MULTI_ENQUEUE), 0.30f);
+                    drawTextWithShadow(textBuf, 174.0f, 114.0f, 0.30f, Ui::rgba(215, 210, 235), LOC(STR_MULTI_SUGGEST_MAP), 0.25f);
+                    drawTextWithShadow(textBuf, 174.0f, 128.0f, 0.30f, Ui::rgba(215, 210, 235), LOC(STR_MULTI_FOR_ROOM), 0.25f);
                 }
 
                 char statusSummary[64];
-                std::snprintf(statusSummary, sizeof(statusSummary), "Jugadores listos: %d/%d", multiMgr.getReadyPlayerCount(), multiMgr.getActivePlayerCount());
+                std::snprintf(statusSummary, sizeof(statusSummary), "%s: %d/%d", LOC(STR_READY), multiMgr.getReadyPlayerCount(), multiMgr.getActivePlayerCount());
                 drawTextWithShadow(textBuf, 14.0f, 158.0f, 0.34f, clrWhite, statusSummary, 0.25f);
 
-                const char* subStat = (multiMgr.hostChangingSong) ? "El anfitrion esta cambiando mapa..." :
-                                      (!hasLocalMap || multiMgr.players[multiMgr.localSlot].status == STATUS_MISSING_MAP) ? "Cancion no disponible en tu SD" :
-                                      (multiMgr.players[multiMgr.localSlot].status == STATUS_DOWNLOADING) ? "Descargando cancion..." :
-                                      (multiMgr.areAllPlayersReady()) ? "Todos listos para jugar!" :
-                                      (multiMgr.isHost() ? "Esperando a los jugadores" : "Esperando al anfitrion");
+                const char* subStat = (multiMgr.hostChangingSong) ? LOC(STR_MULTI_CHANGING_MAP) :
+                                      (!hasLocalMap || multiMgr.players[multiMgr.localSlot].status == STATUS_MISSING_MAP) ? LOC(STR_MULTI_DOWNLOAD_MAP) :
+                                      (multiMgr.players[multiMgr.localSlot].status == STATUS_DOWNLOADING) ? LOC(STR_MULTI_DL_ACTIVE) :
+                                      (multiMgr.areAllPlayersReady()) ? LOC(STR_MULTI_ALL_READY) :
+                                      (multiMgr.isHost() ? LOC(STR_MULTI_WAITING_PLAYERS) : LOC(STR_MULTI_WAITING_HOST));
                 drawTextWithShadow(textBuf, 168.0f, 158.0f, 0.30f, Ui::rgba(40, 215, 235), subStat, 0.25f);
 
                 float btnX = 12.0f;
@@ -5923,7 +5930,7 @@ int main(int argc, char* argv[]) {
                 if (!hasLocalMap || multiMgr.players[multiMgr.localSlot].status == STATUS_MISSING_MAP) {
                     Ui::glow(btnX + btnW * 0.5f, btnY + btnH * 0.5f, 0.16f, btnW * 0.52f, Ui::rgba(20, 160, 230, 90), 3);
                     Ui::panel(btnX, btnY, btnW, btnH, 0.20f, Ui::rgba(20, 135, 215, 255), Ui::rgba(160, 230, 255));
-                    drawCenteredText(textBuf, btnX + btnW * 0.5f, btnY + btnH * 0.5f, 0.46f, clrWhite, "v DESCARGAR MAPA (TOCA AQUI)", 0.30f);
+                    drawCenteredText(textBuf, btnX + btnW * 0.5f, btnY + btnH * 0.5f, 0.46f, clrWhite, LOC(STR_MULTI_DL_MAP_TAP), 0.30f);
                 } else if (multiMgr.players[multiMgr.localSlot].status == STATUS_DOWNLOADING) {
                     Ui::panel(btnX, btnY, btnW, btnH, 0.20f, Ui::rgba(220, 110, 20, 255), Ui::rgba(255, 180, 60));
                     float prog = multiMgr.players[multiMgr.localSlot].downloadProgress / 100.0f;
@@ -5931,11 +5938,11 @@ int main(int argc, char* argv[]) {
                         C2D_DrawRectSolid(btnX + 4.0f, btnY + 4.0f, 0.22f, (btnW - 8.0f) * std::min(1.0f, prog), btnH - 8.0f, Ui::rgba(255, 155, 30, 200));
                     }
                     char dlTxt[48];
-                    std::snprintf(dlTxt, sizeof(dlTxt), "DESCARGANDO MAPA (%d%%)...", multiMgr.players[multiMgr.localSlot].downloadProgress);
+                    std::snprintf(dlTxt, sizeof(dlTxt), "%s (%d%%)...", LOC(STR_MULTI_DL_ACTIVE), multiMgr.players[multiMgr.localSlot].downloadProgress);
                     drawCenteredText(textBuf, btnX + btnW * 0.5f, btnY + btnH * 0.5f, 0.44f, clrWhite, dlTxt, 0.30f);
                 } else if (multiMgr.hostChangingSong && !multiMgr.isHost()) {
                     Ui::panel(btnX, btnY, btnW, btnH, 0.20f, Ui::rgba(45, 38, 55, 240), Ui::rgba(180, 130, 40));
-                    drawCenteredText(textBuf, btnX + btnW * 0.5f, btnY + btnH * 0.5f, 0.42f, Ui::rgba(255, 205, 50), "CAMBIANDO MAPA...", 0.30f);
+                    drawCenteredText(textBuf, btnX + btnW * 0.5f, btnY + btnH * 0.5f, 0.42f, Ui::rgba(255, 205, 50), LOC(STR_MULTI_CHANGING_MAP), 0.30f);
                 } else if (multiMgr.isHost()) {
                     if (multiMgr.areAllPlayersReady()) {
                         Ui::glow(btnX + btnW * 0.5f, btnY + btnH * 0.5f, 0.18f, btnW * 0.55f, Ui::rgba(30, 215, 90, 80), 4);
@@ -5947,10 +5954,10 @@ int main(int argc, char* argv[]) {
                     }
                 } else if (multiMgr.players[multiMgr.localSlot].status == STATUS_READY) {
                     Ui::panel(btnX, btnY, btnW, btnH, 0.20f, Ui::rgba(28, 75, 50, 240), Ui::rgba(40, 215, 120));
-                    drawCenteredText(textBuf, btnX + btnW * 0.5f, btnY + btnH * 0.5f, 0.46f, Ui::rgba(180, 255, 210), "/ DESMARCAR LISTO", 0.30f);
+                    drawCenteredText(textBuf, btnX + btnW * 0.5f, btnY + btnH * 0.5f, 0.46f, Ui::rgba(180, 255, 210), LOC(STR_MULTI_UNREADY), 0.30f);
                 } else {
                     Ui::panel(btnX, btnY, btnW, btnH, 0.20f, Ui::rgba(30, 160, 75, 240), Ui::rgba(100, 255, 160));
-                    drawCenteredText(textBuf, btnX + btnW * 0.5f, btnY + btnH * 0.5f, 0.46f, clrWhite, "/ LISTO (TOCA PARA MARCAR)", 0.30f);
+                    drawCenteredText(textBuf, btnX + btnW * 0.5f, btnY + btnH * 0.5f, 0.46f, clrWhite, LOC(STR_MULTI_READY_TAP), 0.30f);
                 }
             }
 
@@ -6026,17 +6033,17 @@ int main(int argc, char* argv[]) {
                 Ui::pill(12.0f + dTop, 10.0f, 54.0f, 18.0f, 0.25f, Ui::rgba(255, 102, 170));
                 drawCenteredText(textBuf, 39.0f + dTop, 18.0f, 0.36f, clrWhite, "MODS", 0.30f);
 
-                drawText(textBuf, 72.0f + dTop, 11.0f, 0.44f, clrWhite, "IMPACTO EN EL BEATMAP", 0.30f);
+                drawText(textBuf, 72.0f + dTop, 11.0f, 0.44f, clrWhite, LOC(STR_MODS_IMPACT), 0.30f);
 
                 char multStr[32];
-                std::snprintf(multStr, sizeof(multStr), "Multiplicador Activo: %.2fx", currentMult);
+                std::snprintf(multStr, sizeof(multStr), LOC(STR_MODS_MULTIPLIER), currentMult);
                 drawText(textBuf, 230.0f + dTop, 12.0f, 0.36f, Ui::rgba(40, 215, 235), multStr, 0.30f);
 
                 Ui::panel(12.0f + dTop, 36.0f, 376.0f, 150.0f, 0.20f, Ui::rgba(20, 18, 34, 240), Ui::rgba(40, 215, 235));
 
                 std::string bTitle = multiMgr.activeBeatmap.title + " [" + multiMgr.activeBeatmap.version + "]";
                 drawText(textBuf, 22.0f + dTop, 44.0f, 0.46f, clrWhite, truncateString(bTitle, 36).c_str(), 0.25f);
-                drawText(textBuf, 22.0f + dTop, 62.0f, 0.32f, clrMuted, "Los modificadores alteran la dificultad y el multiplicador de puntuacion.", 0.25f);
+                drawText(textBuf, 22.0f + dTop, 62.0f, 0.32f, clrMuted, LOC(STR_MODS_INFO), 0.25f);
 
                 float curCS = beatmap.diff.cs;
                 float curAR = beatmap.diff.ar;
@@ -6059,7 +6066,7 @@ int main(int argc, char* argv[]) {
                 drawStatBar(textBuf, 22.0f + dTop, 108.0f, "Overall Diff (OD)", curOD, Ui::rgba(180, 80, 240), clrBgDark, clrWhite);
                 drawStatBar(textBuf, 206.0f + dTop, 108.0f, "HP Drain Rate", curHP, Ui::rgba(60, 215, 120), clrBgDark, clrWhite);
 
-                drawText(textBuf, 22.0f + dTop, 142.0f, 0.34f, clrMuted, "Mods Equipados:", 0.25f);
+                drawText(textBuf, 22.0f + dTop, 142.0f, 0.34f, clrMuted, LOC(STR_MODS_EQUIPPED), 0.25f);
                 float pillX = 120.0f + dTop;
                 if (settings.activeMods & MOD_HIDDEN) {
                     Ui::pill(pillX, 138.0f, 28.0f, 16.0f, 0.25f, Ui::rgba(255, 205, 50));
@@ -6083,7 +6090,7 @@ int main(int argc, char* argv[]) {
                 }
 
                 Ui::gradV(0.0f, 214.0f, 400.0f, 26.0f, 0.3f, Ui::rgba(14, 11, 26, 120), Ui::rgba(14, 11, 26, 250));
-                drawText(textBuf, 12.0f, 221.0f, 0.34f, clrMuted, "Toca la pantalla inferior para activar o desactivar");
+                drawText(textBuf, 12.0f, 221.0f, 0.34f, clrMuted, LOC(STR_MODS_CONTROLS_HINT));
                 Ui::drawTransition(400.0f, 240.0f, screenFade, clrPrimary);
             }
 
@@ -6092,56 +6099,56 @@ int main(int argc, char* argv[]) {
 
             Ui::backdrop(320.0f, 240.0f, static_cast<float>(animTick), Ui::rgba(18, 14, 30), Ui::rgba(10, 8, 18), clrPrimary, 0.02f);
 
-            drawTextWithShadow(textBuf, 14.0f, 8.0f, 0.40f, clrWhite, "SELECCION DE MODIFICADORES (MODS)", 0.20f);
+            drawTextWithShadow(textBuf, 14.0f, 8.0f, 0.40f, clrWhite, LOC(STR_MODS_TITLE), 0.20f);
             char bMult[16];
             std::snprintf(bMult, sizeof(bMult), "%.2fx", currentMult);
             Ui::pill(252.0f, 6.0f, 54.0f, 18.0f, 0.25f, Ui::rgba(30, 80, 150));
             drawCenteredText(textBuf, 279.0f, 14.0f, 0.34f, clrWhite, bMult, 0.30f);
 
-            drawTextWithShadow(textBuf, 14.0f, 36.0f, 0.32f, Ui::rgba(215, 210, 235), "REDUCCION DE DIFICULTAD", 0.20f);
+            drawTextWithShadow(textBuf, 14.0f, 36.0f, 0.32f, Ui::rgba(215, 210, 235), LOC(STR_MODS_DIFF_REDUCTION), 0.20f);
 
             bool nfOn = (settings.activeMods & MOD_NOFAIL) != 0;
             Ui::button(14.0f, 54.0f, 138.0f, 58.0f, 0.20f, nfOn ? Ui::rgba(22, 42, 60, 245) : Ui::rgba(22, 19, 36, 240), Ui::rgba(40, 215, 235), nfOn);
             Ui::pill(22.0f, 62.0f, 32.0f, 32.0f, 0.25f, Ui::rgba(40, 215, 235));
             drawCenteredText(textBuf, 38.0f, 78.0f, 0.40f, Ui::rgba(0, 0, 0, 240), "NF", 0.30f);
             drawTextWithShadow(textBuf, 60.0f, 60.0f, 0.38f, clrWhite, "No Fail", 0.25f);
-            drawTextWithShadow(textBuf, 60.0f, 74.0f, 0.30f, Ui::rgba(215, 210, 235), "-50% Puntos", 0.25f);
+            drawTextWithShadow(textBuf, 60.0f, 74.0f, 0.30f, Ui::rgba(215, 210, 235), ("-50% " + std::string(LOC(STR_POINTS))).c_str(), 0.25f);
             Ui::pill(60.0f, 88.0f, 48.0f, 16.0f, 0.26f, nfOn ? Ui::rgba(40, 215, 235) : Ui::rgba(45, 40, 60));
-            drawCenteredText(textBuf, 84.0f, 96.0f, 0.28f, nfOn ? Ui::rgba(0, 0, 0, 240) : clrMuted, nfOn ? "ACTIVO" : "OFF", 0.30f);
+            drawCenteredText(textBuf, 84.0f, 96.0f, 0.28f, nfOn ? Ui::rgba(0, 0, 0, 240) : clrMuted, nfOn ? LOC(STR_ON) : LOC(STR_OFF), 0.30f);
 
             bool ezOn = (settings.activeMods & MOD_EASY) != 0;
             Ui::button(168.0f, 54.0f, 138.0f, 58.0f, 0.20f, ezOn ? Ui::rgba(22, 48, 36, 245) : Ui::rgba(22, 19, 36, 240), Ui::rgba(80, 200, 110), ezOn);
             Ui::pill(176.0f, 62.0f, 32.0f, 32.0f, 0.25f, ezOn ? Ui::rgba(80, 200, 110) : Ui::rgba(45, 40, 60));
             drawCenteredText(textBuf, 192.0f, 78.0f, 0.40f, ezOn ? Ui::rgba(0, 0, 0, 240) : clrMuted, "EZ", 0.30f);
             drawTextWithShadow(textBuf, 214.0f, 60.0f, 0.38f, clrWhite, "Easy", 0.25f);
-            drawTextWithShadow(textBuf, 214.0f, 74.0f, 0.30f, Ui::rgba(215, 210, 235), "-50% Puntos", 0.25f);
+            drawTextWithShadow(textBuf, 214.0f, 74.0f, 0.30f, Ui::rgba(215, 210, 235), ("-50% " + std::string(LOC(STR_POINTS))).c_str(), 0.25f);
             Ui::pill(214.0f, 88.0f, 48.0f, 16.0f, 0.26f, ezOn ? Ui::rgba(80, 200, 110) : Ui::rgba(45, 40, 60));
-            drawCenteredText(textBuf, 238.0f, 96.0f, 0.28f, ezOn ? Ui::rgba(0, 0, 0, 240) : clrMuted, ezOn ? "ACTIVO" : "OFF", 0.30f);
+            drawCenteredText(textBuf, 238.0f, 96.0f, 0.28f, ezOn ? Ui::rgba(0, 0, 0, 240) : clrMuted, ezOn ? LOC(STR_ON) : LOC(STR_OFF), 0.30f);
 
-            drawTextWithShadow(textBuf, 14.0f, 118.0f, 0.32f, Ui::rgba(215, 210, 235), "AUMENTO DE DIFICULTAD", 0.20f);
+            drawTextWithShadow(textBuf, 14.0f, 118.0f, 0.32f, Ui::rgba(215, 210, 235), LOC(STR_MODS_DIFF_INCREASE), 0.20f);
 
             bool hdOn = (settings.activeMods & MOD_HIDDEN) != 0;
             Ui::button(14.0f, 132.0f, 138.0f, 58.0f, 0.20f, hdOn ? Ui::rgba(48, 40, 22, 245) : Ui::rgba(22, 19, 36, 240), Ui::rgba(255, 205, 50), hdOn);
             Ui::pill(22.0f, 140.0f, 32.0f, 32.0f, 0.25f, hdOn ? Ui::rgba(255, 205, 50) : Ui::rgba(45, 40, 60));
             drawCenteredText(textBuf, 38.0f, 156.0f, 0.40f, hdOn ? Ui::rgba(0, 0, 0, 240) : clrMuted, "HD", 0.30f);
             drawTextWithShadow(textBuf, 60.0f, 138.0f, 0.38f, clrWhite, "Hidden", 0.25f);
-            drawTextWithShadow(textBuf, 60.0f, 152.0f, 0.30f, Ui::rgba(215, 210, 235), "+6% Puntos", 0.25f);
+            drawTextWithShadow(textBuf, 60.0f, 152.0f, 0.30f, Ui::rgba(215, 210, 235), ("+6% " + std::string(LOC(STR_POINTS))).c_str(), 0.25f);
             Ui::pill(60.0f, 166.0f, 48.0f, 16.0f, 0.26f, hdOn ? Ui::rgba(255, 205, 50) : Ui::rgba(45, 40, 60));
-            drawCenteredText(textBuf, 84.0f, 174.0f, 0.28f, hdOn ? Ui::rgba(0, 0, 0, 240) : clrMuted, hdOn ? "ACTIVO" : "OFF", 0.30f);
+            drawCenteredText(textBuf, 84.0f, 174.0f, 0.28f, hdOn ? Ui::rgba(0, 0, 0, 240) : clrMuted, hdOn ? LOC(STR_ON) : LOC(STR_OFF), 0.30f);
 
             bool hrOn = (settings.activeMods & MOD_HARDROCK) != 0;
             Ui::button(168.0f, 132.0f, 138.0f, 58.0f, 0.20f, hrOn ? Ui::rgba(52, 24, 28, 245) : Ui::rgba(22, 19, 36, 240), Ui::rgba(240, 70, 70), hrOn);
             Ui::pill(176.0f, 140.0f, 32.0f, 32.0f, 0.25f, hrOn ? Ui::rgba(240, 70, 70) : Ui::rgba(45, 40, 60));
             drawCenteredText(textBuf, 192.0f, 156.0f, 0.40f, clrWhite, "HR", 0.30f);
             drawTextWithShadow(textBuf, 214.0f, 138.0f, 0.38f, clrWhite, "Hard Rock", 0.25f);
-            drawTextWithShadow(textBuf, 214.0f, 152.0f, 0.30f, Ui::rgba(215, 210, 235), "+6% Puntos", 0.25f);
+            drawTextWithShadow(textBuf, 214.0f, 152.0f, 0.30f, Ui::rgba(215, 210, 235), ("+6% " + std::string(LOC(STR_POINTS))).c_str(), 0.25f);
             Ui::pill(214.0f, 166.0f, 48.0f, 16.0f, 0.26f, hrOn ? Ui::rgba(240, 70, 70) : Ui::rgba(45, 40, 60));
-            drawCenteredText(textBuf, 238.0f, 174.0f, 0.28f, hrOn ? clrWhite : clrMuted, hrOn ? "ACTIVO" : "OFF", 0.30f);
+            drawCenteredText(textBuf, 238.0f, 174.0f, 0.28f, hrOn ? clrWhite : clrMuted, hrOn ? LOC(STR_ON) : LOC(STR_OFF), 0.30f);
 
             Ui::button(20.0f, 198.0f, 280.0f, 34.0f, 0.20f, Ui::rgba(42, 20, 52, 240), clrPrimary, true);
             Ui::pill(28.0f, 204.0f, 22.0f, 22.0f, 0.25f, clrPrimary);
             drawCenteredText(textBuf, 39.0f, 215.0f, 0.32f, clrWhite, "B", 0.28f);
-            drawCenteredTextWithShadow(textBuf, 160.0f, 215.0f, 0.42f, clrWhite, "VOLVER A LA SALA", 0.28f);
+            drawCenteredTextWithShadow(textBuf, 160.0f, 215.0f, 0.42f, clrWhite, LOC(STR_MULTI_BACK_TO_ROOM), 0.28f);
 
             Ui::drawTransition(320.0f, 240.0f, screenFade, clrPrimary);
             C3D_FrameEnd(0);
@@ -6227,7 +6234,7 @@ int main(int argc, char* argv[]) {
                 Ui::pill(12.0f + dTop, 10.0f, 52.0f, 18.0f, 0.25f, Ui::rgba(255, 102, 170));
                 drawCenteredText(textBuf, 38.0f + dTop, 18.0f, 0.36f, clrWhite, "osu!", 0.30f);
 
-                drawText(textBuf, 70.0f + dTop, 11.0f, 0.44f, Ui::rgba(40, 215, 235), "RESULTADOS MULTIJUGADOR", 0.30f);
+                drawText(textBuf, 70.0f + dTop, 11.0f, 0.44f, Ui::rgba(40, 215, 235), LOC(STR_MULTI_RESULTS_TITLE), 0.30f);
 
                 std::string rSongInfo = multiMgr.activeBeatmap.title + " [" + multiMgr.activeBeatmap.version + "]";
                 drawText(textBuf, 250.0f + dTop, 12.0f, 0.32f, clrMuted, truncateString(rSongInfo, 22).c_str(), 0.30f);
@@ -6258,12 +6265,12 @@ int main(int argc, char* argv[]) {
                     drawText(textBuf, cardX + 38.0f, cardY + 6.0f, 0.44f, clrWhite, item.player->name, 0.25f);
                     if (item.player->isFailed) {
                         Ui::pill(cardX + 105.0f, cardY + 7.0f, 32.0f, 13.0f, 0.26f, Ui::rgba(235, 45, 45));
-                        drawCenteredText(textBuf, cardX + 121.0f, cardY + 13.0f, 0.26f, clrWhite, "FALLO", 0.30f);
+                        drawCenteredText(textBuf, cardX + 121.0f, cardY + 13.0f, 0.26f, clrWhite, LOC(STR_MULTI_FAIL), 0.30f);
                     }
                     if (item.player->isLocal) {
                         float tuX = item.player->isFailed ? (cardX + 142.0f) : (cardX + 140.0f);
                         Ui::pill(tuX, cardY + 7.0f, 24.0f, 13.0f, 0.26f, Ui::rgba(40, 215, 235));
-                        drawCenteredText(textBuf, tuX + 12.0f, cardY + 13.0f, 0.26f, Ui::rgba(0, 0, 0, 240), "TU", 0.30f);
+                        drawCenteredText(textBuf, tuX + 12.0f, cardY + 13.0f, 0.26f, Ui::rgba(0, 0, 0, 240), LOC(STR_MULTI_YOU), 0.30f);
                     }
 
                     std::string mStr = (item.player->activeMods != MOD_NONE) ? ("+" + formatModsString(item.player->activeMods)) : "No Mod";
@@ -6291,12 +6298,12 @@ int main(int argc, char* argv[]) {
                     drawRectOutline(30.0f + dToast, 212.0f, 340.0f, 24.0f, 1.2f, Ui::rgba(255, 80, 100), 0.92f);
                     drawCenteredTextWithShadow(textBuf, 200.0f + dToast, 224.0f, 0.34f, Ui::rgba(255, 230, 230), multiMgr.toastNotice.c_str(), 0.95f);
                 } else if (!allFinished) {
-                    drawCenteredTextWithShadow(textBuf, 200.0f + dTop, 222.0f, 0.33f, Ui::rgba(255, 205, 50), "PARTIDA EN CURSO: Esperando a que todos terminen...", 0.32f);
+                    drawCenteredTextWithShadow(textBuf, 200.0f + dTop, 222.0f, 0.33f, Ui::rgba(255, 205, 50), LOC(STR_MULTI_WAITING_ALL), 0.32f);
                 } else {
                     float byY = 219.0f;
-                    drawKeyBadge(textBuf, 12.0f + dTop, byY, "A", multiMgr.isHost() ? "Volver al Lobby" : "Esperar", Ui::rgba(255, 75, 80));
-                    drawKeyBadge(textBuf, 160.0f + dTop, byY, "B", "Salir", Ui::rgba(255, 195, 45));
-                    drawKeyBadge(textBuf, 240.0f + dTop, byY, "X", "Pestanas", Ui::rgba(50, 165, 255));
+                    drawKeyBadge(textBuf, 12.0f + dTop, byY, "A", multiMgr.isHost() ? LOC(STR_MULTI_RETURN_LOBBY) : LOC(STR_MULTI_WAIT_HOST), Ui::rgba(255, 75, 80));
+                    drawKeyBadge(textBuf, 160.0f + dTop, byY, "B", LOC(STR_BACK), Ui::rgba(255, 195, 45));
+                    drawKeyBadge(textBuf, 240.0f + dTop, byY, "X", LOC(STR_MULTI_TABS), Ui::rgba(50, 165, 255));
                 }
 
                 Ui::drawTransition(400.0f, 240.0f, screenFade, clrPrimary);
@@ -6307,7 +6314,7 @@ int main(int argc, char* argv[]) {
 
             Ui::backdrop(320.0f, 240.0f, static_cast<float>(animTick), Ui::rgba(18, 14, 30), Ui::rgba(10, 8, 18), clrPrimary, 0.02f);
 
-            const char* resTabs[4] = { "Aciertos", "Hit Error", "1v1 vs #1", "Chat" };
+            const char* resTabs[4] = { LOC(STR_MULTI_TAB_HITS), "Hit Error", "1v1 vs #1", "Chat" };
             for (int t = 0; t < 4; ++t) {
                 float tx = 10.0f + t * 74.0f;
                 bool activeT = (multiResultsTab == t);
@@ -6345,7 +6352,7 @@ int main(int argc, char* argv[]) {
             drawCenteredText(textBuf, 234.0f + boxW * 0.5f, 68.0f, 0.48f, clrWhite, cmStr, 0.25f);
 
             Ui::panel(12.0f, 96.0f, 296.0f, 54.0f, 0.20f, Ui::rgba(22, 19, 36, 240));
-            drawText(textBuf, 20.0f, 102.0f, 0.30f, clrMuted, "Jugador Seleccionado:", 0.25f);
+            drawText(textBuf, 20.0f, 102.0f, 0.30f, clrMuted, LOC(STR_MULTI_SEL_PLAYER), 0.25f);
             drawText(textBuf, 20.0f, 116.0f, 0.42f, clrWhite, winner.name, 0.25f);
 
             char cmbLabel[32];
@@ -6354,32 +6361,32 @@ int main(int argc, char* argv[]) {
 
             char pRel[32];
             std::snprintf(pRel, sizeof(pRel), "%.2f%%", winner.accuracy);
-            drawText(textBuf, 20.0f, 134.0f, 0.30f, clrMuted, "Precision Relativa", 0.25f);
+            drawText(textBuf, 20.0f, 134.0f, 0.30f, clrMuted, LOC(STR_MULTI_REL_ACC), 0.25f);
             drawText(textBuf, 250.0f, 134.0f, 0.32f, Ui::rgba(40, 215, 235), pRel, 0.25f);
 
             Ui::statBar(12.0f, 154.0f, 296.0f, 6.0f, 0.20f, winner.accuracy / 100.0f, Ui::rgba(40, 215, 235));
 
             if (!multiMgr.mapQueue.empty()) {
                 char nextQMsg[64];
-                std::snprintf(nextQMsg, sizeof(nextQMsg), "Siguiente en cola: %s", multiMgr.mapQueue.front().title.c_str());
+                std::snprintf(nextQMsg, sizeof(nextQMsg), LOC(STR_MULTI_NEXT_IN_QUEUE), multiMgr.mapQueue.front().title.c_str());
                 drawCenteredText(textBuf, 160.0f, 172.0f, 0.34f, Ui::rgba(255, 205, 50), truncateString(nextQMsg, 36).c_str(), 0.25f);
             } else {
-                drawCenteredText(textBuf, 160.0f, 172.0f, 0.32f, clrMuted, "Fila completada . Regresando al lobby", 0.25f);
+                drawCenteredText(textBuf, 160.0f, 172.0f, 0.32f, clrMuted, LOC(STR_MULTI_QUEUE_DONE), 0.25f);
             }
 
             if (!allFinished) {
                 Ui::panel(12.0f, 188.0f, 296.0f, 44.0f, 0.20f, Ui::rgba(50, 35, 70, 240), Ui::rgba(130, 80, 200));
-                drawCenteredText(textBuf, 160.0f, 203.0f, 0.38f, Ui::rgba(255, 215, 60), "PARTIDA EN CURSO...", 0.25f);
-                drawCenteredText(textBuf, 160.0f, 219.0f, 0.28f, clrWhite, "Esperando a que todos terminen de jugar", 0.25f);
+                drawCenteredText(textBuf, 160.0f, 203.0f, 0.38f, Ui::rgba(255, 215, 60), LOC(STR_MULTI_WAITING_ALL), 0.25f);
+                drawCenteredText(textBuf, 160.0f, 219.0f, 0.28f, clrWhite, LOC(STR_MULTI_WAITING_ALL), 0.25f);
             } else if (multiMgr.isHost()) {
                 Ui::button(12.0f, 188.0f, 296.0f, 44.0f, 0.20f, Ui::rgba(30, 165, 80, 240), Ui::rgba(100, 255, 160), true);
                 Ui::pill(20.0f, 198.0f, 24.0f, 24.0f, 0.24f, Ui::rgba(100, 255, 160));
                 drawCenteredText(textBuf, 32.0f, 210.0f, 0.34f, Ui::rgba(0, 0, 0, 240), "A", 0.28f);
-                drawCenteredTextWithShadow(textBuf, 160.0f, 210.0f, 0.44f, clrWhite, "VOLVER AL LOBBY", 0.28f);
+                drawCenteredTextWithShadow(textBuf, 160.0f, 210.0f, 0.44f, clrWhite, LOC(STR_MULTI_RETURN_LOBBY), 0.28f);
             } else {
                 Ui::button(12.0f, 188.0f, 296.0f, 44.0f, 0.20f, Ui::rgba(28, 38, 62, 240), Ui::rgba(60, 140, 230), false);
-                drawCenteredTextWithShadow(textBuf, 160.0f, 203.0f, 0.38f, Ui::rgba(100, 200, 255), "PARTIDA FINALIZADA", 0.25f);
-                drawCenteredTextWithShadow(textBuf, 160.0f, 219.0f, 0.30f, clrWhite, "Esperando a que el anfitrion continue...", 0.25f);
+                drawCenteredTextWithShadow(textBuf, 160.0f, 203.0f, 0.38f, Ui::rgba(100, 200, 255), LOC(STR_MULTI_MATCH_FINISHED), 0.25f);
+                drawCenteredTextWithShadow(textBuf, 160.0f, 219.0f, 0.30f, clrWhite, LOC(STR_MULTI_WAIT_HOST), 0.25f);
             }
 
             Ui::drawTransition(320.0f, 240.0f, screenFade, clrPrimary);
@@ -6424,13 +6431,13 @@ int main(int argc, char* argv[]) {
                     C2D_SceneBegin(curTop);
                     Ui::backdrop(400.0f, 240.0f, static_cast<float>(animTick), Ui::rgba(18, 14, 30), Ui::rgba(10, 8, 18), clrPrimary, 0.01f);
                     Ui::panel(50.0f, 80.0f, 300.0f, 80.0f, 0.20f, Ui::rgba(22, 19, 36, 240), Ui::rgba(40, 215, 235));
-                    drawCenteredText(textBuf, 200.0f, 108.0f, 0.44f, clrWhite, "CARGANDO RECURSOS...", 0.25f);
-                    drawCenteredText(textBuf, 200.0f, 134.0f, 0.32f, clrMuted, "Preparando beatmap, audio y fondo", 0.25f);
+                    drawCenteredText(textBuf, 200.0f, 108.0f, 0.44f, clrWhite, LOC(STR_MULTI_LOADING_RESOURCES), 0.25f);
+                    drawCenteredText(textBuf, 200.0f, 134.0f, 0.32f, clrMuted, LOC(STR_MULTI_PREP_MAP), 0.25f);
                 }
                 C2D_TargetClear(bottomScreen, clrBgDark);
                 C2D_SceneBegin(bottomScreen);
                 Ui::backdrop(320.0f, 240.0f, static_cast<float>(animTick), Ui::rgba(18, 14, 30), Ui::rgba(10, 8, 18), clrPrimary, 0.01f);
-                drawCenteredText(textBuf, 160.0f, 120.0f, 0.36f, Ui::rgba(40, 215, 235), "Cargando mapa en memoria...", 0.25f);
+                drawCenteredText(textBuf, 160.0f, 120.0f, 0.36f, Ui::rgba(40, 215, 235), LOC(STR_MULTI_PREP_MAP), 0.25f);
                 C3D_FrameEnd(0);
 
                 std::string osuFileToLoad = findLocalMapFile(multiMgr.activeBeatmap.folderPath, multiMgr.activeBeatmap.osuFilename);
@@ -6607,10 +6614,10 @@ int main(int argc, char* argv[]) {
 
                 float dPan = depthShift(2.5f);
                 Ui::panel(40.0f + dPan, 35.0f, 320.0f, 150.0f, 0.20f, Ui::rgba(20, 16, 32, 240), Ui::rgba(40, 215, 235));
-                drawCenteredText(textBuf, 200.0f + dPan, 52.0f, 0.44f, Ui::rgba(40, 215, 235), "ESPERANDO A LAS DEMAS CONSOLAS...", 0.25f);
+                drawCenteredText(textBuf, 200.0f + dPan, 52.0f, 0.44f, Ui::rgba(40, 215, 235), LOC(STR_MULTI_WAIT_OTHER_CONSOLES), 0.25f);
 
                 char syncTxt[64];
-                std::snprintf(syncTxt, sizeof(syncTxt), "Consolas preparadas: %d / %d", multiMgr.getLoadedPlayerCount(), multiMgr.getActivePlayerCount());
+                std::snprintf(syncTxt, sizeof(syncTxt), "%s: %d / %d", LOC(STR_READY), multiMgr.getLoadedPlayerCount(), multiMgr.getActivePlayerCount());
                 drawCenteredText(textBuf, 200.0f + dPan, 72.0f, 0.34f, clrWhite, syncTxt, 0.25f);
 
                 // Ranuras de jugadores con su estado de carga
@@ -6620,12 +6627,12 @@ int main(int argc, char* argv[]) {
                         drawText(textBuf, 60.0f + dPan, py, 0.32f, clrWhite, multiMgr.players[s].name, 0.25f);
                         bool isL = (multiMgr.players[s].status == STATUS_LOADED);
                         Ui::pill(270.0f + dPan, py, 70.0f, 16.0f, 0.26f, isL ? Ui::rgba(30, 180, 80) : Ui::rgba(220, 140, 30));
-                        drawCenteredText(textBuf, 305.0f + dPan, py + 8.0f, 0.28f, clrWhite, isL ? "PREPARADO" : "CARGANDO...", 0.30f);
+                        drawCenteredText(textBuf, 305.0f + dPan, py + 8.0f, 0.28f, clrWhite, isL ? LOC(STR_READY) : LOC(STR_MULTI_LOADING_RESOURCES), 0.30f);
                     }
                 }
 
-                drawCenteredText(textBuf, 200.0f + dPan, 205.0f, 0.32f, clrMuted, "El mapa comenzara exactamente al mismo tiempo", 0.25f);
-                drawCenteredText(textBuf, 200.0f + dPan, 222.0f, 0.28f, Ui::rgba(255, 90, 90), "[B] Cancelar y volver a la sala", 0.25f);
+                drawCenteredText(textBuf, 200.0f + dPan, 205.0f, 0.32f, clrMuted, LOC(STR_MULTI_SAME_TIME), 0.25f);
+                drawCenteredText(textBuf, 200.0f + dPan, 222.0f, 0.28f, Ui::rgba(255, 90, 90), LOC(STR_MULTI_BACK_TO_ROOM), 0.25f);
             }
 
             C2D_TargetClear(bottomScreen, clrBgDark);
@@ -6635,7 +6642,7 @@ int main(int argc, char* argv[]) {
             drawCenteredText(textBuf, 160.0f, 65.0f, 0.44f, clrWhite, truncateString(multiMgr.activeBeatmap.title, 24).c_str(), 0.25f);
             drawCenteredText(textBuf, 160.0f, 85.0f, 0.34f, clrMuted, truncateString(multiMgr.activeBeatmap.artist, 26).c_str(), 0.25f);
             drawCenteredText(textBuf, 160.0f, 105.0f, 0.34f, Ui::rgba(255, 205, 50), truncateString(multiMgr.activeBeatmap.version, 24).c_str(), 0.25f);
-            drawCenteredText(textBuf, 160.0f, 145.0f, 0.38f, Ui::rgba(40, 215, 235), "Sincronizando reloj de juego...", 0.25f);
+            drawCenteredText(textBuf, 160.0f, 145.0f, 0.38f, Ui::rgba(40, 215, 235), LOC(STR_MULTI_SYNC_CLOCK), 0.25f);
             C3D_FrameEnd(0);
             continue;
         }
@@ -8200,7 +8207,7 @@ int main(int argc, char* argv[]) {
                         float cScale = 0.62f + spinnerClearAnim * 0.25f;
                         drawCenteredText(textBuf, playX(256.0f, dFrontHud), spY - 68.0f, cScale, clrCursor, "CLEAR!", 0.32f);
                     } else if (songTime >= obj.time) {
-                        drawCenteredText(textBuf, playX(256.0f, dFrontHud), spY - 66.0f, 0.48f, clrWhite, "GIRA!", 0.32f);
+                        drawCenteredText(textBuf, playX(256.0f, dFrontHud), spY - 66.0f, 0.48f, clrWhite, LOC(STR_GAME_SPIN), 0.32f);
                     }
 
                     if (lastSpinnerBonus > 0 && spinnerBonusAnim > 0.01f) {
@@ -8839,7 +8846,7 @@ int main(int argc, char* argv[]) {
                     float bcX = 200.0f + dFrontHud;
                     float bcY = 46.0f;
                     Ui::panel(bcX - 60.0f, bcY - 18.0f, 120.0f, 36.0f, 0.32f, Ui::rgba(20, 16, 34, 230), clrPrimary);
-                    drawCenteredText(textBuf, bcX, bcY - 8.0f, 0.35f, clrWhite, "DESCANSO", 0.35f);
+                    drawCenteredText(textBuf, bcX, bcY - 8.0f, 0.35f, clrWhite, LOC(STR_GAME_BREAK), 0.35f);
                     char cdStr[32];
                     float sLeft = std::max(0.0f, breakRemainingMs / 1000.0f);
                     std::snprintf(cdStr, sizeof(cdStr), "%.1f s", sLeft);
@@ -8852,7 +8859,7 @@ int main(int argc, char* argv[]) {
 
                     Ui::panel(bcX - 85.0f, bcY - 44.0f, 170.0f, 96.0f, 0.50f, Ui::rgba(20, 16, 34, 245), clrPrimary);
                     Ui::pill(bcX - 44.0f, bcY - 39.0f, 88.0f, 14.0f, 0.52f, Ui::rgba(255, 102, 171, 230));
-                    drawCenteredText(textBuf, bcX, bcY - 32.0f, 0.32f, clrWhite, "DESCANSO", 0.54f);
+                    drawCenteredText(textBuf, bcX, bcY - 32.0f, 0.32f, clrWhite, LOC(STR_GAME_BREAK), 0.54f);
 
                     // Letra grande de Accuracy Grade actual
                     int tJudged = count300 + count100 + count50 + countMiss;
@@ -8879,12 +8886,12 @@ int main(int argc, char* argv[]) {
 
                     char cdStr[48];
                     float sLeft = std::max(0.0f, breakRemainingMs / 1000.0f);
-                    std::snprintf(cdStr, sizeof(cdStr), "Circulos en: %.1f s", sLeft);
+                    std::snprintf(cdStr, sizeof(cdStr), LOC(STR_GAME_CIRCLES_IN), sLeft);
                     drawCenteredText(textBuf, bcX, bcY + 21.0f, 0.38f, clrWhite, cdStr, 0.54f);
 
-                    std::snprintf(cdStr, sizeof(cdStr), "Precision: %.1f%%  •  %dx", bAcc, combo);
+                    std::snprintf(cdStr, sizeof(cdStr), "%s: %.1f%%  •  %dx", LOC(STR_ACCURACY), bAcc, combo);
                     drawCenteredText(textBuf, bcX, bcY + 33.0f, 0.28f, clrMuted, cdStr, 0.54f);
-                    drawCenteredText(textBuf, bcX, bcY + 44.0f, 0.25f, clrCursor, "[Manten SELECT para Humo]", 0.54f);
+                    drawCenteredText(textBuf, bcX, bcY + 44.0f, 0.25f, clrCursor, LOC(STR_GAME_SMOKE), 0.54f);
 
                     // Indicador de advertencia visual (últimos 2.2 segundos antes de que vuelvan las notas)
                     if (breakRemainingMs <= 2200) {
@@ -8893,7 +8900,7 @@ int main(int argc, char* argv[]) {
 
                         // Pill superior parpadeante de ¡ATENTO!
                         Ui::pill(bcX - 45.0f, bcY - 64.0f, 90.0f, 16.0f, 0.56f, Ui::withAlpha(clrMiss, static_cast<u8>(180 + 75 * blink)));
-                        drawCenteredText(textBuf, bcX, bcY - 56.0f, 0.35f, clrWhite, "¡ATENTO!", 0.58f);
+                        drawCenteredText(textBuf, bcX, bcY - 56.0f, 0.35f, clrWhite, LOC(STR_GAME_WARNING), 0.58f);
 
                         // Anillos concéntricos convergiendo hacia el próximo círculo
                         float nx = playX(breakNextObjPos.x, dCircle);
@@ -8924,7 +8931,7 @@ int main(int argc, char* argv[]) {
                 Ui::panel(skipX, skipY, skipW, skipH, 0.94f, sBg, clrWhite);
                 drawCenteredText(textBuf, skipX + (skipW * 0.5f), skipY + (skipH * 0.35f), 0.46f, clrWhite, "SKIP >>", 0.96f);
                 drawCenteredText(textBuf, skipX + (skipW * 0.5f), skipY + (skipH * 0.74f), 0.26f, Ui::rgba(255, 235, 245),
-                                 drawFullHud ? "ZL / ZR / START" : "Toca o ZL / ZR", 0.96f);
+                                 drawFullHud ? "ZL / ZR / START" : LOC(STR_SKIP_HINT), 0.96f);
             }
 
             // Combo Burst (Aparición de personaje / mascota en hitos de combo: 30x, 60x, 100x, 150x...)
@@ -9174,7 +9181,7 @@ int main(int argc, char* argv[]) {
                 u32 sBg = Ui::lerpColor(Ui::rgba(255, 80, 140, 240), Ui::rgba(255, 120, 180, 250), skipPulse);
                 Ui::panel(212.0f, 196.0f, 100.0f, 34.0f, 0.85f, sBg, clrWhite);
                 drawCenteredText(textBuf, 262.0f, 208.0f, 0.44f, clrWhite, "SKIP >>", 0.90f);
-                drawCenteredText(textBuf, 262.0f, 222.0f, 0.25f, Ui::rgba(255, 230, 242), "Toca o ZL / ZR", 0.90f);
+                drawCenteredText(textBuf, 262.0f, 222.0f, 0.25f, Ui::rgba(255, 230, 242), LOC(STR_SKIP_HINT), 0.90f);
             }
             Ui::drawTransition(320.0f, 240.0f, screenFade, clrPrimary);
         }

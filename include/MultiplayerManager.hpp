@@ -15,6 +15,7 @@
 #include "Beatmap.hpp"
 #include "NetCommon.hpp"
 #include "OszExtractor.hpp"
+#include "Localization.hpp"
 
 // ============================================================================
 // CONSTANTES Y PUERTOS DE RED MULTIJUGADOR (UDS / LAN)
@@ -2251,7 +2252,7 @@ public:
                                     nodeDisconnectStartTick[s] = curTick;
                                 } else if (curTick - nodeDisconnectStartTick[s] > 1800) {
                                     char dcMsg[64];
-                                    std::snprintf(dcMsg, sizeof(dcMsg), "%s se ha desconectado.", players[s].name);
+                                    std::snprintf(dcMsg, sizeof(dcMsg), LOC(STR_TOAST_PLAYER_DC), players[s].name);
                                     setToastNotice(dcMsg, 3500);
                                     players[s].active = false;
                                     players[s].status = SLOT_EMPTY;
@@ -2277,7 +2278,7 @@ public:
                             nodeDisconnectStartTick[0] = curTick;
                         } else if (curTick - nodeDisconnectStartTick[0] > 700) {
                             // Host UDS desconectado o sala cerrada (confirmado tras 700 ms continuos)
-                            setToastNotice("La sala ha sido cerrada por el anfitrion.", 4000);
+                            setToastNotice(LOC(STR_TOAST_HOST_CLOSED), 4000);
                             stop();
                             return;
                         }
@@ -2348,7 +2349,7 @@ public:
 
             // Watchdog general para Clientes (si el host no envía ningún paquete durante 5 segundos)
             if (lastHostPacketTick != 0 && (curTick - lastHostPacketTick > 5000)) {
-                setToastNotice("Conexion perdida con el anfitrion.", 4000);
+                setToastNotice(LOC(STR_TOAST_LOST_CONN), 4000);
                 stop();
                 return;
             }
@@ -2438,7 +2439,7 @@ private:
 
         // --- PAQUETES DE CONTROL DE SALA ---
         if (hdr->type == PKT_ROOM_CLOSED) {
-            setToastNotice("El anfitrion ha cerrado la sala.", 4000);
+            setToastNotice(LOC(STR_TOAST_HOST_CLOSED), 4000);
             stop();
             return;
         }
@@ -2447,7 +2448,7 @@ private:
             int s = (netMode == NET_MODE_UDS && srcNodeId > 0) ? (srcNodeId - 1) : hdr->senderSlot;
             if (s > 0 && s < MULTI_MAX_PLAYERS && players[s].active) {
                 char lMsg[64];
-                std::snprintf(lMsg, sizeof(lMsg), "%s ha salido de la sala.", players[s].name);
+                std::snprintf(lMsg, sizeof(lMsg), LOC(STR_TOAST_PLAYER_LEFT), players[s].name);
                 setToastNotice(lMsg);
                 players[s].active = false;
                 players[s].status = SLOT_EMPTY;
@@ -2691,7 +2692,9 @@ private:
                 p.lastPacketTick = now;
 
                 if (!wasFailed && p.isFailed) {
-                    setToastNotice(std::string(p.name) + " ha fallado!", 2500);
+                    char failMsg[64];
+                    std::snprintf(failMsg, sizeof(failMsg), LOC(STR_TOAST_PLAYER_FAILED), p.name);
+                    setToastNotice(failMsg, 2500);
                 }
             }
             return;

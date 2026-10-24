@@ -118,8 +118,8 @@ main.o: C:/Users/Diyel/osu-3ds/source/main.cpp \
  C:/Users/Diyel/osu-3ds/include/SongManager.hpp \
  C:/Users/Diyel/osu-3ds/include/OszExtractor.hpp \
  C:/Users/Diyel/osu-3ds/include/ScoreManager.hpp \
- C:/Users/Diyel/osu-3ds/include/Settings.hpp \
  C:/Users/Diyel/osu-3ds/include/Localization.hpp \
+ C:/Users/Diyel/osu-3ds/include/Settings.hpp \
  C:/Users/Diyel/osu-3ds/include/SkinManager.hpp \
  C:/Users/Diyel/osu-3ds/include/WifiServer.hpp \
  C:/msys64/opt/devkitpro/libctru/include/arpa/inet.h \
@@ -253,8 +253,8 @@ C:/Users/Diyel/osu-3ds/include/stb_vorbis.h:
 C:/Users/Diyel/osu-3ds/include/SongManager.hpp:
 C:/Users/Diyel/osu-3ds/include/OszExtractor.hpp:
 C:/Users/Diyel/osu-3ds/include/ScoreManager.hpp:
-C:/Users/Diyel/osu-3ds/include/Settings.hpp:
 C:/Users/Diyel/osu-3ds/include/Localization.hpp:
+C:/Users/Diyel/osu-3ds/include/Settings.hpp:
 C:/Users/Diyel/osu-3ds/include/SkinManager.hpp:
 C:/Users/Diyel/osu-3ds/include/WifiServer.hpp:
 C:/msys64/opt/devkitpro/libctru/include/arpa/inet.h:

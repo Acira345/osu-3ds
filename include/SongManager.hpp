@@ -8,6 +8,7 @@
 #include "Beatmap.hpp"
 #include "OszExtractor.hpp"
 #include "ScoreManager.hpp"
+#include "Localization.hpp"
 
 enum SongSortMode {
     SORT_BY_TITLE = 0,
@@ -73,12 +74,43 @@ public:
     std::string searchQuery = "";
 
     static const char* getSortModeName(int mode) {
+        AppLanguage lang = Localization::getLanguage();
         switch (mode % 4) {
-            case SORT_BY_TITLE:  return "Titulo (A-Z)";
-            case SORT_BY_ARTIST: return "Artista (A-Z)";
-            case SORT_BY_STARS:  return "Estrellas (*)";
-            case SORT_BY_RECORD: return "Mejor PP";
-            default:             return "Titulo";
+            case SORT_BY_TITLE:
+                switch (lang) {
+                    case LANG_EN: return "Title (A-Z)";
+                    case LANG_RU: return "Название (А-Я)";
+                    case LANG_PL: return "Tytuł (A-Z)";
+                    default:      return "Titulo (A-Z)";
+                }
+            case SORT_BY_ARTIST:
+                switch (lang) {
+                    case LANG_EN: return "Artist (A-Z)";
+                    case LANG_RU: return "Артист (А-Я)";
+                    case LANG_PL: return "Artysta (A-Z)";
+                    default:      return "Artista (A-Z)";
+                }
+            case SORT_BY_STARS:
+                switch (lang) {
+                    case LANG_EN: return "Stars (*)";
+                    case LANG_RU: return "Сложность (*)";
+                    case LANG_PL: return "Trudność (*)";
+                    default:      return "Estrellas (*)";
+                }
+            case SORT_BY_RECORD:
+                switch (lang) {
+                    case LANG_EN: return "Best PP";
+                    case LANG_RU: return "Лучший PP";
+                    case LANG_PL: return "Najlepsze PP";
+                    default:      return "Mejor PP";
+                }
+            default:
+                switch (lang) {
+                    case LANG_EN: return "Title";
+                    case LANG_RU: return "Название";
+                    case LANG_PL: return "Tytuł";
+                    default:      return "Titulo";
+                }
         }
     }
 
