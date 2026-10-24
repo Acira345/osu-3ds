@@ -110,6 +110,7 @@ main.o: C:/Users/Diyel/osu-3ds/source/main.cpp \
  C:/msys64/opt/devkitpro/libctru/include/c2d/sprite.h \
  C:/msys64/opt/devkitpro/libctru/include/c2d/text.h \
  C:/msys64/opt/devkitpro/libctru/include/c2d/font.h \
+ C:/Users/Diyel/osu-3ds/source/app/AppContext.hpp \
  C:/Users/Diyel/osu-3ds/source/game/core/Beatmap.hpp \
  C:/Users/Diyel/osu-3ds/source/backend/audio/AudioPlayer.hpp \
  C:/Users/Diyel/osu-3ds/third_party/minimp3_ex.h \
@@ -139,7 +140,18 @@ main.o: C:/Users/Diyel/osu-3ds/source/main.cpp \
  C:/Users/Diyel/osu-3ds/source/game/effects/GameplayEffects.hpp \
  C:/Users/Diyel/osu-3ds/source/app/AppState.hpp \
  C:/Users/Diyel/osu-3ds/source/frontend/render/QrRenderer.hpp \
- C:/Users/Diyel/osu-3ds/source/frontend/render/Draw.hpp
+ C:/Users/Diyel/osu-3ds/source/frontend/render/Draw.hpp \
+ C:/Users/Diyel/osu-3ds/source/frontend/screens/MainMenuScreen.hpp \
+ C:/Users/Diyel/osu-3ds/source/frontend/screens/WifiTransferScreen.hpp \
+ C:/Users/Diyel/osu-3ds/source/frontend/screens/SettingsScreen.hpp \
+ C:/Users/Diyel/osu-3ds/source/frontend/screens/SongSelectScreen.hpp \
+ C:/Users/Diyel/osu-3ds/source/frontend/screens/ResultsScreen.hpp \
+ C:/Users/Diyel/osu-3ds/source/frontend/screens/MultiBrowserScreen.hpp \
+ C:/Users/Diyel/osu-3ds/source/frontend/screens/MultiLobbyScreen.hpp \
+ C:/Users/Diyel/osu-3ds/source/frontend/screens/ModsSelectScreen.hpp \
+ C:/Users/Diyel/osu-3ds/source/frontend/screens/MultiResultsScreen.hpp \
+ C:/Users/Diyel/osu-3ds/source/frontend/screens/MultiSyncScreen.hpp \
+ C:/Users/Diyel/osu-3ds/source/frontend/screens/GameplayScreen.hpp
 C:/msys64/opt/devkitpro/libctru/include/3ds.h:
 C:/msys64/opt/devkitpro/libctru/include/3ds/types.h:
 C:/msys64/opt/devkitpro/libctru/include/3ds/result.h:
@@ -251,6 +263,7 @@ C:/msys64/opt/devkitpro/libctru/include/c2d/spritesheet.h:
 C:/msys64/opt/devkitpro/libctru/include/c2d/sprite.h:
 C:/msys64/opt/devkitpro/libctru/include/c2d/text.h:
 C:/msys64/opt/devkitpro/libctru/include/c2d/font.h:
+C:/Users/Diyel/osu-3ds/source/app/AppContext.hpp:
 C:/Users/Diyel/osu-3ds/source/game/core/Beatmap.hpp:
 C:/Users/Diyel/osu-3ds/source/backend/audio/AudioPlayer.hpp:
 C:/Users/Diyel/osu-3ds/third_party/minimp3_ex.h:
@@ -281,3 +294,14 @@ C:/Users/Diyel/osu-3ds/source/game/effects/GameplayEffects.hpp:
 C:/Users/Diyel/osu-3ds/source/app/AppState.hpp:
 C:/Users/Diyel/osu-3ds/source/frontend/render/QrRenderer.hpp:
 C:/Users/Diyel/osu-3ds/source/frontend/render/Draw.hpp:
+C:/Users/Diyel/osu-3ds/source/frontend/screens/MainMenuScreen.hpp:
+C:/Users/Diyel/osu-3ds/source/frontend/screens/WifiTransferScreen.hpp:
+C:/Users/Diyel/osu-3ds/source/frontend/screens/SettingsScreen.hpp:
+C:/Users/Diyel/osu-3ds/source/frontend/screens/SongSelectScreen.hpp:
+C:/Users/Diyel/osu-3ds/source/frontend/screens/ResultsScreen.hpp:
+C:/Users/Diyel/osu-3ds/source/frontend/screens/MultiBrowserScreen.hpp:
+C:/Users/Diyel/osu-3ds/source/frontend/screens/MultiLobbyScreen.hpp:
+C:/Users/Diyel/osu-3ds/source/frontend/screens/ModsSelectScreen.hpp:
+C:/Users/Diyel/osu-3ds/source/frontend/screens/MultiResultsScreen.hpp:
+C:/Users/Diyel/osu-3ds/source/frontend/screens/MultiSyncScreen.hpp:
+C:/Users/Diyel/osu-3ds/source/frontend/screens/GameplayScreen.hpp:
