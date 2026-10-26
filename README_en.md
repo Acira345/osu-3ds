@@ -134,6 +134,7 @@ make -j4
 - **osu!** is the property of *ppy Pty Ltd* and Dean Herbert (peppy).
 - Homebrew libraries: *devkitPro*, *libctru*, *Citro2D*, *Citro3D*, *bannertool*, *makerom*.
 =======
+
 # osu! 3DS (v2.0)
 
 A custom port of the popular rhythm game **osu!** for the **Nintendo 3DS / 2DS** console familiy, designed to provide a digitizer - tablet-style gameplay experience with native compatibility for official beatmaps.

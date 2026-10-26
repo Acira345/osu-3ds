@@ -134,6 +134,7 @@ make -j4
 - **osu!** es propiedad de *ppy Pty Ltd* y Dean Herbert (peppy).
 - Librerías homebrew: *devkitPro*, *libctru*, *Citro2D*, *Citro3D*, *bannertool*, *makerom*.
 =======
+
 # osu! 3DS (v2.0)
 
 Port personalizado del popular juego de ritmo **osu!** para la familia de consolas **Nintendo 3DS / 2DS**, diseñado con experiencia de juego tipo tableta digitalizadora y compatibilidad nativa con beatmaps oficiales.
@@ -193,7 +194,7 @@ sdmc:/
 └── 3ds/
     └── osu/
         └── Songs/
-            └── NombreDeLaCancion/
+            └── SongName/
                 ├── audio.mp3
                 └── cancion.osu
-
+```

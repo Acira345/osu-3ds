@@ -131,6 +131,7 @@ make -j4
 - **osu!** ist Eigentum von *ppy Pty Ltd* und Dean Herbert (peppy).
 - Homebrew-Bibliotheken: *devkitPro*, *libctru*, *Citro2D*, *Citro3D*, *bannertool*, *makerom*.
 =======
+
 # osu! 3DS (v2.0)
 
 Ein benutzerdefinierter Port des beliebten Rhythmusspiels **osu!** für die **Nintendo 3DS / 2DS**-Konsolenfamilie, der ein Gameplay im Stil eines Grafiktabletts bietet und nativ mit offiziellen Beatmaps kompatibel ist.
