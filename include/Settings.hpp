@@ -90,13 +90,17 @@ struct GameSettings {
                 case LANG_EN: return "Map Only";
                 case LANG_RU: return "Только карта";
                 case LANG_PL: return "Tylko mapa";
-                default:      return "Solo Nivel";
+                case LANG_DE: return "Nur beatmap";
+                case LANG_ES: return "Solo Nivel";
+                default:      return "Map Only";
             }
         } else {
             switch (lang) {
                 case LANG_EN: return "Map + Background";
                 case LANG_RU: return "Карта + фон";
                 case LANG_PL: return "Mapa + tło";
+                case LANG_DE: return "Map + Hintergrund";                
+                case LANG_ES: return "Nivel + Fondo";
                 default:      return "Nivel + Fondo";
             }
         }
@@ -110,6 +114,7 @@ struct GameSettings {
                     case LANG_EN: return "Festive (Arcade)";
                     case LANG_RU: return "Праздничный (Аркада)";
                     case LANG_PL: return "Świąteczny (Arcade)";
+                    case LANG_DE: return "Festlich (Arcade)";                
                     default:      return "Festivo (Arcade)";
                 }
             case 1:
@@ -117,6 +122,7 @@ struct GameSettings {
                     case LANG_EN: return "Beatmap Image";
                     case LANG_RU: return "Изображение карты";
                     case LANG_PL: return "Obrazek mapy";
+                    case LANG_DE: return "Beatmap Bild";                
                     default:      return "Imagen Beatmap";
                 }
             case 2:
@@ -124,6 +130,7 @@ struct GameSettings {
                     case LANG_EN: return "Beatmap Video";
                     case LANG_RU: return "Видео карты";
                     case LANG_PL: return "Wideo mapy";
+                    case LANG_DE: return "Beatmap Video";                
                     default:      return "Video Beatmap";
                 }
             default:
@@ -131,6 +138,7 @@ struct GameSettings {
                     case LANG_EN: return "Festive";
                     case LANG_RU: return "Праздничный";
                     case LANG_PL: return "Świąteczny";
+                    case LANG_DE: return "Festlich";                
                     default:      return "Festivo";
                 }
         }
@@ -143,6 +151,7 @@ struct GameSettings {
                 case LANG_EN: return "None";
                 case LANG_RU: return "Нет";
                 case LANG_PL: return "Brak";
+                case LANG_DE: return "Keine";
                 default:      return "Ninguno";
             }
         }
@@ -164,6 +173,7 @@ struct GameSettings {
                 case LANG_EN: add("D-Left"); break;
                 case LANG_RU: add("D-Влево"); break;
                 case LANG_PL: add("D-Lewo"); break;
+                case LANG_DE: add("D-Links"); break;
                 default:      add("D-Izq"); break;
             }
         }
@@ -172,6 +182,7 @@ struct GameSettings {
                 case LANG_EN: add("D-Right"); break;
                 case LANG_RU: add("D-Вправо"); break;
                 case LANG_PL: add("D-Prawo"); break;
+                case LANG_DE: add("D-Rechts"); break;
                 default:      add("D-Der"); break;
             }
         }
@@ -180,6 +191,7 @@ struct GameSettings {
                 case LANG_EN: add("D-Up"); break;
                 case LANG_RU: add("D-Вверх"); break;
                 case LANG_PL: add("D-Góra"); break;
+                case LANG_DE: add("D-Oben"); break;
                 default:      add("D-Arr"); break;
             }
         }
@@ -188,6 +200,7 @@ struct GameSettings {
                 case LANG_EN: add("D-Down"); break;
                 case LANG_RU: add("D-Вниз"); break;
                 case LANG_PL: add("D-Dół"); break;
+                case LANG_DE: add("D-Unten"); break;
                 default:      add("D-Aba"); break;
             }
         }
@@ -316,6 +329,7 @@ struct GameSettings {
                 case LANG_EN: return "Direct Touch (Bottom Screen)";
                 case LANG_RU: return "Прямой ввод (Нижний экран)";
                 case LANG_PL: return "Dotyk bezpośredni (Dół)";
+                case LANG_DE: return "Directe Eingabe (Unterer Bildschirm)";
                 default:      return "Tactil Directo (Pantalla Inf.)";
             }
         }
@@ -324,6 +338,7 @@ struct GameSettings {
                 case LANG_EN: return "Tablet + Tap (Top Screen)";
                 case LANG_RU: return "Планшет + тап (Верхний)";
                 case LANG_PL: return "Tablet + Tap (Góra)";
+                case LANG_DE: return "Tablet + Tippen (Oberer Bildschirm)";
                 default:      return "Tablet + Tap (Pantalla Sup.)";
             }
         } else {
@@ -331,6 +346,7 @@ struct GameSettings {
                 case LANG_EN: return "PC Hybrid (Stylus aims only)";
                 case LANG_RU: return "Гибрид ПК (Стилус только цель)";
                 case LANG_PL: return "Hybryda PC (Stylus celuje)";
+                case LANG_DE: return "PC Hybrid (mit Stylus zielen)";
                 default:      return "Hibrido PC (Stylus solo apunta)";
             }
         }
@@ -343,6 +359,7 @@ struct GameSettings {
                 case LANG_EN: return "Touch Bottom";
                 case LANG_RU: return "Сенсор низ";
                 case LANG_PL: return "Dotyk dół";
+                case LANG_DE: return "Berührung unten";
                 default:      return "Tactil Abajo";
             }
         }
@@ -351,6 +368,7 @@ struct GameSettings {
                 case LANG_EN: return "Tablet+Tap";
                 case LANG_RU: return "Планшет+Тап";
                 case LANG_PL: return "Tablet+Tap";
+                case LANG_DE: return "Tablet+Tippen";
                 default:      return "Tablet+Tap";
             }
         } else {
@@ -358,6 +376,7 @@ struct GameSettings {
                 case LANG_EN: return "PC Hybrid";
                 case LANG_RU: return "ПК Гибрид";
                 case LANG_PL: return "Hybryda PC";
+                case LANG_DE: return "PC Hybrid";
                 default:      return "Hibrido PC";
             }
         }

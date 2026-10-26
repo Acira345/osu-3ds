@@ -1,3 +1,5 @@
+**Español** · [English](README_en.md) · [Polski](README_pl.md) · [Русский](README_ru.md) · [Deutsch](README_de.md)
+
 # osu!3DS 🌸
 
 **osu!3DS** es un port nativo y completo de **osu!** para la familia de consolas **Nintendo 3DS, 2DS, New 3DS y New 2DS**, programado desde cero en C++20 con `libctru`, `Citro2D` y `Citro3D`.
@@ -119,7 +121,7 @@ El proyecto utiliza **devkitARM** y **libctru**.
 
 ```bash
 # Clonar el repositorio
-git clone https://github.com/tu-usuario/osu-3ds.git
+git clone https://github.com/Acira345/osu-3ds.git
 cd osu-3ds
 
 # Compilar binarios (.3dsx, .elf, .cia)
