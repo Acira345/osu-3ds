@@ -218,7 +218,7 @@ void runMainMenuScreen(AppContext& ctx) {
         drawCenteredTextWithShadow(ctx.textBuf, 200.0f + dText, 164.0f, 0.42f,
                                    ctx.clrWhite, "Rhythm is just a click away!", 0.35f);
         drawCenteredTextWithShadow(ctx.textBuf, 200.0f + dText, 181.0f, 0.34f,
-                                   pinkAccent, ctx.mainMenuExpanded ? "Selecciona una opcion en la pantalla tactil" : "Toca la pantalla inferior para comenzar", 0.35f);
+                                   pinkAccent, ctx.mainMenuExpanded ? LOC(STR_MENU_PROMPT_EXPANDED) : LOC(STR_MENU_PROMPT_COLLAPSED), 0.35f);
 
         // 5. Barra inferior de canción en reproducción (♪ Title (Artist) | 180 BPM • ★ 2.97)
         float barY = 212.0f;
@@ -297,10 +297,10 @@ void runMainMenuScreen(AppContext& ctx) {
         u8 promptAlpha = static_cast<u8>((1.0f - tExp * 2.0f) * (195.0f + beat * 60.0f));
         drawCenteredTextWithShadow(ctx.textBuf, 160.0f, 188.0f, 0.40f,
                                    Ui::rgba(255, 255, 255, promptAlpha),
-                                   "TOCA EL CIRCULO PARA JUGAR", 0.35f);
+                                   LOC(STR_MENU_TAP_CIRCLE), 0.35f);
         drawCenteredText(ctx.textBuf, 160.0f, 222.0f, 0.30f,
                          Ui::rgba(145, 138, 175, static_cast<u8>((1.0f - tExp * 2.0f) * 180.0f)),
-                         "L / R: Cambiar cancion   •   START: Salir", 0.35f);
+                         LOC(STR_MENU_HINT_LR), 0.35f);
     }
 
     if (tExp > 0.05f) {
@@ -311,16 +311,16 @@ void runMainMenuScreen(AppContext& ctx) {
         float slant = -6.0f;
 
         const char* btnTitles[4] = {
-            "JUGAR",
-            "MULTIJUGADOR",
-            "DESCARGAS",
-            "AJUSTES"
+            LOC(STR_MENU_PLAY),
+            LOC(STR_MENU_MULTI),
+            LOC(STR_MENU_WIFI),
+            LOC(STR_MENU_SETTINGS)
         };
         const char* btnSubs[4] = {
-            "SOLO BEATMAPS",
-            "SALAS 1V1 Y 4P",
-            "PORTAL WI-FI 8080",
-            "TABLET Y AUDIO"
+            LOC(STR_MENU_SUB_PLAY),
+            LOC(STR_MENU_SUB_MULTI),
+            LOC(STR_MENU_SUB_WIFI),
+            LOC(STR_MENU_SUB_SETTINGS)
         };
         u32 btnColors[4] = {
             Ui::rgba(255, 102, 171), // #FF66AB Rosa osu!
@@ -339,7 +339,7 @@ void runMainMenuScreen(AppContext& ctx) {
         // 5to botón compacto inclinado: SALIR
         bool exitSel = (ctx.mainMenuOption == 4);
         Ui::slantButton(bx, 192.0f, bw, 32.0f, slant, Ui::rgba(255, 77, 109),
-                        "SALIR", "VOLVER A HOME (START)", ctx.textBuf, exitSel, 0.25f);
+                        LOC(STR_MENU_EXIT), LOC(STR_MENU_SUB_EXIT), ctx.textBuf, exitSel, 0.25f);
     }
 
     Ui::drawTransition(320.0f, 240.0f, ctx.screenFade, ctx.clrPrimary);

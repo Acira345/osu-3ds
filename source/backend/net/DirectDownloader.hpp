@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <functional>
 #include "OszExtractor.hpp"
+#include "../i18n/Localization.hpp"
 
 namespace DirectDownloader {
 
@@ -49,7 +50,7 @@ inline bool downloadBeatmapSet(u32 setId,
                                std::string& statusOut,
                                std::function<void(float ratio, size_t received, size_t total)> onProgress) {
     if (setId == 0) {
-        statusOut = "ID de Beatmap inválido";
+        statusOut = LOC(STR_DIRECT_INVALID_ID);
         return false;
     }
 
@@ -166,11 +167,11 @@ inline bool downloadBeatmapSet(u32 setId,
     int extracted = OszExtractor::extractAllPendingOsz("/osu/songs", "/osu/songs");
     if (extracted > 0) {
         char succBuf[64];
-        std::snprintf(succBuf, sizeof(succBuf), "✓ Cancion #%lu instalada con exito!", (unsigned long)setId);
+        std::snprintf(succBuf, sizeof(succBuf), LOC(STR_DIRECT_SUCCESS_FMT), (unsigned long)setId);
         statusOut = succBuf;
         return true;
     } else {
-        statusOut = "Descargado, pero fallo la descompresion";
+        statusOut = LOC(STR_DIRECT_EXTRACT_ERR);
         return false;
     }
 }

@@ -57,6 +57,7 @@ private:
 
     s16* audioBuffer[AUDIO_BUFFER_COUNT] = { nullptr, nullptr, nullptr };
     ndspWaveBuf waveBuf[AUDIO_BUFFER_COUNT];
+    bool preloadedBufReady[AUDIO_BUFFER_COUNT] = { false, false, false };
 
     u64 totalSamplesPlayed = 0;
     u64 seekOffsetSamples = 0;
@@ -674,7 +675,14 @@ private:
         musicStartTick = osGetTime();
         applyChannelGain(musicChannel, musicGain);
         for (size_t i = 0; i < AUDIO_BUFFER_COUNT; ++i) {
-            fillAndPlayBuffer(i);
+            if (preloadedBufReady[i] && waveBuf[i].nsamples > 0) {
+                preloadedBufReady[i] = false;
+                waveBuf[i].status = NDSP_WBUF_FREE;
+                ndspChnWaveBufAdd(musicChannel, &waveBuf[i]);
+            } else {
+                preloadedBufReady[i] = false;
+                fillAndPlayBuffer(i);
+            }
         }
     }
 
@@ -1097,6 +1105,7 @@ public:
             audioBuffer[i] = static_cast<s16*>(linearAlloc(bufferSize));
             waveBuf[i].data_vaddr = audioBuffer[i];
             waveBuf[i].status = NDSP_WBUF_DONE;
+            preloadedBufReady[i] = false;
         }
 
         isPlaying = true;
@@ -1106,6 +1115,29 @@ public:
         musicPlayheadOffsetMs = (startOffsetMs > 0 && leadInMs <= 0) ? static_cast<u64>(startOffsetMs) : 0;
 
         if (leadInMs > 0) {
+            // Pre-decodificar los buffers iniciales en RAM durante la pantalla de carga
+            // para evitar cualquier bajón de FPS cuando termine el lead-in e inicie la música.
+            for (size_t i = 0; i < AUDIO_BUFFER_COUNT; ++i) {
+                if (!eofReached && audioBuffer[i]) {
+                    size_t samplesToRead = AUDIO_BUFFER_FRAMES * musicChannels;
+                    size_t samplesRead = 0;
+                    if (usingVorbis && vorbisStream) {
+                        int frames = stb_vorbis_get_samples_short_interleaved(
+                            vorbisStream, musicChannels, audioBuffer[i], static_cast<int>(samplesToRead)
+                        );
+                        if (frames > 0) samplesRead = static_cast<size_t>(frames) * musicChannels;
+                    } else {
+                        samplesRead = mp3dec_ex_read(&mp3, audioBuffer[i], samplesToRead);
+                    }
+                    if (samplesRead > 0) {
+                        DSP_FlushDataCache(audioBuffer[i], samplesRead * sizeof(s16));
+                        waveBuf[i].nsamples = samplesRead / musicChannels;
+                        preloadedBufReady[i] = true;
+                    } else {
+                        eofReached = true;
+                    }
+                }
+            }
             inLeadIn = true;
             leadInDurationMs = leadInMs;
             leadInStartTick = osGetTime();

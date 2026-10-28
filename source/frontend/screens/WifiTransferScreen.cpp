@@ -1,4 +1,5 @@
 #include "WifiTransferScreen.hpp"
+#include "backend/i18n/Localization.hpp"
 
 void runWifiTransferScreen(AppContext& ctx) {
     ctx.wifiServer.update();
@@ -13,12 +14,12 @@ void runWifiTransferScreen(AppContext& ctx) {
     }
 
     bool exitWifi = (ctx.kDown & KEY_B) != 0;
-    if (ctx.touchJustDown && ctx.touch.px >= 166 && ctx.touch.px <= 306 && ctx.touch.py >= 180 && ctx.touch.py <= 228) {
+    if (ctx.touchJustDown && ctx.touch.px >= 166 && ctx.touch.px <= 310 && ctx.touch.py >= 184 && ctx.touch.py <= 234) {
         exitWifi = true;
     }
 
     bool triggerRescan = (ctx.kDown & KEY_X) != 0;
-    if (ctx.touchJustDown && ctx.touch.px >= 14 && ctx.touch.px <= 154 && ctx.touch.py >= 180 && ctx.touch.py <= 228) {
+    if (ctx.touchJustDown && ctx.touch.px >= 10 && ctx.touch.px <= 154 && ctx.touch.py >= 184 && ctx.touch.py <= 234) {
         triggerRescan = true;
     }
 
@@ -51,7 +52,9 @@ void runWifiTransferScreen(AppContext& ctx) {
 
     C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
 
-    // --- PANTALLA SUPERIOR: URL DEL SERVIDOR Y PROGRESO EN VIVO ---
+    // =========================================================================
+    // PANTALLA SUPERIOR (400x240): ESTADO DEL SERVIDOR, PASOS Y PROGRESO
+    // =========================================================================
     for (int eye = 0; eye < (ctx.stereoActive ? 2 : 1); ++eye) {
         C3D_RenderTarget* curTop = (eye == 0) ? ctx.topScreen : ctx.topScreenRight;
         float eyeSign = ctx.stereoActive ? ((eye == 0) ? 1.0f : -1.0f) : 0.0f;
@@ -60,98 +63,130 @@ void runWifiTransferScreen(AppContext& ctx) {
         C2D_TargetClear(curTop, ctx.clrBgDark);
         C2D_SceneBegin(curTop);
 
-        Ui::backdrop(400.0f, 240.0f, static_cast<float>(ctx.animTick), Ui::rgba(28, 18, 52), Ui::rgba(10, 8, 22), ctx.clr300, 0.02f);
+        Ui::backdrop(400.0f, 240.0f, static_cast<float>(ctx.animTick), Ui::rgba(15, 11, 26), Ui::rgba(8, 6, 16), ctx.clrPrimary, 0.01f);
 
-        Ui::gradV(0.0f, 0.0f, 400.0f, 32.0f, 0.3f, Ui::rgba(18, 15, 32, 245), Ui::rgba(18, 15, 32, 160));
-        C2D_DrawRectSolid(0.0f, 31.0f, 0.31f, 400.0f, 1.5f, ctx.clr300);
-        drawText(ctx.textBuf, 12.0f, 7.0f, 0.50f, ctx.clrWhite, LOC(STR_WIFI_HEADER));
+        // Cabecera superior estilo lazer
+        Ui::gradV(0.0f, 0.0f, 400.0f, 26.0f, 0.10f, Ui::rgba(27, 20, 45, 255), Ui::rgba(20, 15, 34, 255));
+        C2D_DrawRectSolid(0.0f, 25.0f, 0.15f, 400.0f, 1.0f, Ui::rgba(0, 229, 255));
 
-        Ui::panel(16.0f + dCard, 42.0f, 368.0f, 66.0f, 0.2f, Ui::rgba(26, 22, 42, 235), ctx.clrPrimary);
-        drawCenteredText(ctx.textBuf, 200.0f + dCard, 56.0f, 0.42f, ctx.clrWhite,
-            LOC(STR_WIFI_BROWSER_PROMPT));
-        drawCenteredText(ctx.textBuf, 200.0f + dCard, 84.0f, 0.72f, ctx.clrCursor,
-            ctx.wifiServer.serverUrl.empty() ? (ctx.wifiServer.isConnecting() ? LOC(STR_WIFI_IP_CONNECTING) : LOC(STR_WIFI_IP_NONE)) : ctx.wifiServer.serverUrl.c_str());
+        Ui::slantRectGrad(8.0f + dCard, 3.5f, 85.0f, 19.0f, -4.0f, 0.25f, Ui::rgba(255, 42, 133), Ui::rgba(215, 25, 105));
+        drawCenteredTextWithShadow(ctx.textBuf, 50.0f + dCard, 13.0f, 0.35f, ctx.clrWhite, "osu!3DS", 0.30f);
 
-        Ui::panel(16.0f + dCard * 0.6f, 114.0f, 368.0f, 42.0f, 0.2f, Ui::rgba(22, 19, 36, 220));
-        drawText(ctx.textBuf, 24.0f + dCard * 0.6f, 118.0f, 0.40f, ctx.clrWhite,
-            LOC(STR_WIFI_STEP1));
-        drawText(ctx.textBuf, 24.0f + dCard * 0.6f, 136.0f, 0.40f, ctx.clr100,
-            LOC(STR_WIFI_STEP2));
+        drawTextWithShadow(ctx.textBuf, 102.0f + dCard, 6.0f, 0.38f, ctx.clrWhite, LOC(STR_WIFI_PORTAL_TITLE), 0.30f);
 
-        // Barra de progreso de recepción en tiempo real
-        Ui::panel(16.0f + dCard, 162.0f, 368.0f, 42.0f, 0.2f, Ui::rgba(26, 22, 42, 235), ctx.clr300);
-        drawCenteredText(ctx.textBuf, 200.0f + dCard, 174.0f, 0.41f, ctx.clr300,
-            truncateString(ctx.wifiServer.statusText, 50).c_str());
+        bool hasIp = !ctx.wifiServer.serverUrl.empty();
+        Ui::pill(306.0f + dCard, 4.0f, 86.0f, 18.0f, 0.25f, hasIp ? Ui::rgba(16, 50, 35) : Ui::rgba(45, 34, 20));
+        drawRectOutline(306.0f + dCard, 4.0f, 86.0f, 18.0f, 1.0f, hasIp ? Ui::rgba(74, 222, 128) : Ui::rgba(255, 209, 102), 0.26f);
+        drawCenteredText(ctx.textBuf, 349.0f + dCard, 13.0f, 0.29f, hasIp ? Ui::rgba(74, 222, 128) : Ui::rgba(255, 209, 102),
+            hasIp ? LOC(STR_WIFI_ONLINE) : LOC(STR_WIFI_CONNECTING), 0.30f);
+
+        // Tarjeta 1: Dirección Web / URL Destacada
+        Ui::panel(10.0f + dCard, 32.0f, 380.0f, 62.0f, 0.20f, Ui::rgba(20, 34, 58, 255), Ui::rgba(0, 229, 255));
+        drawTextWithShadow(ctx.textBuf, 22.0f + dCard, 38.0f, 0.32f, Ui::rgba(0, 229, 255), LOC(STR_WIFI_BROWSER_PROMPT), 0.25f);
+
+        std::string ipDisplay = ctx.wifiServer.serverUrl.empty()
+            ? (ctx.wifiServer.isConnecting() ? LOC(STR_WIFI_IP_CONNECTING) : LOC(STR_WIFI_NO_CONN_HINT))
+            : ctx.wifiServer.serverUrl;
+        drawCenteredTextWithShadow(ctx.textBuf, 200.0f + dCard, 68.0f, 0.65f, Ui::rgba(255, 209, 102), ipDisplay.c_str(), 0.28f);
+
+        // Tarjeta 2: Pasos rápidos de uso
+        Ui::panel(10.0f + dCard, 100.0f, 380.0f, 44.0f, 0.20f, Ui::rgba(18, 22, 38, 240), Ui::rgba(45, 38, 65));
+        drawText(ctx.textBuf, 22.0f + dCard, 106.0f, 0.34f, ctx.clrWhite, LOC(STR_WIFI_STEP1), 0.25f);
+        drawText(ctx.textBuf, 22.0f + dCard, 122.0f, 0.34f, Ui::rgba(74, 222, 128), LOC(STR_WIFI_STEP2), 0.25f);
+
+        // Tarjeta 3: Barra de progreso y recepción en tiempo real
+        Ui::panel(10.0f + dCard, 150.0f, 380.0f, 56.0f, 0.20f, Ui::rgba(13, 17, 31, 255), Ui::rgba(0, 229, 255));
+        drawTextWithShadow(ctx.textBuf, 22.0f + dCard, 156.0f, 0.32f, Ui::rgba(148, 163, 184), LOC(STR_WIFI_STATUS_TRANSFER), 0.25f);
+        drawRightAlignedText(ctx.textBuf, 378.0f + dCard, 156.0f, 0.34f, Ui::rgba(74, 222, 128),
+            truncateString(ctx.wifiServer.statusText, 38).c_str(), 0.25f);
 
         float prog = ctx.wifiServer.getProgressRatio();
-        Ui::statBar(30.0f + dCard, 189.0f, 340.0f, 8.0f, 0.35f, prog, ctx.clr100);
+        Ui::statBar(22.0f + dCard, 178.0f, 356.0f, 10.0f, 0.35f, prog, Ui::rgba(0, 229, 255));
 
-        Ui::gradV(0.0f, 212.0f, 400.0f, 28.0f, 0.3f, Ui::rgba(18, 15, 32, 170), Ui::rgba(18, 15, 32, 250));
+        // Pie de pantalla superior
+        Ui::gradV(0.0f, 214.0f, 400.0f, 26.0f, 0.30f, Ui::rgba(14, 11, 26, 120), Ui::rgba(14, 11, 26, 250));
         char footerWifi[96];
-        std::snprintf(footerWifi, sizeof(footerWifi),
-            LOC(STR_WIFI_FOOTER_FMT),
+        std::snprintf(footerWifi, sizeof(footerWifi), LOC(STR_WIFI_FOOTER_FMT),
             ctx.wifiServer.uploadedCount, static_cast<int>(ctx.songMgr.sets.size()));
-        drawCenteredText(ctx.textBuf, 200.0f, 226.0f, 0.40f, ctx.clrWhite, footerWifi);
-        Ui::drawTransition(400.0f, 240.0f, ctx.screenFade, ctx.clr300);
+        drawCenteredTextWithShadow(ctx.textBuf, 200.0f, 222.0f, 0.36f, ctx.clrWhite, footerWifi);
+        drawRightAlignedText(ctx.textBuf, 392.0f, 222.0f, 0.28f, Ui::rgba(135, 130, 165), "400x240", 0.32f);
+
+        Ui::drawTransition(400.0f, 240.0f, ctx.screenFade, ctx.clrPrimary);
     }
 
-    // --- PANTALLA INFERIOR: CÓDIGO QR, SEÑAL Y BOTONES INTERACTIVOS ---
+    // =========================================================================
+    // PANTALLA INFERIOR TÁCTIL (320x240): QR NÍTIDO, SEÑAL Y BOTONES
+    // =========================================================================
     C2D_TargetClear(ctx.bottomScreen, ctx.clrTabletBg);
     C2D_SceneBegin(ctx.bottomScreen);
 
-    Ui::backdrop(320.0f, 240.0f, static_cast<float>(ctx.animTick), Ui::rgba(26, 20, 44), Ui::rgba(12, 10, 22), ctx.clr300, 0.02f);
+    Ui::backdrop(320.0f, 240.0f, static_cast<float>(ctx.animTick), Ui::rgba(15, 11, 26), Ui::rgba(8, 6, 16), ctx.clrPrimary, 0.02f);
 
-    // Cabecera superior
-    Ui::gradV(0.0f, 0.0f, 320.0f, 26.0f, 0.3f, Ui::rgba(18, 15, 32, 245), Ui::rgba(18, 15, 32, 160));
-    C2D_DrawRectSolid(0.0f, 25.0f, 0.31f, 320.0f, 1.5f, ctx.clr300);
-    drawCenteredText(ctx.textBuf, 160.0f, 5.0f, 0.44f, ctx.clrWhite, LOC(STR_WIFI_TITLE));
+    drawTextWithShadow(ctx.textBuf, 12.0f, 6.0f, 0.40f, Ui::rgba(0, 229, 255), LOC(STR_WIFI_TITLE), 0.20f);
+    drawRightAlignedText(ctx.textBuf, 308.0f, 6.0f, 0.28f, Ui::rgba(148, 163, 184), LOC(STR_WIFI_PORT_LABEL), 0.20f);
 
-    // Panel Izquierdo: Código QR nítido
-    if (!ctx.wifiServer.serverUrl.empty()) {
-        renderQrCode(ctx.wifiServer.serverUrl.c_str(), 14.0f, 32.0f, 138.0f);
+    // Panel Izquierdo: Código QR nítido o Estado de Descarga Activa
+    if (ctx.wifiServer.isReceiving()) {
+        Ui::panel(10.0f, 28.0f, 145.0f, 145.0f, 0.22f, Ui::rgba(18, 30, 52), Ui::rgba(0, 229, 255));
+        drawCenteredTextWithShadow(ctx.textBuf, 82.0f, 62.0f, 0.48f, Ui::rgba(0, 229, 255), LOC(STR_WIFI_RECEIVING), 0.28f);
+        drawCenteredText(ctx.textBuf, 82.0f, 90.0f, 0.34f, Ui::rgba(74, 222, 128), LOC(STR_WIFI_WRITING_SD), 0.28f);
+        char mbBuf[32];
+        float mbRecv = static_cast<float>(ctx.wifiServer.getBytesReceived()) / (1024.0f * 1024.0f);
+        float mbTot = static_cast<float>(ctx.wifiServer.getContentLength()) / (1024.0f * 1024.0f);
+        std::snprintf(mbBuf, sizeof(mbBuf), "%.1f / %.1f MB", mbRecv, mbTot);
+        drawCenteredText(ctx.textBuf, 82.0f, 120.0f, 0.34f, ctx.clrWhite, mbBuf, 0.28f);
+    } else if (!ctx.wifiServer.serverUrl.empty()) {
+        renderQrCode(ctx.wifiServer.serverUrl.c_str(), 10.0f, 28.0f, 145.0f);
     } else {
-        Ui::panel(14.0f, 32.0f, 138.0f, 138.0f, 0.22f, Ui::rgba(26, 22, 42, 235), ctx.clrPrimary);
+        Ui::panel(10.0f, 28.0f, 145.0f, 145.0f, 0.22f, Ui::rgba(20, 25, 45), Ui::rgba(0, 229, 255));
         if (ctx.wifiServer.isConnecting()) {
-            drawCenteredText(ctx.textBuf, 83.0f, 85.0f, 0.40f, ctx.clrCursor, LOC(STR_WIFI_CONNECTING));
-            drawCenteredText(ctx.textBuf, 83.0f, 105.0f, 0.40f, ctx.clrWhite, "Wi-Fi...");
+            drawCenteredTextWithShadow(ctx.textBuf, 82.0f, 90.0f, 0.38f, Ui::rgba(0, 229, 255), LOC(STR_WIFI_CONNECTING_TO), 0.25f);
+            drawCenteredText(ctx.textBuf, 82.0f, 110.0f, 0.36f, ctx.clrWhite, "Wi-Fi...", 0.25f);
         } else {
-            drawCenteredText(ctx.textBuf, 83.0f, 85.0f, 0.40f, ctx.clrCursor, LOC(STR_WIFI_SEARCHING));
-            drawCenteredText(ctx.textBuf, 83.0f, 105.0f, 0.40f, ctx.clrWhite, LOC(STR_WIFI_NETWORK));
+            drawCenteredTextWithShadow(ctx.textBuf, 82.0f, 90.0f, 0.38f, Ui::rgba(255, 209, 102), LOC(STR_WIFI_NO_CONNECTION), 0.25f);
+            drawCenteredText(ctx.textBuf, 82.0f, 110.0f, 0.34f, ctx.clrWhite, LOC(STR_WIFI_CHECK_ROUTER), 0.25f);
         }
     }
 
     // Panel Derecho: Monitor de señal Wi-Fi e instrucciones rápidas
-    Ui::panel(158.0f, 32.0f, 148.0f, 138.0f, 0.22f, Ui::rgba(24, 20, 40, 240), ctx.clr300);
+    Ui::panel(165.0f, 28.0f, 145.0f, 145.0f, 0.22f, Ui::rgba(18, 22, 38, 240), Ui::rgba(0, 229, 255));
     u8 wifiSig = osGetWifiStrength();
-    renderWifiBars(166.0f, 40.0f, wifiSig, ctx.clr100, Ui::rgba(70, 65, 90));
+    renderWifiBars(175.0f, 36.0f, wifiSig, Ui::rgba(74, 222, 128), Ui::rgba(70, 65, 90));
     const char* sigText = (wifiSig == 3) ? LOC(STR_WIFI_SIG_EXCELLENT) : ((wifiSig == 2) ? LOC(STR_WIFI_SIG_GOOD) : ((wifiSig == 1) ? LOC(STR_WIFI_SIG_WEAK) : LOC(STR_WIFI_SIG_NONE)));
-    drawText(ctx.textBuf, 188.0f, 39.0f, 0.36f, (wifiSig > 0) ? ctx.clr100 : ctx.clrMiss, sigText);
+    drawTextWithShadow(ctx.textBuf, 198.0f, 35.0f, 0.34f, (wifiSig > 0) ? Ui::rgba(74, 222, 128) : Ui::rgba(235, 45, 65), sigText, 0.25f);
 
-    drawText(ctx.textBuf, 166.0f, 58.0f, 0.44f, ctx.clrCursor, LOC(STR_WIFI_SCAN_MOBILE));
-    drawText(ctx.textBuf, 166.0f, 78.0f, 0.34f, ctx.clrWhite, LOC(STR_WIFI_AIM_CAM));
-    drawText(ctx.textBuf, 166.0f, 94.0f, 0.34f, ctx.clrWhite, LOC(STR_WIFI_OPEN_WEB));
-    drawText(ctx.textBuf, 166.0f, 110.0f, 0.34f, ctx.clrWhite, LOC(STR_WIFI_DL_AUDIO));
-    drawText(ctx.textBuf, 166.0f, 126.0f, 0.34f, ctx.clr100, LOC(STR_WIFI_STAR_FILTER));
+    drawTextWithShadow(ctx.textBuf, 175.0f, 56.0f, 0.38f, Ui::rgba(0, 229, 255), LOC(STR_WIFI_SCAN_MOBILE), 0.25f);
+    drawText(ctx.textBuf, 175.0f, 74.0f, 0.30f, ctx.clrWhite, LOC(STR_WIFI_AIM_CAM_BULLET), 0.25f);
+    drawText(ctx.textBuf, 175.0f, 90.0f, 0.30f, ctx.clrWhite, LOC(STR_WIFI_OPEN_LINK_BULLET), 0.25f);
+    drawText(ctx.textBuf, 175.0f, 106.0f, 0.30f, ctx.clrWhite, LOC(STR_WIFI_DOWNLOAD_BULLET), 0.25f);
 
     char countBuf[48];
-    std::snprintf(countBuf, sizeof(countBuf), "%s: %d", LOC(STR_SONGS), static_cast<int>(ctx.songMgr.sets.size()));
-    drawText(ctx.textBuf, 166.0f, 148.0f, 0.36f, ctx.clrWhite, countBuf);
+    std::snprintf(countBuf, sizeof(countBuf), LOC(STR_WIFI_TOTAL_SD_FMT), static_cast<int>(ctx.songMgr.sets.size()));
+    drawText(ctx.textBuf, 175.0f, 140.0f, 0.28f, Ui::rgba(255, 209, 102), countBuf, 0.25f);
 
+    // Botones de acción inferiores
     // Botón Izquierdo: Re-escanear canciones
-    Ui::button(14.0f, 178.0f, 140.0f, 48.0f, 0.25f, Ui::rgba(22, 38, 62, 240), Ui::rgba(40, 180, 240), false);
-    Ui::pill(22.0f, 184.0f, 26.0f, 16.0f, 0.28f, Ui::rgba(40, 180, 240));
-    drawCenteredText(ctx.textBuf, 35.0f, 192.0f, 0.30f, Ui::rgba(0, 0, 0, 240), "X", 0.32f);
-    drawTextWithShadow(ctx.textBuf, 54.0f, 184.0f, 0.38f, ctx.clrWhite, LOC(STR_WIFI_RESCAN_BTN), 0.30f);
-    drawTextWithShadow(ctx.textBuf, 22.0f, 206.0f, 0.30f, ctx.clr100, LOC(STR_WIFI_RESCAN_SUB), 0.30f);
+    Ui::button(10.0f, 184.0f, 145.0f, 48.0f, 0.25f, Ui::rgba(20, 34, 58), Ui::rgba(0, 229, 255), false);
+    Ui::pill(18.0f, 190.0f, 24.0f, 16.0f, 0.28f, Ui::rgba(0, 229, 255));
+    drawCenteredText(ctx.textBuf, 30.0f, 198.0f, 0.30f, Ui::rgba(0, 0, 0, 240), "X", 0.32f);
+    drawTextWithShadow(ctx.textBuf, 48.0f, 190.0f, 0.36f, ctx.clrWhite, LOC(STR_WIFI_RESCAN_BTN), 0.30f);
+    drawText(ctx.textBuf, 18.0f, 212.0f, 0.28f, Ui::rgba(74, 222, 128), LOC(STR_WIFI_EXTRACT_OSZ_SUB), 0.30f);
 
     // Botón Derecho: Volver al menú
-    Ui::button(166.0f, 178.0f, 140.0f, 48.0f, 0.25f, Ui::rgba(42, 20, 52, 240), ctx.clrPrimary, false);
-    Ui::pill(174.0f, 184.0f, 26.0f, 16.0f, 0.28f, ctx.clrPrimary);
-    drawCenteredText(ctx.textBuf, 187.0f, 192.0f, 0.30f, ctx.clrWhite, "B", 0.32f);
-    drawTextWithShadow(ctx.textBuf, 206.0f, 184.0f, 0.40f, ctx.clrWhite, LOC(STR_WIFI_BACK_BTN), 0.30f);
-    drawTextWithShadow(ctx.textBuf, 174.0f, 206.0f, 0.30f, Ui::rgba(255, 180, 215), LOC(STR_WIFI_SAVE_SUB), 0.30f);
+    Ui::button(165.0f, 184.0f, 145.0f, 48.0f, 0.25f, Ui::rgba(35, 18, 28), Ui::rgba(255, 42, 133), false);
+    Ui::pill(173.0f, 190.0f, 24.0f, 16.0f, 0.28f, Ui::rgba(255, 42, 133));
+    drawCenteredText(ctx.textBuf, 185.0f, 198.0f, 0.30f, ctx.clrWhite, "B", 0.32f);
+    drawTextWithShadow(ctx.textBuf, 203.0f, 190.0f, 0.38f, ctx.clrWhite, LOC(STR_WIFI_BACK_BTN), 0.30f);
+    drawText(ctx.textBuf, 173.0f, 212.0f, 0.28f, Ui::rgba(255, 180, 215), LOC(STR_WIFI_CLOSE_SERVER_SUB), 0.30f);
 
-    Ui::drawTransition(320.0f, 240.0f, ctx.screenFade, ctx.clr300);
+    if (ctx.isTouching) {
+        Ui::glow(ctx.touch.px, ctx.touch.py, 0.95f, 10.0f, Ui::withAlpha(Ui::rgba(0, 229, 255), 130), 3);
+        C2D_DrawCircleSolid(ctx.touch.px, ctx.touch.py, 0.96f, 4.0f, Ui::rgba(0, 229, 255));
+    }
+    Ui::drawTransition(320.0f, 240.0f, ctx.screenFade, Ui::rgba(0, 229, 255));
 
     C3D_FrameEnd(0);
+
+    // Ejecutar un ciclo de bombeo de red extra tras esperar el fotograma VSync
+    ctx.wifiServer.update();
 }

@@ -1,4 +1,6 @@
 #include "ModeCatch.hpp"
+#include "AppContext.hpp"
+#include "backend/i18n/Localization.hpp"
 
 void ModeCatch::drawCenteredText(C2D_TextBuf buf, float cx, float cy, float scale, u32 color, const char* str, float z) {
     C2D_Text text;
@@ -10,7 +12,7 @@ void ModeCatch::drawCenteredText(C2D_TextBuf buf, float cx, float cy, float scal
 }
 
 // Renderizado en Pantalla Superior (400x240) con soporte Estereoscópico 3D
-void ModeCatch::renderTopScreen(C2D_TextBuf textBuf, int songTime, float speedRate, float eyeSign, float slider3DVal, bool inKiai) {
+void ModeCatch::renderTopScreen(C2D_TextBuf textBuf, int songTime, float speedRate, float eyeSign, float slider3DVal, bool inKiai, const AppContext* pCtx) {
     auto depthShift = [&](float px) { return eyeSign * slider3DVal * px; };
     float dPlayfield = depthShift(-1.0f);
     float dCatcher   = depthShift(3.2f);
@@ -90,7 +92,7 @@ void ModeCatch::renderTopScreen(C2D_TextBuf textBuf, int songTime, float speedRa
                 C2D_DrawTriangle(destX - 4.5f, PLATE_Y - 8.0f, guideLaser, destX + 4.5f, PLATE_Y - 8.0f, guideLaser, destX, PLATE_Y - 1.5f, guideLaser, 0.25f);
             }
 
-            renderFruit(fruitX, fruitY, f.type, f.isHyper, 0.45f);
+            renderFruit(fruitX, fruitY, f.type, f.isHyper, 0.45f, pCtx);
         }
     }
 
@@ -118,12 +120,16 @@ void ModeCatch::renderTopScreen(C2D_TextBuf textBuf, int songTime, float speedRa
         C2D_DrawCircleSolid(screenCatcherX, currentPlateY + 12.0f, 0.30f, halfW * 1.18f, dashAura);
     }
 
-    // Plato metálico plateado con asas y rebote elástico
-    u32 plateTop = Ui::rgba(240, 242, 255);
-    u32 plateBot = Ui::rgba(130, 135, 160);
-    Ui::gradV(screenCatcherX - halfW, currentPlateY - 2.0f, plateW, 5.0f, 0.50f, plateTop, plateBot);
-    Ui::pill(screenCatcherX - halfW - 2.0f, currentPlateY - 3.0f, 4.0f, 7.0f, 0.52f, Ui::rgba(200, 205, 230));
-    Ui::pill(screenCatcherX + halfW - 2.0f, currentPlateY - 3.0f, 4.0f, 7.0f, 0.52f, Ui::rgba(200, 205, 230));
+    // Plato metálico plateado con asas y rebote elástico (o sprite del skin)
+    if (pCtx && pCtx->texCatchPlate.loaded) {
+        pCtx->texCatchPlate.drawCentered(screenCatcherX, currentPlateY, plateW, 10.0f, 0.50f);
+    } else {
+        u32 plateTop = Ui::rgba(240, 242, 255);
+        u32 plateBot = Ui::rgba(130, 135, 160);
+        Ui::gradV(screenCatcherX - halfW, currentPlateY - 2.0f, plateW, 5.0f, 0.50f, plateTop, plateBot);
+        Ui::pill(screenCatcherX - halfW - 2.0f, currentPlateY - 3.0f, 4.0f, 7.0f, 0.52f, Ui::rgba(200, 205, 230));
+        Ui::pill(screenCatcherX + halfW - 2.0f, currentPlateY - 3.0f, 4.0f, 7.0f, 0.52f, Ui::rgba(200, 205, 230));
+    }
 
     // Partículas de salpicadura de jugo (Juice Splashes proyectadas hacia el jugador)
     float dSplash = depthShift(4.2f);
@@ -149,15 +155,19 @@ void ModeCatch::renderTopScreen(C2D_TextBuf textBuf, int songTime, float speedRa
         }
     }
 
-    // Personaje Catcher Chibi debajo del plato
-    renderCatcherChibi(screenCatcherX, currentPlateY + 3.0f, facingDir, isDashing || isHyperDashing, 0.48f);
+    // Personaje Catcher Chibi debajo del plato (o sprite del skin)
+    if (pCtx && pCtx->texCatchCatcher.loaded) {
+        pCtx->texCatchCatcher.drawCentered(screenCatcherX, currentPlateY + 16.0f, 38.0f, 42.0f, 0.48f);
+    } else {
+        renderCatcherChibi(screenCatcherX, currentPlateY + 3.0f, facingDir, isDashing || isHyperDashing, 0.48f);
+    }
 }
 
 // Renderizado en Pantalla Inferior (320x240): Deck de Control Táctil y Radar
-void ModeCatch::renderBottomDeck(C2D_TextBuf textBuf, float animTick, int songTime) {
+void ModeCatch::renderBottomDeck(C2D_TextBuf textBuf, float animTick, int songTime, const AppContext* pCtx) {
     // 1. Radar de frutas que se aproximan en la parte superior
     Ui::panel(8.0f, 10.0f, 304.0f, 85.0f, 0.15f, Ui::rgba(20, 16, 32, 230), Ui::rgba(75, 60, 110));
-    drawCenteredText(textBuf, 160.0f, 18.0f, 0.28f, Ui::rgba(180, 170, 215), "RADAR DE FRUTAS // CATCH DECK", 0.25f);
+    drawCenteredText(textBuf, 160.0f, 18.0f, 0.28f, Ui::rgba(180, 170, 215), LOC(STR_CATCH_RADAR_DECK), 0.25f);
 
     // Representación de frutas en el radar
     float radarX = 14.0f;
@@ -182,7 +192,7 @@ void ModeCatch::renderBottomDeck(C2D_TextBuf textBuf, float animTick, int songTi
     // 2. Barra táctil de posicionamiento directo (Stylus Touch Slider)
     float barY = 105.0f;
     Ui::panel(8.0f, barY, 304.0f, 36.0f, 0.20f, Ui::rgba(26, 22, 42, 230), Ui::rgba(95, 75, 140));
-    drawCenteredText(textBuf, 160.0f, barY + 9.0f, 0.30f, Ui::rgba(200, 190, 230), "TOCA O DESLIZA EL LAPIZ DIRECTAMENTE", 0.32f);
+    drawCenteredText(textBuf, 160.0f, barY + 9.0f, 0.30f, Ui::rgba(200, 190, 230), LOC(STR_CATCH_TOUCH_OR_DRAG), 0.32f);
 
     // Cursor del Catcher en la barra táctil
     float touchBarX = 14.0f + (catcherX / 512.0f) * 292.0f;
@@ -192,29 +202,52 @@ void ModeCatch::renderBottomDeck(C2D_TextBuf textBuf, float animTick, int songTi
     // 3. Botones táctiles inferiores: [ < IZQ ], [ DER > ] y [ DASH / ACELERAR ]
     // Botón Izquierda
     Ui::panel(10.0f, 150.0f, 80.0f, 38.0f, 0.25f, Ui::rgba(32, 26, 52, 230), Ui::rgba(95, 80, 140));
-    drawCenteredText(textBuf, 50.0f, 162.0f, 0.46f, CLR_WHITE, "< IZQ", 0.35f);
+    drawCenteredText(textBuf, 50.0f, 162.0f, 0.46f, CLR_WHITE, LOC(STR_CATCH_LEFT_ARROW), 0.35f);
     drawCenteredText(textBuf, 50.0f, 178.0f, 0.22f, Ui::rgba(180, 170, 200), "D-PAD < / Y", 0.35f);
 
     // Botón Derecha
     Ui::panel(98.0f, 150.0f, 80.0f, 38.0f, 0.25f, Ui::rgba(32, 26, 52, 230), Ui::rgba(95, 80, 140));
-    drawCenteredText(textBuf, 138.0f, 162.0f, 0.46f, CLR_WHITE, "DER >", 0.35f);
+    drawCenteredText(textBuf, 138.0f, 162.0f, 0.46f, CLR_WHITE, LOC(STR_CATCH_RIGHT_ARROW), 0.35f);
     drawCenteredText(textBuf, 138.0f, 178.0f, 0.22f, Ui::rgba(180, 170, 200), "D-PAD > / A", 0.35f);
 
     // Botón DASH
     u32 dashBg = isDashing ? Ui::rgba(50, 160, 240, 240) : Ui::rgba(35, 75, 130, 230);
     Ui::panel(186.0f, 150.0f, 124.0f, 38.0f, 0.25f, dashBg, CLR_WHITE);
     drawCenteredText(textBuf, 248.0f, 162.0f, 0.44f, CLR_WHITE, "DASH >>", 0.35f);
-    drawCenteredText(textBuf, 248.0f, 178.0f, 0.22f, Ui::rgba(210, 235, 255), "SOSTENER L / R / B", 0.35f);
+    drawCenteredText(textBuf, 248.0f, 178.0f, 0.22f, Ui::rgba(210, 235, 255), LOC(STR_CATCH_HOLD_DASH), 0.35f);
 }
 
 // Renderizado detallado de cada fruta con sombras y brillos
-void ModeCatch::renderFruit(float x, float y, CatchFruitType type, bool isHyper, float z) {
+void ModeCatch::renderFruit(float x, float y, CatchFruitType type, bool isHyper, float z, const AppContext* pCtx) {
     // Aura radiante de Hyperfruit pulsante
     if (isHyper) {
         float pulse = 0.5f + 0.5f * std::sin((x + y) * 0.14f);
         C2D_DrawCircleSolid(x, y, z - 0.05f, 18.0f + 4.0f * pulse, Ui::rgba(255, 30, 45, 130));
         C2D_DrawCircleSolid(x, y, z - 0.03f, 14.0f + 2.0f * pulse, Ui::rgba(255, 70, 75, 190));
         C2D_DrawCircleSolid(x, y, z - 0.01f, 10.5f, Ui::rgba(255, 230, 230, 220));
+    }
+
+    if (pCtx) {
+        if (type == FRUIT_APPLE && pCtx->texCatchFruitApple.loaded) {
+            pCtx->texCatchFruitApple.drawCenteredSprite(x, y, 22.0f, z, CLR_WHITE, 0.0f);
+            return;
+        } else if (type == FRUIT_ORANGE && pCtx->texCatchFruitOrange.loaded) {
+            pCtx->texCatchFruitOrange.drawCenteredSprite(x, y, 22.0f, z, CLR_WHITE, 0.0f);
+            return;
+        } else if (type == FRUIT_GRAPE && pCtx->texCatchFruitGrape.loaded) {
+            pCtx->texCatchFruitGrape.drawCenteredSprite(x, y, 22.0f, z, CLR_WHITE, 0.0f);
+            return;
+        } else if (type == FRUIT_STRAWBERRY && pCtx->texCatchFruitStrawberry.loaded) {
+            pCtx->texCatchFruitStrawberry.drawCenteredSprite(x, y, 22.0f, z, CLR_WHITE, 0.0f);
+            return;
+        } else if (type == FRUIT_BANANA && pCtx->texCatchFruitBanana.loaded) {
+            pCtx->texCatchFruitBanana.drawCenteredSprite(x, y, 24.0f, z, CLR_WHITE, 0.0f);
+            return;
+        } else if ((type == FRUIT_DROPLET || type == FRUIT_TINY_DROPLET) && pCtx->texCatchFruitDrop.loaded) {
+            float dropSize = (type == FRUIT_DROPLET) ? 14.0f : 8.5f;
+            pCtx->texCatchFruitDrop.drawCenteredSprite(x, y, dropSize, z, CLR_WHITE, 0.0f);
+            return;
+        }
     }
 
     if (type == FRUIT_APPLE) {

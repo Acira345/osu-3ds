@@ -10,6 +10,8 @@
 #include "AudioPlayer.hpp"
 #include "UiKit.hpp"
 
+struct AppContext;
+
 struct ManiaNote {
     int column = 0;          // Columna 0 .. 3 (4K)
     int time = 0;            // Tiempo de inicio en ms
@@ -93,6 +95,6 @@ public:
     int handleTouch(float px, float py, bool isDown);
 
     // Renderizado visual (ManiaRenderer.cpp)
-    void renderTopScreen(C2D_TextBuf textBuf, int songTime, float speedRate, float eyeSign, float slider3DVal, bool inKiai, float bpmPulse);
-    void renderBottomLanes(C2D_TextBuf textBuf, float animTick);
+    void renderTopScreen(C2D_TextBuf textBuf, int songTime, float speedRate, float eyeSign, float slider3DVal, bool inKiai, float bpmPulse, const struct AppContext* pCtx = nullptr);
+    void renderBottomLanes(C2D_TextBuf textBuf, float animTick, const struct AppContext* pCtx = nullptr);
 };

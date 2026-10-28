@@ -491,6 +491,8 @@ private:
     udsBindContext udsBindCtx;
     udsNetworkStruct activeUdsNetwork;
     u16 localNodeId = 0;
+    bool udsClientConnected = false;
+    uint32_t udsConnectStartTick = 0;
     uint32_t lastUdsScanTick = 0;
 
     // Hilo en segundo plano para escaneo no bloqueante de Beacons UDS (60 FPS y audio fluidos)
@@ -971,6 +973,9 @@ public:
 
         inMultiplayer = false;
         isHosting = false;
+        udsClientConnected = false;
+        udsConnectStartTick = 0;
+        localNodeId = 0;
         matchStarted = false;
         matchInProgressFlag = false;
         matchFinished = false;
@@ -1208,15 +1213,23 @@ public:
                 return false;
             }
 
+            udsClientConnected = false;
+            udsConnectStartTick = osGetTime();
+            localNodeId = 0;
+            nodeDisconnectStartTick[0] = 0;
+
             udsConnectionStatus constatus;
             if (R_SUCCEEDED(udsGetConnectionStatus(&constatus))) {
-                localNodeId = constatus.cur_NetworkNodeID;
-                if (localNodeId >= 2 && localNodeId <= MULTI_MAX_PLAYERS) {
-                    localSlot = localNodeId - 1;
+                if (constatus.cur_NetworkNodeID >= 2 && (constatus.node_bitmask & 0x1)) {
+                    udsClientConnected = true;
+                    localNodeId = constatus.cur_NetworkNodeID;
+                    if (localNodeId <= MULTI_MAX_PLAYERS) {
+                        localSlot = localNodeId - 1;
+                    }
+                    sendPlayerUpdate();
                 }
             }
 
-            sendPlayerUpdate();
             return true;
         }
 
@@ -2218,24 +2231,21 @@ public:
 
         // 1. Procesamiento de paquetes UDS (Modo Inalámbrico 3DS)
         if (netMode == NET_MODE_UDS && udsInitialized) {
-            // Comprobar si hay paquetes disponibles mediante el evento del bind antes de llamar a IPC
-            if (udsWaitDataAvailable(&udsBindCtx, false, false)) {
-                uint8_t recvBuf[2048];
-                size_t actualSize = 0;
-                u16 srcNodeId = 0;
+            uint8_t recvBuf[2048];
+            size_t actualSize = 0;
+            u16 srcNodeId = 0;
 
-                while (true) {
-                    actualSize = 0;
-                    srcNodeId = 0;
-                    Result res = udsPullPacket(&udsBindCtx, recvBuf, sizeof(recvBuf), &actualSize, &srcNodeId);
-                    if (R_FAILED(res) || actualSize == 0) break;
-                    if (actualSize < sizeof(NetHeader)) continue;
+            while (true) {
+                actualSize = 0;
+                srcNodeId = 0;
+                Result res = udsPullPacket(&udsBindCtx, recvBuf, sizeof(recvBuf), &actualSize, &srcNodeId);
+                if (R_FAILED(res) || actualSize == 0) break;
+                if (actualSize < sizeof(NetHeader)) continue;
 
-                    const NetHeader* hdr = reinterpret_cast<const NetHeader*>(recvBuf);
-                    if (hdr->magic != MULTI_MAGIC_UDP) continue;
+                const NetHeader* hdr = reinterpret_cast<const NetHeader*>(recvBuf);
+                if (hdr->magic != MULTI_MAGIC_UDP) continue;
 
-                    handlePacket(hdr, recvBuf, actualSize, srcNodeId, 0, 0);
-                }
+                handlePacket(hdr, recvBuf, actualSize, srcNodeId, 0, 0);
             }
 
             // Monitoreo continuo del hardware UDS (se comprueba en cada frame sin depender de eventos aislados)
@@ -2250,7 +2260,7 @@ public:
                             if (!(constatus.node_bitmask & nodeMask)) {
                                 if (nodeDisconnectStartTick[s] == 0) {
                                     nodeDisconnectStartTick[s] = curTick;
-                                } else if (curTick - nodeDisconnectStartTick[s] > 1800) {
+                                } else if (curTick - nodeDisconnectStartTick[s] > 2500) {
                                     char dcMsg[64];
                                     std::snprintf(dcMsg, sizeof(dcMsg), LOC(STR_TOAST_PLAYER_DC), players[s].name);
                                     setToastNotice(dcMsg, 3500);
@@ -2272,18 +2282,51 @@ public:
                         broadcastLobbyState();
                     }
                 } else {
-                    // Cliente UDS: Comprobar si la consola fue desconectada o el host cerró la sala
-                    if (constatus.cur_NetworkNodeID == 0 || !(constatus.node_bitmask & 0x1)) {
-                        if (nodeDisconnectStartTick[0] == 0) {
-                            nodeDisconnectStartTick[0] = curTick;
-                        } else if (curTick - nodeDisconnectStartTick[0] > 700) {
-                            // Host UDS desconectado o sala cerrada (confirmado tras 700 ms continuos)
-                            setToastNotice(LOC(STR_TOAST_HOST_CLOSED), 4000);
+                    // Cliente UDS:
+                    if (!udsClientConnected) {
+                        // Fase 1: El hardware 3DS está asociando y negociando la conexión con la sala
+                        if (constatus.cur_NetworkNodeID >= 2 && (constatus.node_bitmask & 0x1)) {
+                            udsClientConnected = true;
+                            localNodeId = constatus.cur_NetworkNodeID;
+                            if (localNodeId <= MULTI_MAX_PLAYERS) {
+                                localSlot = localNodeId - 1;
+                            }
+                            if (localSlot >= 0 && localSlot < MULTI_MAX_PLAYERS) {
+                                players[localSlot].active = true;
+                                players[localSlot].isLocal = true;
+                                players[localSlot].isHost = false;
+                                std::strncpy(players[localSlot].name, localPlayerName.c_str(), sizeof(players[localSlot].name) - 1);
+                            }
+                            nodeDisconnectStartTick[0] = 0;
+                            lastHostPacketTick = curTick;
+                            // Enviar inmediatamente nuestro estado al host para registrarnos
+                            sendPlayerUpdate();
+                        } else if (udsConnectStartTick != 0 && (curTick - udsConnectStartTick > 12000)) {
+                            // Timeout de conexión inicial (12 segundos sin poder asociar)
+                            setToastNotice(LOC(STR_TOAST_LOST_CONN), 4000);
                             stop();
                             return;
                         }
                     } else {
-                        nodeDisconnectStartTick[0] = 0;
+                        // Fase 2: Ya estábamos conectados a la sala
+                        if (constatus.cur_NetworkNodeID >= 2 && constatus.cur_NetworkNodeID <= MULTI_MAX_PLAYERS) {
+                            localNodeId = constatus.cur_NetworkNodeID;
+                            localSlot = localNodeId - 1;
+                        }
+
+                        // Comprobar si se perdió la conexión con el host o el host cerró la sala
+                        if (constatus.cur_NetworkNodeID == 0 || !(constatus.node_bitmask & 0x1)) {
+                            if (nodeDisconnectStartTick[0] == 0) {
+                                nodeDisconnectStartTick[0] = curTick;
+                            } else if (curTick - nodeDisconnectStartTick[0] > 3000) {
+                                // Host UDS desconectado o sala cerrada (confirmado tras 3 segundos continuos)
+                                setToastNotice(LOC(STR_TOAST_HOST_CLOSED), 4000);
+                                stop();
+                                return;
+                            }
+                        } else {
+                            nodeDisconnectStartTick[0] = 0;
+                        }
                     }
                 }
             }
@@ -2347,8 +2390,8 @@ public:
                 lastBroadcastTick = curTick;
             }
 
-            // Watchdog general para Clientes (si el host no envía ningún paquete durante 5 segundos)
-            if (lastHostPacketTick != 0 && (curTick - lastHostPacketTick > 5000)) {
+            // Watchdog general para Clientes (si el host no envía ningún paquete durante 8 segundos tras conectar)
+            if ((netMode != NET_MODE_UDS || udsClientConnected) && lastHostPacketTick != 0 && (curTick - lastHostPacketTick > 8000)) {
                 setToastNotice(LOC(STR_TOAST_LOST_CONN), 4000);
                 stop();
                 return;

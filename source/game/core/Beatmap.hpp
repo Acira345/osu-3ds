@@ -603,8 +603,8 @@ struct Beatmap {
         float totalRawLen = cumDist.back();
         if (totalRawLen < 0.01f) return rawPath;
 
-        // Elegir número de segmentos equilibrado para precisión y rendimiento en 3DS (máx 28 segmentos)
-        int numSegments = std::max(2, std::min(28, static_cast<int>(targetLength / 7.5f)));
+        // Elegir numero de segmentos adaptativo para curvas perfectamente suaves a 60 FPS en 3DS (max 54 segmentos)
+        int numSegments = std::max(2, std::min(54, static_cast<int>(targetLength / 5.5f)));
         std::vector<Vec2> result;
         result.reserve(numSegments + 1);
         result.push_back(rawPath.front());
@@ -777,6 +777,9 @@ struct Beatmap {
     bool loadFromFile(const std::string& path, bool metadataOnly = false) {
         std::ifstream file(path.c_str());
         if (!file.is_open()) return false;
+
+        char iobuf[16384];
+        file.rdbuf()->pubsetbuf(iobuf, sizeof(iobuf));
 
         filePath = path;
         folderPath = extractFolder(path);
@@ -954,6 +957,50 @@ struct Beatmap {
                     }
                 }
             } else if (section == "HitObjects") {
+                if (metadataOnly) {
+                    const char* p = line.c_str();
+                    char* end = nullptr;
+                    float objX = std::strtof(p, &end);
+                    if (!end || *end != ',') continue;
+                    p = end + 1;
+                    float objY = std::strtof(p, &end);
+                    if (!end || *end != ',') continue;
+                    p = end + 1;
+                    int objTime = static_cast<int>(std::strtol(p, &end, 10));
+                    if (!end || *end != ',') continue;
+                    p = end + 1;
+                    int type = static_cast<int>(std::strtol(p, &end, 10));
+
+                    bool isCircle  = (type & 1) != 0;
+                    bool isSlider  = (type & 2) != 0;
+                    bool isSpinner = (type & 8) != 0;
+                    bool isHold    = (type & 128) != 0;
+
+                    if (isCircle)  { circleCount++;  maxPossibleCombo += 1; }
+                    if (isSpinner) { spinnerCount++; maxPossibleCombo += 1; }
+                    if (isHold)    { circleCount++;  maxPossibleCombo += 2; }
+                    if (isSlider)  {
+                        sliderCount++;
+                        int reps = 1;
+                        p = end;
+                        int commaCount = 0;
+                        while (*p && commaCount < 3) {
+                            if (*p == ',') commaCount++;
+                            p++;
+                        }
+                        if (commaCount == 3 && *p) {
+                            reps = static_cast<int>(std::strtol(p, nullptr, 10));
+                            if (reps < 1) reps = 1;
+                        }
+                        maxPossibleCombo += 1 + reps;
+                    }
+
+                    if (isCircle || isSlider || isHold) {
+                        strainSamples.push_back({ objX, objY, objTime });
+                    }
+                    continue;
+                }
+
                 std::vector<std::string> tokens = split(line, ',');
                 if (tokens.size() < 5) continue;
 

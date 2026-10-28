@@ -63,7 +63,7 @@ for (int i = 0; i < static_cast<int>(ctx.beatmap.circles.size()); ++i) {
     if (obj.isSpinner) {
         visible = (songTime >= (obj.time - 400) && !obj.sliderDone);
     } else if (obj.isSlider) {
-        visible = (songTime >= (obj.time - preempt) && !obj.sliderDone);
+        visible = (songTime >= (obj.time - preempt) && (!obj.sliderDone || songTime <= obj.endTime + 150));
     } else {
         visible = (songTime >= (obj.time - preempt) && obj.state == NOT_HIT);
     }
@@ -81,11 +81,15 @@ for (int v = numVisible - 1; v >= 0; --v) {
     const auto& obj = ctx.beatmap.circles[i];
     float objBaseZ = 0.065f + static_cast<float>(numVisible - 1 - v) * stepZ;
 
-    // Calcular opacidad (Fade-In normal y Fade-Out en modo Hidden HD)
+    // Calcular opacidad (Fade-In normal, Fade-Out en modo Hidden HD, y Fade-Out suave de 150ms al terminar sliders)
     float alphaMult = 1.0f;
     float timeSinceAppear = static_cast<float>(songTime - (obj.time - preempt));
     if (timeSinceAppear < fadeIn && fadeIn > 1.0f) {
         alphaMult = std::max(0.0f, std::min(1.0f, timeSinceAppear / fadeIn));
+    }
+    if (obj.isSlider && songTime > obj.endTime) {
+        float fadeOutTime = static_cast<float>(songTime - obj.endTime);
+        alphaMult *= std::max(0.0f, 1.0f - (fadeOutTime / 150.0f));
     }
     if (isHidden && !obj.isSpinner) {
         float fadeOutStart = preempt * 0.40f;
@@ -103,10 +107,35 @@ for (int v = numVisible - 1; v >= 0; --v) {
     u8 cAlpha = static_cast<u8>(235.0f * alphaMult);
     u8 sAlpha = static_cast<u8>(165.0f * alphaMult);
     u32 cColor = C2D_Color32(rgb.r, rgb.g, rgb.b, cAlpha);
-    u32 sColor = activeSkin.hasSliderTrackOverride
-        ? C2D_Color32(activeSkin.sliderTrackColor.r, activeSkin.sliderTrackColor.g, activeSkin.sliderTrackColor.b, sAlpha)
-        : C2D_Color32(static_cast<u8>(rgb.r * 0.62f), static_cast<u8>(rgb.g * 0.62f), static_cast<u8>(rgb.b * 0.62f), sAlpha);
     u32 ringClr = C2D_Color32(activeSkin.sliderBorderColor.r, activeSkin.sliderBorderColor.g, activeSkin.sliderBorderColor.b, cAlpha);
+
+    // Gradiente tubular 3D para el cuerpo del slider (sombreado Gouraud por hardware en la GPU PICA200)
+    u32 sColorEdge, sColorCenter;
+    if (activeSkin.hasSliderTrackOverride) {
+        sColorEdge = C2D_Color32(
+            static_cast<u8>(activeSkin.sliderTrackColor.r * 0.85f),
+            static_cast<u8>(activeSkin.sliderTrackColor.g * 0.85f),
+            static_cast<u8>(activeSkin.sliderTrackColor.b * 0.85f),
+            sAlpha
+        );
+        u8 cenR = static_cast<u8>(std::min(255.0f, activeSkin.sliderTrackColor.r * 1.55f + 40.0f));
+        u8 cenG = static_cast<u8>(std::min(255.0f, activeSkin.sliderTrackColor.g * 1.55f + 40.0f));
+        u8 cenB = static_cast<u8>(std::min(255.0f, activeSkin.sliderTrackColor.b * 1.55f + 50.0f));
+        u8 cenA = static_cast<u8>(std::min(255.0f, sAlpha * 1.22f));
+        sColorCenter = C2D_Color32(cenR, cenG, cenB, cenA);
+    } else {
+        sColorEdge = C2D_Color32(
+            static_cast<u8>(rgb.r * 0.46f),
+            static_cast<u8>(rgb.g * 0.46f),
+            static_cast<u8>(rgb.b * 0.46f),
+            sAlpha
+        );
+        u8 cenR = static_cast<u8>(std::min(255.0f, rgb.r * 0.85f + 55.0f));
+        u8 cenG = static_cast<u8>(std::min(255.0f, rgb.g * 0.85f + 55.0f));
+        u8 cenB = static_cast<u8>(std::min(255.0f, rgb.b * 0.85f + 55.0f));
+        u8 cenA = static_cast<u8>(std::min(255.0f, sAlpha * 1.25f));
+        sColorCenter = C2D_Color32(cenR, cenG, cenB, cenA);
+    }
 
     if (obj.isSpinner) {
         float spX = playX(256.0f, dCircle);
@@ -187,138 +216,258 @@ for (int v = numVisible - 1; v >= 0; --v) {
     // 1. Cuerpo del Slider, Ticks, Flechas de Rebote y Bola
     if (obj.isSlider && obj.sliderPath.size() >= 2) {
         size_t fullPtsCount = obj.sliderPath.size();
-        float sRadius = rScreen * 0.85f;
-        float sBorder = 2.0f;
-        float rOuter = sRadius + sBorder;
-        float rInner = sRadius;
+        float rOuter = rScreen * 0.94f;
+        float sBorder = std::max(1.8f, rOuter * 0.11f);
+        float rInner = rOuter - sBorder;
 
-        // Cálculo de Snaking In (la curva se va dibujando suavemente como una serpiente al aparecer)
-        float snakeInFrac = 1.0f;
-        if (ctx.settings.snakingSliders && songTime < obj.time) {
-            float timeSinceAppear = static_cast<float>(songTime - (obj.time - preempt));
-            float snakeDuration = std::max(100.0f, preempt * 0.66f);
-            float t = std::max(0.0f, std::min(1.0f, timeSinceAppear / snakeDuration));
-            snakeInFrac = std::sin(t * (static_cast<float>(M_PI) * 0.5f));
-            snakeInFrac = std::max(0.04f, snakeInFrac);
+        // 1. Cálculo de Snaking In y Snaking Out:
+        // - Snaking In: al aparecer, la curva se va dibujando hacia adelante.
+        // - Snaking Out: durante el deslizamiento, la bola va "comiendo" la pista por detrás
+        //   de forma continua hasta llegar a su destino, sin desapariciones bruscas.
+        float startFrac = 0.0f;
+        float endFrac   = 1.0f;
+
+        float totalDuration = static_cast<float>(std::max(1, obj.endTime - obj.time));
+        float slideDur = totalDuration / static_cast<float>(std::max(1, obj.repeats));
+        int curSpan = 0;
+        float spanProgress = 0.0f;
+        if (songTime > obj.time && obj.endTime > obj.time) {
+            float elapsed = static_cast<float>(songTime - obj.time);
+            curSpan = static_cast<int>(elapsed / slideDur);
+            if (curSpan >= obj.repeats) curSpan = obj.repeats - 1;
+            spanProgress = std::max(0.0f, std::min(1.0f, (elapsed - curSpan * slideDur) / slideDur));
+        }
+        bool isLastRepeat = (curSpan == obj.repeats - 1);
+
+        if (ctx.settings.snakingSliders) {
+            if (songTime < obj.time) {
+                // Snaking In
+                float timeSinceAppear = static_cast<float>(songTime - (obj.time - preempt));
+                float snakeDuration = std::max(100.0f, preempt * 0.66f);
+                float t = std::max(0.0f, std::min(1.0f, timeSinceAppear / snakeDuration));
+                float sIn = std::sin(t * (static_cast<float>(M_PI) * 0.5f));
+                endFrac = std::max(0.04f, std::min(1.0f, sIn));
+            } else if (songTime <= obj.endTime) {
+                // Snaking Out (comiendo la pista detrás de la bola en la repetición final o sliders de 1 solo pase)
+                if (isLastRepeat) {
+                    if (curSpan % 2 == 0) {
+                        // Viaje hacia la cola: la bola come la pista desde la cabeza
+                        startFrac = spanProgress;
+                        endFrac   = 1.0f;
+                    } else {
+                        // Viaje de regreso hacia la cabeza: la bola come la pista desde la cola
+                        startFrac = 0.0f;
+                        endFrac   = 1.0f - spanProgress;
+                    }
+                }
+            } else {
+                // Después de endTime: completamente consumido por la bola
+                startFrac = 1.0f;
+                endFrac   = 1.0f;
+            }
         }
 
-        // Construir la lista de puntos visibles recortada según snakeInFrac
+        // Construir la lista de puntos visibles recortada entre startFrac y endFrac
         std::vector<Vec2> visiblePath;
-        if (snakeInFrac >= 0.999f || fullPtsCount < 2) {
+        if (endFrac - startFrac <= 0.005f || fullPtsCount < 2) {
+            visiblePath.clear();
+        } else if (startFrac <= 0.001f && endFrac >= 0.999f) {
             visiblePath = obj.sliderPath;
         } else {
-            visiblePath.reserve(fullPtsCount + 1);
-            float targetIdx = snakeInFrac * static_cast<float>(fullPtsCount - 1);
-            int count = static_cast<int>(targetIdx);
-            if (count < 1) count = 1;
-            for (int p = 0; p <= count && p < static_cast<int>(fullPtsCount); ++p) {
+            visiblePath.reserve(fullPtsCount + 2);
+            float startIdxFloat = startFrac * static_cast<float>(fullPtsCount - 1);
+            float endIdxFloat   = endFrac   * static_cast<float>(fullPtsCount - 1);
+
+            int sIdx = static_cast<int>(startIdxFloat);
+            float sFrac = startIdxFloat - static_cast<float>(sIdx);
+            Vec2 startPt = (sIdx + 1 < static_cast<int>(fullPtsCount))
+                ? Vec2(obj.sliderPath[sIdx].x + (obj.sliderPath[sIdx + 1].x - obj.sliderPath[sIdx].x) * sFrac,
+                       obj.sliderPath[sIdx].y + (obj.sliderPath[sIdx + 1].y - obj.sliderPath[sIdx].y) * sFrac)
+                : obj.sliderPath.back();
+            visiblePath.push_back(startPt);
+
+            for (int p = sIdx + 1; p < static_cast<int>(fullPtsCount) && static_cast<float>(p) < endIdxFloat; ++p) {
                 visiblePath.push_back(obj.sliderPath[p]);
             }
-            float frac = targetIdx - static_cast<float>(count);
-            if (frac > 0.005f && count + 1 < static_cast<int>(fullPtsCount)) {
-                const Vec2& pA = obj.sliderPath[count];
-                const Vec2& pB = obj.sliderPath[count + 1];
-                visiblePath.push_back(Vec2(pA.x + (pB.x - pA.x) * frac, pA.y + (pB.y - pA.y) * frac));
-            }
-            if (visiblePath.size() < 2 && fullPtsCount >= 2) {
-                visiblePath.push_back(obj.sliderPath[1]);
+
+            int eIdx = static_cast<int>(endIdxFloat);
+            float eFrac = endIdxFloat - static_cast<float>(eIdx);
+            Vec2 endPt = (eIdx + 1 < static_cast<int>(fullPtsCount))
+                ? Vec2(obj.sliderPath[eIdx].x + (obj.sliderPath[eIdx + 1].x - obj.sliderPath[eIdx].x) * eFrac,
+                       obj.sliderPath[eIdx].y + (obj.sliderPath[eIdx + 1].y - obj.sliderPath[eIdx].y) * eFrac)
+                : obj.sliderPath.back();
+
+            float dLast = std::abs(endPt.x - visiblePath.back().x) + std::abs(endPt.y - visiblePath.back().y);
+            if (dLast > 0.15f) {
+                visiblePath.push_back(endPt);
             }
         }
 
-        size_t nPts = visiblePath.size();
-        std::vector<Vec2> pts(nPts);
-        std::vector<Vec2> nrm(nPts);
-        for (size_t p = 0; p < nPts; ++p) {
-            pts[p] = Vec2(playX(visiblePath[p].x, dSlider), playY(visiblePath[p].y));
-        }
-        for (size_t p = 0; p < nPts; ++p) {
-            Vec2 dir;
-            if (p == 0) {
-                dir = Vec2(pts[1].x - pts[0].x, pts[1].y - pts[0].y);
-            } else if (p == nPts - 1) {
-                dir = Vec2(pts[nPts - 1].x - pts[nPts - 2].x, pts[nPts - 1].y - pts[nPts - 2].y);
+        if (visiblePath.size() >= 2) {
+            size_t nPts = visiblePath.size();
+            std::vector<Vec2> pts(nPts);
+            std::vector<Vec2> nrm(nPts);
+            for (size_t p = 0; p < nPts; ++p) {
+                pts[p] = Vec2(playX(visiblePath[p].x, dSlider), playY(visiblePath[p].y));
+            }
+            for (size_t p = 0; p < nPts; ++p) {
+                Vec2 dir;
+                if (p == 0) {
+                    dir = Vec2(pts[1].x - pts[0].x, pts[1].y - pts[0].y);
+                } else if (p == nPts - 1) {
+                    dir = Vec2(pts[nPts - 1].x - pts[nPts - 2].x, pts[nPts - 1].y - pts[nPts - 2].y);
+                } else {
+                    dir = Vec2(pts[p + 1].x - pts[p - 1].x, pts[p + 1].y - pts[p - 1].y);
+                }
+                float len = std::sqrt(dir.x * dir.x + dir.y * dir.y);
+                if (len > 1e-4f) {
+                    nrm[p] = Vec2(-dir.y / len, dir.x / len);
+                } else {
+                    nrm[p] = (p > 0) ? nrm[p - 1] : Vec2(0.0f, 1.0f);
+                }
+
+                // Escala miter suave para curvas y codos sin estrangulamiento
+                if (p > 0 && p < nPts - 1) {
+                    Vec2 v0 = Vec2(pts[p].x - pts[p - 1].x, pts[p].y - pts[p - 1].y);
+                    float l0 = std::sqrt(v0.x * v0.x + v0.y * v0.y);
+                    if (l0 > 1e-4f) {
+                        Vec2 n0 = Vec2(-v0.y / l0, v0.x / l0);
+                        float dot = nrm[p].x * n0.x + nrm[p].y * n0.y;
+                        if (dot > 0.45f) {
+                            float miter = std::min(1.32f, 1.0f / dot);
+                            nrm[p].x *= miter;
+                            nrm[p].y *= miter;
+                        }
+                    }
+                }
+            }
+
+            struct SliderVtx {
+                Vec2 Lo, Li, C, Ri, Ro;
+            };
+            std::vector<SliderVtx> vSet(nPts);
+            for (size_t p = 0; p < nPts; ++p) {
+                vSet[p].C  = pts[p];
+                vSet[p].Li = Vec2(pts[p].x + nrm[p].x * rInner, pts[p].y + nrm[p].y * rInner);
+                vSet[p].Ri = Vec2(pts[p].x - nrm[p].x * rInner, pts[p].y - nrm[p].y * rInner);
+                vSet[p].Lo = Vec2(pts[p].x + nrm[p].x * rOuter, pts[p].y + nrm[p].y * rOuter);
+                vSet[p].Ro = Vec2(pts[p].x - nrm[p].x * rOuter, pts[p].y - nrm[p].y * rOuter);
+            }
+
+            float zBorder = objBaseZ + subStep * 1.0f;
+            float zBody   = objBaseZ + subStep * 2.0f;
+
+            // Pase 1: Bordes exteriores (ribetes laterales continuos y nítidos sin opacar la transparencia de la pista)
+            for (size_t p = 0; p + 1 < nPts; ++p) {
+                const auto& v0 = vSet[p];
+                const auto& v1 = vSet[p + 1];
+                // Ribete lateral izquierdo
+                C2D_DrawTriangle(v0.Lo.x, v0.Lo.y, ringClr, v0.Li.x, v0.Li.y, ringClr, v1.Lo.x, v1.Lo.y, ringClr, zBorder);
+                C2D_DrawTriangle(v0.Li.x, v0.Li.y, ringClr, v1.Li.x, v1.Li.y, ringClr, v1.Lo.x, v1.Lo.y, ringClr, zBorder);
+                // Ribete lateral derecho
+                C2D_DrawTriangle(v0.Ri.x, v0.Ri.y, ringClr, v0.Ro.x, v0.Ro.y, ringClr, v1.Ri.x, v1.Ri.y, ringClr, zBorder);
+                C2D_DrawTriangle(v0.Ro.x, v0.Ro.y, ringClr, v1.Ro.x, v1.Ro.y, ringClr, v1.Ri.x, v1.Ri.y, ringClr, zBorder);
+            }
+
+            // Pase 2: Malla tubular 3D con sombreado Gouraud por hardware en la GPU
+            for (size_t p = 0; p + 1 < nPts; ++p) {
+                const auto& v0 = vSet[p];
+                const auto& v1 = vSet[p + 1];
+                // Mitad izquierda: v.Li (sColorEdge) -> v.C (sColorCenter)
+                C2D_DrawTriangle(v0.Li.x, v0.Li.y, sColorEdge, v0.C.x, v0.C.y, sColorCenter, v1.Li.x, v1.Li.y, sColorEdge, zBody);
+                C2D_DrawTriangle(v0.C.x, v0.C.y, sColorCenter, v1.C.x, v1.C.y, sColorCenter, v1.Li.x, v1.Li.y, sColorEdge, zBody);
+                // Mitad derecha: v.C (sColorCenter) -> v.Ri (sColorEdge)
+                C2D_DrawTriangle(v0.C.x, v0.C.y, sColorCenter, v0.Ri.x, v0.Ri.y, sColorEdge, v1.C.x, v1.C.y, sColorCenter, zBody);
+                C2D_DrawTriangle(v0.Ri.x, v0.Ri.y, sColorEdge, v1.Ri.x, v1.Ri.y, sColorEdge, v1.C.x, v1.C.y, sColorCenter, zBody);
+            }
+
+            // Extremos redondeados (Caps) en cabeza y en la punta visible de la serpiente
+            bool skinCircleActive = ctx.texSkinCircle.loaded && (obj.state == NOT_HIT);
+            if (!skinCircleActive) {
+                C2D_DrawCircleSolid(pts[0].x, pts[0].y, zBorder, rOuter, ringClr);
+                C2D_DrawCircleSolid(pts[0].x, pts[0].y, zBody, rInner, sColorEdge);
+                C2D_DrawCircleSolid(pts[0].x, pts[0].y, zBody + subStep * 0.1f, rInner * 0.52f, sColorCenter);
             } else {
-                dir = Vec2(pts[p + 1].x - pts[p - 1].x, pts[p + 1].y - pts[p - 1].y);
+                // Cuando la skin está activa y la cabeza aún no ha sido golpeada, rellenamos el cuerpo interior
+                C2D_DrawCircleSolid(pts[0].x, pts[0].y, zBody, rInner, sColorEdge);
+                C2D_DrawCircleSolid(pts[0].x, pts[0].y, zBody + subStep * 0.1f, rInner * 0.52f, sColorCenter);
             }
-            float len = std::sqrt(dir.x * dir.x + dir.y * dir.y);
-            if (len > 1e-4f) {
-                nrm[p] = Vec2(-dir.y / len, dir.x / len);
-            } else {
-                nrm[p] = (p > 0) ? nrm[p - 1] : Vec2(0.0f, 1.0f);
+            C2D_DrawCircleSolid(pts.back().x, pts.back().y, zBorder, rOuter, ringClr);
+            C2D_DrawCircleSolid(pts.back().x, pts.back().y, zBody, rInner, sColorEdge);
+            C2D_DrawCircleSolid(pts.back().x, pts.back().y, zBody + subStep * 0.1f, rInner * 0.52f, sColorCenter);
+        }
+
+        // Anillo de la cola o destino: visible mientras el extremo no haya sido consumido por la bola
+        if (!isLastRepeat || (curSpan % 2 == 0)) {
+            Vec2 finalTail = obj.sliderPath.back();
+            float tailX = playX(finalTail.x, dSlider);
+            float tailY = playY(finalTail.y);
+            u8 tailAlpha = static_cast<u8>(cAlpha * (endFrac >= 0.95f ? 1.0f : (endFrac * 0.85f)));
+            if (tailAlpha > 5 && (!isLastRepeat || spanProgress < 0.98f)) {
+                drawRing(tailX, tailY, rInner, sBorder, Ui::withAlpha(ringClr, tailAlpha), 28, objBaseZ + subStep * 3.0f);
             }
         }
 
-        float zBorder = objBaseZ + subStep * 1.0f;
-        float zBody   = objBaseZ + subStep * 2.0f;
-
-        // Pase 1: Malla continua de triángulos para el borde exterior (ringClr)
-        for (size_t p = 0; p + 1 < nPts; ++p) {
-            float l0x = pts[p].x + nrm[p].x * rOuter,     l0y = pts[p].y + nrm[p].y * rOuter;
-            float r0x = pts[p].x - nrm[p].x * rOuter,     r0y = pts[p].y - nrm[p].y * rOuter;
-            float l1x = pts[p + 1].x + nrm[p + 1].x * rOuter, l1y = pts[p + 1].y + nrm[p + 1].y * rOuter;
-            float r1x = pts[p + 1].x - nrm[p + 1].x * rOuter, r1y = pts[p + 1].y - nrm[p + 1].y * rOuter;
-            C2D_DrawTriangle(l0x, l0y, ringClr, r0x, r0y, ringClr, l1x, l1y, ringClr, zBorder);
-            C2D_DrawTriangle(r0x, r0y, ringClr, r1x, r1y, ringClr, l1x, l1y, ringClr, zBorder);
-        }
-
-        // Pase 2: Malla continua de triángulos para el relleno interior (sColor)
-        for (size_t p = 0; p + 1 < nPts; ++p) {
-            float l0x = pts[p].x + nrm[p].x * rInner,     l0y = pts[p].y + nrm[p].y * rInner;
-            float r0x = pts[p].x - nrm[p].x * rInner,     r0y = pts[p].y - nrm[p].y * rInner;
-            float l1x = pts[p + 1].x + nrm[p + 1].x * rInner, l1y = pts[p + 1].y + nrm[p + 1].y * rInner;
-            float r1x = pts[p + 1].x - nrm[p + 1].x * rInner, r1y = pts[p + 1].y - nrm[p + 1].y * rInner;
-            C2D_DrawTriangle(l0x, l0y, sColor, r0x, r0y, sColor, l1x, l1y, sColor, zBody);
-            C2D_DrawTriangle(r0x, r0y, sColor, r1x, r1y, sColor, l1x, l1y, sColor, zBody);
-        }
-
-        // Extremos redondeados (Caps) en cabeza y en la punta visible de la serpiente
-        C2D_DrawCircleSolid(pts[0].x, pts[0].y, zBorder, rOuter, ringClr);
-        C2D_DrawCircleSolid(pts.back().x, pts.back().y, zBorder, rOuter, ringClr);
-        C2D_DrawCircleSolid(pts[0].x, pts[0].y, zBody, rInner, sColor);
-        C2D_DrawCircleSolid(pts.back().x, pts.back().y, zBody, rInner, sColor);
-
-        // Anillo de la cola: en el destino final se desvanece suavemente a medida que la serpiente se acerca
-        Vec2 finalTail = obj.sliderPath.back();
-        float tailX = playX(finalTail.x, dSlider);
-        float tailY = playY(finalTail.y);
-        u8 tailAlpha = static_cast<u8>(cAlpha * (snakeInFrac >= 0.95f ? 1.0f : (snakeInFrac * 0.85f)));
-        if (tailAlpha > 5) {
-            drawRing(tailX, tailY, sRadius, 1.5f, Ui::withAlpha(ringClr, tailAlpha), 20, objBaseZ + subStep * 3.0f);
-        }
-
-        // Dibujar Slider Ticks pendientes (solo aquellos alcanzados por la serpiente)
-        int curSpan = 0;
-        float slideDur = static_cast<float>(std::max(1, obj.endTime - obj.time)) / std::max(1, obj.repeats);
-        if (songTime > obj.time && obj.endTime > obj.time) {
-            curSpan = static_cast<int>((songTime - obj.time) / slideDur);
-        }
+        // Dibujar Slider Ticks pendientes (solo aquellos que no han sido consumidos ni golpeados)
         for (const auto& tk : obj.sliderTicks) {
             if (!tk.hit && tk.time >= songTime - 50) {
                 float tkProgress = static_cast<float>(tk.time - obj.time) / std::max(1.0f, slideDur);
-                if (songTime >= obj.time || snakeInFrac >= tkProgress) {
-                    C2D_DrawCircleSolid(playX(tk.x, dSlider), playY(tk.y), objBaseZ + subStep * 3.0f, 2.2f, Ui::withAlpha(ctx.clrWhite, cAlpha));
+                bool visibleTick = false;
+                if (songTime < obj.time) {
+                    visibleTick = (endFrac >= tkProgress);
+                } else if (!isLastRepeat) {
+                    visibleTick = true;
+                } else {
+                    if (curSpan % 2 == 0) {
+                        visibleTick = (tkProgress >= startFrac);
+                    } else {
+                        visibleTick = ((1.0f - tkProgress) >= (1.0f - endFrac));
+                    }
+                }
+                if (visibleTick) {
+                    float tkX = playX(tk.x, dSlider);
+                    float tkY = playY(tk.y);
+                    C2D_DrawCircleSolid(tkX, tkY, objBaseZ + subStep * 3.0f, 2.5f, Ui::withAlpha(ctx.clrWhite, cAlpha));
+                    C2D_DrawCircleSolid(tkX, tkY, objBaseZ + subStep * 3.2f, 1.2f, Ui::withAlpha(sColorCenter, cAlpha));
                 }
             }
         }
 
-        // Flecha de rebote (Reverse Arrow) si quedan repeticiones y la serpiente ya llegó al final
-        if (obj.repeats > 1 && curSpan + 1 < obj.repeats && snakeInFrac >= 0.92f) {
+        // Flecha de rebote (Reverse Arrow) con rotación tangencial y pulso rítmico
+        if (obj.repeats > 1 && curSpan + 1 < obj.repeats && endFrac >= 0.92f) {
             bool arrowAtTail = (curSpan % 2 == 0);
+            float revX, revY, targetX, targetY;
             if (arrowAtTail) {
                 const Vec2& pTip = obj.sliderPath.back();
                 const Vec2& pPrev = obj.sliderPath[obj.sliderPath.size() - 2];
-                drawReverseArrow(
-                    playX(pTip.x, dSlider), playY(pTip.y),
-                    playX(pPrev.x, dSlider), playY(pPrev.y),
-                    rScreen * 0.65f, Ui::withAlpha(ctx.clrWhite, cAlpha), objBaseZ + subStep * 4.0f
-                );
+                revX = playX(pTip.x, dSlider);
+                revY = playY(pTip.y);
+                targetX = playX(pPrev.x, dSlider);
+                targetY = playY(pPrev.y);
             } else {
                 const Vec2& pTip = obj.sliderPath.front();
                 const Vec2& pNext = obj.sliderPath[1];
+                revX = playX(pTip.x, dSlider);
+                revY = playY(pTip.y);
+                targetX = playX(pNext.x, dSlider);
+                targetY = playY(pNext.y);
+            }
+
+            float arrowAngle = std::atan2(targetY - revY, targetX - revX);
+            float arrowPulse = 1.0f + 0.08f * std::sin(static_cast<float>(songTime) * 0.014f);
+            float arrowSize = rScreen * 1.8f * arrowPulse;
+
+            if (ctx.texSkinReverseArrow.loaded) {
+                ctx.texSkinReverseArrow.drawCenteredSpriteRotated(
+                    revX, revY,
+                    arrowSize, objBaseZ + subStep * 4.0f,
+                    arrowAngle, C2D_Color32(255, 255, 255, cAlpha), 0.0f
+                );
+            } else {
                 drawReverseArrow(
-                    playX(pTip.x, dSlider), playY(pTip.y),
-                    playX(pNext.x, dSlider), playY(pNext.y),
-                    rScreen * 0.65f, Ui::withAlpha(ctx.clrWhite, cAlpha), objBaseZ + subStep * 4.0f
+                    revX, revY,
+                    targetX, targetY,
+                    rScreen * 0.72f * arrowPulse, Ui::withAlpha(ctx.clrWhite, cAlpha), objBaseZ + subStep * 4.0f
                 );
             }
         }
@@ -327,12 +476,36 @@ for (int v = numVisible - 1; v >= 0; --v) {
             Vec2 ballOsu = obj.getSliderBallPos(songTime);
             float bx = playX(ballOsu.x, dCircle);
             float by = playY(ballOsu.y);
-            Ui::glow(bx, by, objBaseZ + subStep * 8.5f, rScreen * 1.45f, C2D_Color32(rgb.r, rgb.g, rgb.b, 120), 3);
-            C2D_DrawCircleSolid(bx, by, objBaseZ + subStep * 9.0f, rScreen * 0.88f, C2D_Color32(rgb.r, rgb.g, rgb.b, 240));
-            C2D_DrawCircleSolid(bx, by, objBaseZ + subStep * 9.5f, rScreen * 0.35f, ctx.clrWhite);
-            float followR = obj.sliderTracking ? (rScreen * 1.9f) : (rScreen * 1.3f);
-            u32 followClr = obj.sliderTracking ? ctx.clrCursor : ctx.clrWhite;
-            drawRing(bx, by, followR, 1.5f, followClr, 20, objBaseZ + subStep * 9.8f);
+
+            // Dirección tangencial de la bola a lo largo de la curva
+            Vec2 ballNext = obj.getSliderBallPos(std::min(obj.endTime, songTime + 20));
+            float ballAngle = 0.0f;
+            float bdx = ballNext.x - ballOsu.x;
+            float bdy = ballNext.y - ballOsu.y;
+            if (bdx * bdx + bdy * bdy > 0.001f) {
+                ballAngle = std::atan2(bdy, bdx);
+            }
+
+            if (ctx.texSkinSliderBall.loaded) {
+                ctx.texSkinSliderBall.drawCenteredSpriteRotated(bx, by, rScreen * 1.85f, objBaseZ + subStep * 9.0f, ballAngle, ctx.clrWhite, 0.0f);
+            } else {
+                Ui::glow(bx, by, objBaseZ + subStep * 8.5f, rScreen * 1.50f, C2D_Color32(rgb.r, rgb.g, rgb.b, 130), 4);
+                C2D_DrawCircleSolid(bx, by, objBaseZ + subStep * 9.0f, rScreen * 0.88f, C2D_Color32(rgb.r, rgb.g, rgb.b, 240));
+                C2D_DrawCircleSolid(bx, by, objBaseZ + subStep * 9.2f, rScreen * 0.55f, sColorCenter);
+                C2D_DrawCircleSolid(bx, by, objBaseZ + subStep * 9.5f, rScreen * 0.28f, ctx.clrWhite);
+            }
+
+            if (obj.sliderTracking) {
+                float trackPulse = 1.0f + 0.04f * std::sin(static_cast<float>(songTime) * 0.015f);
+                float followR = rScreen * 1.92f * trackPulse;
+                u32 followClr = ctx.clrCursor;
+                if (ctx.texSkinSliderFollow.loaded) {
+                    ctx.texSkinSliderFollow.drawCenteredSprite(bx, by, followR * 2.0f, objBaseZ + subStep * 9.8f, followClr, 0.0f);
+                } else {
+                    drawRing(bx, by, followR, 2.2f, followClr, 32, objBaseZ + subStep * 9.8f);
+                    drawRing(bx, by, followR - 1.2f, 1.2f, Ui::withAlpha(followClr, 140), 32, objBaseZ + subStep * 9.7f);
+                }
+            }
         }
     }
 
@@ -346,10 +519,20 @@ for (int v = numVisible - 1; v >= 0; --v) {
         u8 glowA = static_cast<u8>(std::min(255.0f, (85.0f + 50.0f * ctx.kiaiGlow * bpmPulse) * alphaMult));
         Ui::glow(cx, cy, objBaseZ + subStep * 4.5f, rScreen * (1.42f + kiaiGlowBoost), C2D_Color32(rgb.r, rgb.g, rgb.b, glowA), 3);
 
+        // Escala estándar de osu!: en los skins el gráfico del círculo ocupa 118px de un lienzo de 128px (margen de 5px).
+        // Para que el radio visible del círculo coincida exactamente con rScreen (diámetro 2*rScreen), escalamos por 128/118.
+        constexpr float SKIN_CIRCLE_SCALE = 128.0f / 118.0f;
+        float circleSize = (rScreen * 2.0f) * SKIN_CIRCLE_SCALE;
         if (ctx.texSkinCircle.loaded) {
-            ctx.texSkinCircle.drawCenteredSprite(cx, cy, rScreen * 1.05f, objBaseZ + subStep * 5.0f, cColor);
+            ctx.texSkinCircle.drawCenteredSprite(cx, cy, circleSize, objBaseZ + subStep * 5.0f, cColor, 1.0f);
             if (ctx.texSkinOverlay.loaded) {
-                ctx.texSkinOverlay.drawCenteredSprite(cx, cy, rScreen * 1.05f, objBaseZ + subStep * 6.0f, C2D_Color32(255, 255, 255, cAlpha));
+                float overlayScale = (ctx.texSkinCircle.getNativeW() > 0.0f)
+                    ? (ctx.texSkinOverlay.getNativeW() / ctx.texSkinCircle.getNativeW())
+                    : 1.0f;
+                float overlayZ = activeSkin.hitCircleOverlayAboveNumber
+                    ? (objBaseZ + subStep * 7.5f)
+                    : (objBaseZ + subStep * 6.0f);
+                ctx.texSkinOverlay.drawCenteredSprite(cx, cy, circleSize * overlayScale, overlayZ, C2D_Color32(255, 255, 255, cAlpha), 0.0f);
             }
         } else if (activeSkin.darkCircleCenter) {
             C2D_DrawCircleSolid(cx, cy, objBaseZ + subStep * 5.0f, rScreen, C2D_Color32(20, 18, 30, static_cast<u8>(255 * alphaMult)));
@@ -374,7 +557,11 @@ for (int v = numVisible - 1; v >= 0; --v) {
                 float dApproach = depthShift(2.6f + progress * 3.4f);
                 float ax = playX(obj.x, dApproach);
                 if (ctx.texSkinApproach.loaded) {
-                    ctx.texSkinApproach.drawCenteredSprite(ax, cy, approachRadius, objBaseZ + subStep * 8.0f, cColor);
+                    float approachScale = (ctx.texSkinApproach.getNativeW() > 0.0f)
+                        ? (ctx.texSkinApproach.getNativeW() / 128.0f)
+                        : 1.0f;
+                    float approachSize = (approachRadius * 2.0f) * SKIN_CIRCLE_SCALE * approachScale;
+                    ctx.texSkinApproach.drawCenteredSprite(ax, cy, approachSize, objBaseZ + subStep * 8.0f, cColor, 1.0f);
                 } else {
                     drawRing(ax, cy, approachRadius, 1.5f, cColor, 20, objBaseZ + subStep * 8.0f);
                 }
@@ -384,9 +571,11 @@ for (int v = numVisible - 1; v >= 0; --v) {
 }
 
 // Mod Flashlight (FL): oscurece la pantalla de juego dejando un haz de luz focal centrado en el cursor
-if (isFlashlight) {
-    float flX = baseOffsetX + ctx.cursorOsuX * SCALE_FACTOR + dCursor;
-    float flY = baseOffsetY + ctx.cursorOsuY * SCALE_FACTOR;
+if (isFlashlight && !ctx.inBreakPeriod && !ctx.isPaused) {
+    float curX = std::max(0.0f, std::min(512.0f, ctx.cursorOsuX));
+    float curY = std::max(0.0f, std::min(384.0f, ctx.cursorOsuY));
+    float flX = baseOffsetX + curX * SCALE_FACTOR + dCursor;
+    float flY = baseOffsetY + curY * SCALE_FACTOR;
     float flR = (ctx.combo >= 200) ? 46.0f : ((ctx.combo >= 100) ? 60.0f : 78.0f);
     float flRInner = flR * 0.70f;
     float flROuter = 420.0f;
@@ -405,13 +594,13 @@ if (isFlashlight) {
             flX + cos0 * flRInner, flY + sin0 * flRInner, clrDarkTrans,
             flX + cos1 * flRInner, flY + sin1 * flRInner, clrDarkTrans,
             flX + cos0 * flR,      flY + sin0 * flR,      clrDarkSolid,
-            0.71f
+            0.50f
         );
         C2D_DrawTriangle(
             flX + cos1 * flRInner, flY + sin1 * flRInner, clrDarkTrans,
             flX + cos1 * flR,      flY + sin1 * flR,      clrDarkSolid,
             flX + cos0 * flR,      flY + sin0 * flR,      clrDarkSolid,
-            0.71f
+            0.50f
         );
 
         // Área exterior completamente a oscuras
@@ -419,13 +608,13 @@ if (isFlashlight) {
             flX + cos0 * flR,      flY + sin0 * flR,      clrDarkSolid,
             flX + cos1 * flR,      flY + sin1 * flR,      clrDarkSolid,
             flX + cos0 * flROuter, flY + sin0 * flROuter, clrDarkSolid,
-            0.72f
+            0.51f
         );
         C2D_DrawTriangle(
             flX + cos1 * flR,      flY + sin1 * flR,      clrDarkSolid,
             flX + cos1 * flROuter, flY + sin1 * flROuter, clrDarkSolid,
             flX + cos0 * flROuter, flY + sin0 * flROuter, clrDarkSolid,
-            0.72f
+            0.51f
         );
     }
 }
@@ -438,7 +627,11 @@ void renderCursorAndSmoke(
     float dCursor,
     bool anyHeld
 ) {
+    if (ctx.isPaused) return;
+
     const SkinProfile& activeSkin = ctx.getActiveSkin();
+    // Capas Z del cursor (0.62..0.68) por debajo de las pantallas de espera/descanso (0.82+) y pausa (0.90+)
+    // para que el puntero nunca sobrepase los paneles de espera ni los menús superpuestos.
     // 1. Partículas de Humo estilo osu! 'C'
     for (const auto& sp : ctx.smokeParticles) {
         float ratio = static_cast<float>(sp.life) / static_cast<float>(sp.maxLife);
@@ -452,16 +645,18 @@ void renderCursorAndSmoke(
         u32 smokeOuterClr = Ui::rgba(210, 218, 235, aOuter);
         u32 smokeInnerClr = Ui::rgba(235, 240, 252, aInner);
 
-        C2D_DrawCircleSolid(sx, sy, 0.84f, sRadius, smokeOuterClr);
-        C2D_DrawCircleSolid(sx, sy, 0.845f, sRadius * 0.52f, smokeInnerClr);
+        C2D_DrawCircleSolid(sx, sy, 0.62f, sRadius, smokeOuterClr);
+        C2D_DrawCircleSolid(sx, sy, 0.625f, sRadius * 0.52f, smokeInnerClr);
     }
 
     // 2. Renderizado de Estela Dinámica y Fluida del Cursor (Cursor Trail)
     for (size_t t = 0; t < ctx.cursorTrail.size(); ++t) {
         float ratio = static_cast<float>(ctx.cursorTrail[t].life) / static_cast<float>(ctx.cursorTrail[t].maxLife);
         float tr = (5.2f * ratio + 0.8f) * ctx.settings.cursorScale;
-        float tx = baseOffsetX + ctx.cursorTrail[t].x * SCALE_FACTOR + dCursor;
-        float ty = baseOffsetY + ctx.cursorTrail[t].y * SCALE_FACTOR;
+        float cxClamped = std::max(0.0f, std::min(512.0f, ctx.cursorTrail[t].x));
+        float cyClamped = std::max(0.0f, std::min(384.0f, ctx.cursorTrail[t].y));
+        float tx = baseOffsetX + cxClamped * SCALE_FACTOR + dCursor;
+        float ty = baseOffsetY + cyClamped * SCALE_FACTOR;
 
         u8 tAlpha = static_cast<u8>(145.0f * std::pow(ratio, 1.15f));
         u32 tClr = C2D_Color32(
@@ -472,69 +667,94 @@ void renderCursorAndSmoke(
         );
 
         if (ctx.texSkinCursorTrail.loaded) {
-            ctx.texSkinCursorTrail.drawCenteredSprite(tx, ty, tr * 2.4f, 0.86f, tClr);
+            float trailSize = tr * 4.6f;
+            ctx.texSkinCursorTrail.drawCenteredSprite(tx, ty, trailSize, 0.64f, tClr, 0.0f);
         } else {
-            // Núcleo brillante y halo translúcido
-            C2D_DrawCircleSolid(tx, ty, 0.86f, tr, tClr);
-            C2D_DrawCircleSolid(tx, ty, 0.865f, tr * 0.42f, Ui::rgba(255, 255, 255, static_cast<u8>(160.0f * ratio)));
+            C2D_DrawCircleSolid(tx, ty, 0.64f, tr, tClr);
+            C2D_DrawCircleSolid(tx, ty, 0.645f, tr * 0.42f, Ui::rgba(255, 255, 255, static_cast<u8>(160.0f * ratio)));
         }
 
-        // Conectar con segmento hacia el punto siguiente para que la estela sea continua y sin huecos
         if (t + 1 < ctx.cursorTrail.size()) {
-            float nextX = baseOffsetX + ctx.cursorTrail[t + 1].x * SCALE_FACTOR + dCursor;
-            float nextY = baseOffsetY + ctx.cursorTrail[t + 1].y * SCALE_FACTOR;
+            float nxClamped = std::max(0.0f, std::min(512.0f, ctx.cursorTrail[t + 1].x));
+            float nyClamped = std::max(0.0f, std::min(384.0f, ctx.cursorTrail[t + 1].y));
+            float nextX = baseOffsetX + nxClamped * SCALE_FACTOR + dCursor;
+            float nextY = baseOffsetY + nyClamped * SCALE_FACTOR;
             float lineW = std::max(1.5f, tr * 1.3f);
-            C2D_DrawLine(tx, ty, tClr, nextX, nextY, tClr, lineW, 0.858f);
+            C2D_DrawLine(tx, ty, tClr, nextX, nextY, tClr, lineW, 0.638f);
         }
     }
 
-    // 3. Cursor principal
+    // 3. Cursor principal acotado al área de juego
     float expandFactor = (activeSkin.cursorExpand && anyHeld) ? 7.5f : 5.5f;
     float cursorRadius = expandFactor * ctx.settings.cursorScale;
-    float curScreenX = baseOffsetX + ctx.cursorOsuX * SCALE_FACTOR + dCursor;
-    float curScreenY = baseOffsetY + ctx.cursorOsuY * SCALE_FACTOR;
+    float curOsuX = std::max(0.0f, std::min(512.0f, ctx.cursorOsuX));
+    float curOsuY = std::max(0.0f, std::min(384.0f, ctx.cursorOsuY));
+    float curScreenX = baseOffsetX + curOsuX * SCALE_FACTOR + dCursor;
+    float curScreenY = baseOffsetY + curOsuY * SCALE_FACTOR;
     if (ctx.texSkinCursor.loaded) {
-        ctx.texSkinCursor.drawCenteredSprite(curScreenX, curScreenY, cursorRadius * 1.4f, 0.88f, C2D_Color32(255, 255, 255, 255));
+        float cursorSpriteSize = cursorRadius * 4.4f;
+        ctx.texSkinCursor.drawCenteredSprite(curScreenX, curScreenY, cursorSpriteSize, 0.67f, ctx.clrWhite, 0.0f);
     } else {
-        Ui::glow(curScreenX, curScreenY, 0.87f, cursorRadius * 1.8f, Ui::withAlpha(ctx.clrCursor, 110), 3);
-        C2D_DrawCircleSolid(curScreenX, curScreenY, 0.88f, cursorRadius, ctx.clrCursor);
-        C2D_DrawCircleSolid(curScreenX, curScreenY, 0.89f, 2.0f * ctx.settings.cursorScale, ctx.clrWhite);
+        Ui::glow(curScreenX, curScreenY, 0.66f, cursorRadius * 1.8f, Ui::withAlpha(ctx.clrCursor, 110), 3);
+        C2D_DrawCircleSolid(curScreenX, curScreenY, 0.67f, cursorRadius, ctx.clrCursor);
+        drawRing(curScreenX, curScreenY, cursorRadius, 1.3f, ctx.clrWhite, 20, 0.675f);
+        C2D_DrawCircleSolid(curScreenX, curScreenY, 0.68f, 2.2f * ctx.settings.cursorScale, ctx.clrWhite);
     }
 }
 
 void renderBottomTablet(AppContext& ctx) {
-    Ui::backdrop(320.0f, 240.0f, static_cast<float>(ctx.animTick), Ui::rgba(22, 16, 38), Ui::rgba(10, 8, 18), ctx.clrPrimary, 0.01f);
+    u32 pinkAccent = Ui::rgba(255, 102, 171);
+    u32 cyanAccent = Ui::rgba(56, 210, 255);
+
+    Ui::backdrop(320.0f, 240.0f, static_cast<float>(ctx.animTick),
+                 Ui::rgba(18, 12, 32), Ui::rgba(10, 6, 20), pinkAccent, 0.01f);
+
     float rx, ry, rw, rh;
     ctx.settings.getTabletRect(rx, ry, rw, rh);
 
-    Ui::panel(rx, ry, rw, rh, 0.1f, C2D_Color32(28, 24, 44, 235), ctx.clrPrimary);
-    u32 gridClr = C2D_Color32(95, 80, 145, 70);
-    C2D_DrawLine(rx + rw * 0.5f, ry, gridClr, rx + rw * 0.5f, ry + rh, gridClr, 1.0f, 0.14f);
-    C2D_DrawLine(rx, ry + rh * 0.5f, gridClr, rx + rw, ry + rh * 0.5f, gridClr, 1.0f, 0.14f);
-    drawRectOutline(rx, ry, rw, rh, 1.5f, C2D_Color32(120, 95, 185, 200), 0.16f);
+    // Superficie del área activa de Tablet estilo osu!lazer
+    Ui::panel(rx, ry, rw, rh, 0.10f, Ui::rgba(20, 14, 34, 215), pinkAccent);
+    drawRectOutline(rx, ry, rw, rh, 1.4f, Ui::withAlpha(pinkAccent, 165), 0.15f);
+
+    // Líneas guía centrales y esquinas iluminadas
+    u32 gridClr = Ui::rgba(255, 102, 171, 35);
+    C2D_DrawLine(rx + rw * 0.5f, ry + 2.0f, gridClr, rx + rw * 0.5f, ry + rh - 2.0f, gridClr, 1.0f, 0.12f);
+    C2D_DrawLine(rx + 2.0f, ry + rh * 0.5f, gridClr, rx + rw - 2.0f, ry + rh * 0.5f, gridClr, 1.0f, 0.12f);
+
+    // Medallón sutil de marca de agua en el centro del tablet
+    float pulse = ctx.getBpmPulse();
+    float mR = 22.0f + pulse * 3.0f;
+    Ui::ring(ctx.settings.tabletCenterX, ctx.settings.tabletCenterY, 0.13f, mR, 1.5f, Ui::rgba(255, 102, 171, 55), 28);
+    drawCenteredText(ctx.textBuf, ctx.settings.tabletCenterX, ctx.settings.tabletCenterY - 1.0f,
+                     0.48f, Ui::rgba(255, 102, 171, 55), "osu!", 0.14f);
+
     if (ctx.kiaiGlow > 0.01f) {
-        float pulse = ctx.getBpmPulse();
-        u8 tAlpha = static_cast<u8>(ctx.kiaiGlow * (45.0f + 110.0f * pulse));
-        drawRectOutline(rx - 1.0f, ry - 1.0f, rw + 2.0f, rh + 2.0f, 2.0f, Ui::rgba(255, 195, 75, tAlpha), 0.17f);
-    }
-    drawRing(ctx.settings.tabletCenterX, ctx.settings.tabletCenterY, 12.0f, 1.2f, C2D_Color32(110, 95, 165, 180), 18, 0.18f);
-
-    // Barra inferior de información rápida de la canción
-    Ui::gradV(0.0f, 218.0f, 320.0f, 22.0f, 0.25f, Ui::rgba(14, 11, 26, 120), Ui::rgba(14, 11, 26, 240));
-    std::string nowPlaying = truncateString(ctx.beatmap.title + " [" + ctx.beatmap.version + "]", 42);
-    drawCenteredText(ctx.textBuf, 160.0f, 229.0f, 0.36f, ctx.clrMuted, nowPlaying.c_str(), 0.3f);
-
-    if (ctx.isTouching) {
-        Ui::glow(ctx.touch.px, ctx.touch.py, 0.45f, 12.0f, Ui::withAlpha(ctx.clrKeyActive, 130), 3);
-        C2D_DrawCircleSolid(ctx.touch.px, ctx.touch.py, 0.5f, 4.0f, ctx.clrKeyActive);
+        u8 tAlpha = static_cast<u8>(ctx.kiaiGlow * (55.0f + 110.0f * pulse));
+        drawRectOutline(rx - 1.0f, ry - 1.0f, rw + 2.0f, rh + 2.0f, 2.2f, Ui::rgba(255, 195, 75, tAlpha), 0.17f);
     }
 
+    // Barra inferior de información rápida estilo osu!lazer
+    C2D_DrawRectSolid(0.0f, 216.0f, 0.25f, 320.0f, 24.0f, Ui::rgba(12, 8, 22, 230));
+    C2D_DrawRectSolid(0.0f, 216.0f, 0.26f, 320.0f, 1.0f, Ui::withAlpha(pinkAccent, 95));
+    std::string nowPlaying = truncateString(ctx.beatmap.title + " [" + ctx.beatmap.version + "]", 38);
+    drawCenteredTextWithShadow(ctx.textBuf, 160.0f, 227.5f, 0.36f, Ui::rgba(220, 215, 240), nowPlaying.c_str(), 0.30f);
+
+    // Indicador de toque acotado estrictamente al rectángulo del tablet
+    if (ctx.isTouching && !ctx.isPaused) {
+        bool touchingSkip = ctx.skipAvailable && (ctx.touch.px >= 195 && ctx.touch.px <= 318 && ctx.touch.py >= 185 && ctx.touch.py <= 240);
+        if (!touchingSkip) {
+            float tx = std::max(rx + 4.0f, std::min(rx + rw - 4.0f, static_cast<float>(ctx.touch.px)));
+            float ty = std::max(ry + 4.0f, std::min(ry + rh - 4.0f, static_cast<float>(ctx.touch.py)));
+            Ui::glow(tx, ty, 0.45f, 14.0f, Ui::withAlpha(cyanAccent, 130), 3);
+            C2D_DrawCircleSolid(tx, ty, 0.48f, 4.5f, cyanAccent);
+            C2D_DrawCircleSolid(tx, ty, 0.49f, 2.0f, ctx.clrWhite);
+        }
+    }
+
+    // Botón inclinado SKIP >> estilo osu!lazer
     if (ctx.skipAvailable && !ctx.isPaused) {
-        float skipPulse = 0.5f + 0.5f * std::sin(ctx.animTick * 0.25f);
-        u32 sBg = Ui::lerpColor(Ui::rgba(255, 80, 140, 240), Ui::rgba(255, 120, 180, 250), skipPulse);
-        Ui::panel(212.0f, 196.0f, 100.0f, 34.0f, 0.85f, sBg, ctx.clrWhite);
-        drawCenteredText(ctx.textBuf, 262.0f, 208.0f, 0.44f, ctx.clrWhite, "SKIP >>", 0.90f);
-        drawCenteredText(ctx.textBuf, 262.0f, 222.0f, 0.25f, Ui::rgba(255, 230, 242), LOC(STR_SKIP_HINT), 0.90f);
+        Ui::slantButton(204.0f, 182.0f, 108.0f, 30.0f, -5.0f, pinkAccent,
+                        "SKIP >>", "Saltar Intro", ctx.textBuf, true, 0.85f);
     }
     Ui::drawTransition(320.0f, 240.0f, ctx.screenFade, ctx.clrPrimary);
 }

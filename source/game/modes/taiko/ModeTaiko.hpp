@@ -10,6 +10,8 @@
 #include "AudioPlayer.hpp"
 #include "UiKit.hpp"
 
+struct AppContext;
+
 enum TaikoNoteType {
     TAIKO_DON = 0,       // Centro Rojo (Normal)
     TAIKO_KATSU = 1,     // Borde Azul (Normal)
@@ -120,6 +122,6 @@ public:
     void renderTopScreen(C2D_TextBuf textBuf, int songTime, float scrollRate, float eyeSign, float slider3D, bool inKiai, float bpmPulse,
                          int combo = 0, int score = 0, float hp = 1.0f, float acc = 100.0f,
                          const char* songTitle = nullptr, const char* diffName = nullptr,
-                         int bgMode = 0);
-    void renderBottomDrum(C2D_TextBuf textBuf, float animTick, const GameSettings* pSettings = nullptr, float guideAlpha = 0.0f);
+                         int bgMode = 0, const struct AppContext* pCtx = nullptr);
+    void renderBottomDrum(C2D_TextBuf textBuf, float animTick, const GameSettings* pSettings = nullptr, float guideAlpha = 0.0f, const struct AppContext* pCtx = nullptr);
 };

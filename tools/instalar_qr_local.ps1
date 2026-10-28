@@ -13,10 +13,18 @@ if (-not (Test-Path $ciaPath)) {
     exit 1
 }
 
-# Obtener IP activa de Wi-Fi / LAN
-$ipObj = Get-NetIPAddress -AddressFamily IPv4 | Where-Object {
-    $_.InterfaceAlias -match 'Wi-Fi|Ethernet' -and $_.IPAddress -notmatch '^169\.254\.'
+# Obtener IP activa: priorizar Hotspot Movil de Windows (192.168.137.1) si esta activo, si no Wi-Fi / Ethernet
+$hotspotIp = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object {
+    $_.IPAddress -like '192.168.137.*'
 } | Select-Object -First 1
+
+$ipObj = if ($hotspotIp) {
+    $hotspotIp
+} else {
+    Get-NetIPAddress -AddressFamily IPv4 | Where-Object {
+        $_.InterfaceAlias -match 'Wi-Fi|Ethernet' -and $_.IPAddress -notmatch '^169\.254\.'
+    } | Select-Object -First 1
+}
 
 $ip = if ($ipObj) { $ipObj.IPAddress } else { "127.0.0.1" }
 $ciaUrl = "http://${ip}:${port}/osu-3ds.cia"
@@ -34,6 +42,17 @@ Write-Host "Presiona Ctrl+C para cerrar el servidor cuando termine." -Foreground
 Write-Host ""
 
 Start-Process $qrApiUrl
+
+# Liberar puerto si habia una instancia previa
+try {
+    $existing = Get-NetTCPConnection -LocalPort $port -ErrorAction SilentlyContinue
+    if ($existing) {
+        $existing.OwningProcess | Select-Object -Unique | Where-Object { $_ -ne $PID } | ForEach-Object {
+            Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue
+        }
+        Start-Sleep -Milliseconds 400
+    }
+} catch {}
 
 # Iniciar servidor socket TCP puro (no requiere permisos de administrador de http.sys)
 $endpoint = New-Object System.Net.IPEndPoint([System.Net.IPAddress]::Any, $port)

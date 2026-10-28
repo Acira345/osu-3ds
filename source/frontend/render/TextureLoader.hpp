@@ -19,6 +19,19 @@ struct LoadedTexture {
     C2D_Image image;
     bool loaded = false;
     std::string sourcePath = "";
+    int origW = 0;
+    int origH = 0;
+    bool is2x = false;
+
+    float getNativeW() const {
+        if (!loaded || origW <= 0) return 0.0f;
+        return is2x ? (static_cast<float>(origW) * 0.5f) : static_cast<float>(origW);
+    }
+
+    float getNativeH() const {
+        if (!loaded || origH <= 0) return 0.0f;
+        return is2x ? (static_cast<float>(origH) * 0.5f) : static_cast<float>(origH);
+    }
 
     static u32 nextPow2(u32 v) {
         u32 p = 8;
@@ -31,6 +44,9 @@ struct LoadedTexture {
             C3D_TexDelete(&tex);
             loaded = false;
             sourcePath = "";
+            origW = 0;
+            origH = 0;
+            is2x = false;
         }
     }
 
@@ -38,6 +54,7 @@ struct LoadedTexture {
     struct Decoded {
         u32* data = nullptr;
         u32 texW = 0, texH = 0, dstW = 0, dstH = 0;
+        int origW = 0, origH = 0;
         void release() { if (data) { std::free(data); data = nullptr; } }
     };
 
@@ -102,6 +119,7 @@ struct LoadedTexture {
         out.data = outBuf;
         out.texW = texW; out.texH = texH;
         out.dstW = dstW; out.dstH = dstH;
+        out.origW = srcW; out.origH = srcH;
         return true;
     }
 
@@ -126,6 +144,11 @@ struct LoadedTexture {
         image.subtex = &subtex;
         loaded       = true;
         sourcePath   = path;
+        origW        = d.origW;
+        origH        = d.origH;
+        std::string pLow = path;
+        for (char& c : pLow) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        is2x         = (pLow.find("@2x") != std::string::npos);
         return true;
     }
 
@@ -164,6 +187,26 @@ struct LoadedTexture {
         C2D_ImageTint tint;
         C2D_PlainImageTint(&tint, color, blend);
         C2D_DrawImageAt(image, cx - size * 0.5f, cy - size * 0.5f, z, &tint, sx, sy);
+    }
+
+    // Dibuja un sprite centrado en (cx, cy) con diametro (size x size), rotacion (radianes) y color/tinte multiplicativo
+    void drawCenteredSpriteRotated(float cx, float cy, float size, float z, float angleRad, u32 color = 0xFFFFFFFF, float blend = 0.0f) const {
+        if (!loaded || subtex.width == 0 || subtex.height == 0) return;
+        float sx = size / static_cast<float>(subtex.width);
+        float sy = size / static_cast<float>(subtex.height);
+
+        C2D_ImageTint tint;
+        if (blend <= 0.001f) {
+            u8 a = static_cast<u8>((color >> 24) & 0xFF);
+            if (a >= 254 && color == 0xFFFFFFFF) {
+                C2D_DrawImageAtRotated(image, cx, cy, z, angleRad, nullptr, sx, sy);
+                return;
+            }
+            C2D_AlphaImageTint(&tint, static_cast<float>(a) / 255.0f);
+        } else {
+            C2D_PlainImageTint(&tint, color, blend);
+        }
+        C2D_DrawImageAtRotated(image, cx, cy, z, angleRad, &tint, sx, sy);
     }
 
     // Dibuja la imagen centrada en (cx, cy) con tamaño (w, h)

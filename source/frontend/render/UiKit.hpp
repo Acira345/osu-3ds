@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <algorithm>
 #include <vector>
+#include "../../backend/i18n/Localization.hpp"
 
 // Kit visual estilo osu! lazer: degradados, tarjetas inclinadas, triangulos flotantes, brillos y pildoras.
 namespace Ui {
@@ -55,20 +56,30 @@ inline void slantRectGrad(float x, float y, float w, float h, float slant, float
     C2D_DrawTriangle(x + w, y, right, x + w - slant, y + h, right, x, y + h, left, z);
 }
 
-// Rectangulo con sombra suave + borde superior brillante
+// Rectangulo con sombra suave + borde superior brillante (respeta la transparencia del color)
 inline void panel(float x, float y, float w, float h, float z, u32 color, u32 accent = 0) {
-    C2D_DrawRectSolid(x + 2.0f, y + 3.0f, z - 0.01f, w, h, rgba(0, 0, 0, 90));
-    gradV(x, y, w, h, z, brighten(color, 1.25f), color);
-    C2D_DrawRectSolid(x, y, z + 0.005f, w, 1.0f, rgba(255, 255, 255, 40));
+    u8 a = static_cast<u8>((color >> 24) & 0xFF);
+    u8 shadowA = static_cast<u8>((static_cast<int>(a) * 80) / 255);
+    C2D_DrawRectSolid(x + 2.0f, y + 3.0f, z - 0.01f, w, h, rgba(0, 0, 0, shadowA));
+    gradV(x, y, w, h, z, brighten(color, 1.20f), color);
+    C2D_DrawRectSolid(x, y, z + 0.005f, w, 1.0f, rgba(255, 255, 255, static_cast<u8>((static_cast<int>(a) * 45) / 255)));
     if (accent) C2D_DrawRectSolid(x, y, z + 0.006f, 3.0f, h, accent);
 }
 
-// Pildora redondeada (estrellas, etiquetas)
+// Pildora redondeada (estrellas, etiquetas, barras verticales u horizontales)
 inline void pill(float x, float y, float w, float h, float z, u32 color) {
-    float r = h * 0.5f;
-    C2D_DrawRectSolid(x + r, y, z, w - h, h, color);
-    C2D_DrawCircleSolid(x + r, y + r, z, r, color);
-    C2D_DrawCircleSolid(x + w - r, y + r, z, r, color);
+    if (w <= 0.0f || h <= 0.0f) return;
+    if (w >= h) {
+        float r = h * 0.5f;
+        if (w > h) C2D_DrawRectSolid(x + r, y, z, w - h, h, color);
+        C2D_DrawCircleSolid(x + r, y + r, z, r, color);
+        C2D_DrawCircleSolid(x + w - r, y + r, z, r, color);
+    } else {
+        float r = w * 0.5f;
+        if (h > w) C2D_DrawRectSolid(x, y + r, z, w, h - w, color);
+        C2D_DrawCircleSolid(x + r, y + r, z, r, color);
+        C2D_DrawCircleSolid(x + r, y + h - r, z, r, color);
+    }
 }
 
 // Brillo radial falso con circulos concentricos translucidos
@@ -190,7 +201,7 @@ inline void lazerHeader(float w, float z, const char* title, const char* rightTa
         C2D_DrawCircleSolid(dotX, 12.0f, z + 0.02f, 3.2f, dotClr);
 
         C2D_Text tConn;
-        C2D_TextParse(&tConn, textBuf, connected ? "Conectado" : "Local");
+        C2D_TextParse(&tConn, textBuf, connected ? LOC(STR_CONN_CONNECTED) : LOC(STR_CONN_LOCAL));
         C2D_TextOptimize(&tConn);
         C2D_DrawText(&tConn, C2D_WithColor, dotX + 7.0f, 6.5f, z + 0.02f, 0.33f, 0.33f, dotClr);
 
@@ -232,20 +243,38 @@ inline void slantButton(float x, float y, float w, float h, float slant, u32 acc
     }
 
     if (textBuf) {
+        bool compact = (w < 110.0f);
         if (title && title[0]) {
             C2D_Text tTitle;
             C2D_TextParse(&tTitle, textBuf, title);
             C2D_TextOptimize(&tTitle);
-            C2D_DrawText(&tTitle, C2D_WithColor, rx + 15.0f, y + 4.5f, z + 0.02f, 0.44f, 0.44f, rgba(255, 255, 255));
+            if (compact) {
+                float tw = 0.0f, th = 0.0f;
+                float scl = 0.36f;
+                C2D_TextGetDimensions(&tTitle, scl, scl, &tw, &th);
+                float tx = rx + (w - tw) * 0.5f + 2.0f;
+                float ty = (subtitle && subtitle[0]) ? (y + 3.5f) : (y + (h - th) * 0.5f);
+                C2D_DrawText(&tTitle, C2D_WithColor, tx, ty, z + 0.02f, scl, scl, rgba(255, 255, 255));
+            } else {
+                C2D_DrawText(&tTitle, C2D_WithColor, rx + 15.0f, y + 4.5f, z + 0.02f, 0.44f, 0.44f, rgba(255, 255, 255));
+            }
         }
         if (subtitle && subtitle[0]) {
             C2D_Text tSub;
             C2D_TextParse(&tSub, textBuf, subtitle);
             C2D_TextOptimize(&tSub);
-            u32 subClr = selected ? brighten(accentClr, 1.35f) : withAlpha(brighten(accentClr, 1.20f), 215);
-            C2D_DrawText(&tSub, C2D_WithColor, rx + 15.0f, y + h - 14.5f, z + 0.02f, 0.30f, 0.30f, subClr);
+            u32 subClr = selected ? brighten(accentClr, 1.35f) : withAlpha(brighten(accentClr, 1.20f), 225);
+            if (compact) {
+                float tw = 0.0f, th = 0.0f;
+                float scl = 0.30f;
+                C2D_TextGetDimensions(&tSub, scl, scl, &tw, &th);
+                float tx = rx + (w - tw) * 0.5f + 1.0f;
+                C2D_DrawText(&tSub, C2D_WithColor, tx, y + h - 13.0f, z + 0.02f, scl, scl, subClr);
+            } else {
+                C2D_DrawText(&tSub, C2D_WithColor, rx + 15.0f, y + h - 14.5f, z + 0.02f, 0.30f, 0.30f, subClr);
+            }
         }
-        if (selected) {
+        if (selected && !compact) {
             C2D_Text tSel;
             C2D_TextParse(&tSel, textBuf, ">>");
             C2D_TextOptimize(&tSel);
@@ -376,14 +405,15 @@ inline void metricGauge(float x, float y, const char* label, float val, float ma
         C2D_Text t;
         C2D_TextParse(&t, textBuf, buf);
         C2D_TextOptimize(&t);
-        C2D_DrawText(&t, C2D_WithColor, x, y, z + 0.02f, 0.32f, 0.32f, rgba(235, 230, 255));
+        C2D_DrawText(&t, C2D_WithColor, x + 1.0f, y + 1.0f, z + 0.015f, 0.37f, 0.37f, rgba(0, 0, 0, 210));
+        C2D_DrawText(&t, C2D_WithColor, x, y, z + 0.02f, 0.37f, 0.37f, rgba(255, 255, 255));
     }
-    float barW = 38.0f;
-    float barH = 4.0f;
+    float barW = 44.0f;
+    float barH = 4.5f;
     float ratio = std::max(0.0f, std::min(1.0f, val / maxVal));
-    pill(x, y + 11.0f, barW, barH, z + 0.01f, rgba(28, 22, 44, 240));
+    pill(x, y + 14.0f, barW, barH, z + 0.01f, rgba(20, 15, 34, 210));
     if (ratio > 0.02f) {
-        pill(x, y + 11.0f, std::max(barH, barW * ratio), barH, z + 0.02f, rgba(56, 210, 255));
+        pill(x, y + 14.0f, std::max(barH, barW * ratio), barH, z + 0.02f, rgba(56, 210, 255));
     }
 }
 

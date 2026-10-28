@@ -1,4 +1,6 @@
 #include "ModeTaiko.hpp"
+#include "AppContext.hpp"
+#include "backend/i18n/Localization.hpp"
 
 void ModeTaiko::drawRing(float x, float y, float radius, float thickness, u32 color, int segments, float z) {
     const float step = (2.0f * static_cast<float>(M_PI)) / segments;
@@ -462,7 +464,7 @@ void ModeTaiko::drawBachi(float handleX, float handleY, float tipX, float tipY, 
 void ModeTaiko::renderTopScreen(C2D_TextBuf textBuf, int songTime, float scrollRate, float eyeSign, float slider3D, bool inKiai, float bpmPulse,
                      int combo, int score, float hp, float acc,
                      const char* songTitle, const char* diffName,
-                     int bgMode) {
+                     int bgMode, const AppContext* pCtx) {
     auto depthShift = [&](float px) { return eyeSign * slider3D * px; };
     float dTarget = depthShift(2.5f);
     float tgX = TARGET_X + dTarget;
@@ -814,23 +816,46 @@ void ModeTaiko::renderTopScreen(C2D_TextBuf textBuf, int songTime, float scrollR
                 drawSunburst(nx, tgY, r + 2.5f, r + 7.5f, 10, Ui::rgba(255, 215, 60, static_cast<u8>(95 + 75 * bpmPulse)), 0.222f, songTime * 0.005f);
             }
 
-            // 1. Contorno negro carbón exterior
-            C2D_DrawCircleSolid(nx, tgY, 0.23f, r + 2.6f, Ui::rgba(20, 16, 26));
+            bool drewSprite = false;
+            if (pCtx) {
+                if (isDon) {
+                    if (isBig && pCtx->texTaikoDonBig.loaded) {
+                        pCtx->texTaikoDonBig.drawCenteredSprite(nx, tgY, r * 2.3f, 0.24f, CLR_WHITE, 0.0f);
+                        drewSprite = true;
+                    } else if (pCtx->texTaikoDon.loaded) {
+                        pCtx->texTaikoDon.drawCenteredSprite(nx, tgY, r * 2.3f, 0.24f, CLR_WHITE, 0.0f);
+                        drewSprite = true;
+                    }
+                } else {
+                    if (isBig && pCtx->texTaikoKatBig.loaded) {
+                        pCtx->texTaikoKatBig.drawCenteredSprite(nx, tgY, r * 2.3f, 0.24f, CLR_WHITE, 0.0f);
+                        drewSprite = true;
+                    } else if (pCtx->texTaikoKat.loaded) {
+                        pCtx->texTaikoKat.drawCenteredSprite(nx, tgY, r * 2.3f, 0.24f, CLR_WHITE, 0.0f);
+                        drewSprite = true;
+                    }
+                }
+            }
 
-            // 2. Aro blanco brillante
-            C2D_DrawCircleSolid(nx, tgY, 0.233f, r + 1.2f, CLR_WHITE);
+            if (!drewSprite) {
+                // 1. Contorno negro carbón exterior
+                C2D_DrawCircleSolid(nx, tgY, 0.23f, r + 2.6f, Ui::rgba(20, 16, 26));
 
-            // 3. Borde exterior oscuro
-            C2D_DrawCircleSolid(nx, tgY, 0.236f, r, outerClr);
+                // 2. Aro blanco brillante
+                C2D_DrawCircleSolid(nx, tgY, 0.233f, r + 1.2f, CLR_WHITE);
 
-            // 4. Parche interior de color Don / Kat vibrante
-            C2D_DrawCircleSolid(nx, tgY, 0.239f, r * 0.90f, innerClr);
+                // 3. Borde exterior oscuro
+                C2D_DrawCircleSolid(nx, tgY, 0.236f, r, outerClr);
 
-            // 5. Destello especular 3D superior
-            C2D_DrawCircleSolid(nx - r * 0.30f, tgY - r * 0.30f, 0.241f, r * 0.24f, Ui::rgba(255, 255, 255, 130));
+                // 4. Parche interior de color Don / Kat vibrante
+                C2D_DrawCircleSolid(nx, tgY, 0.239f, r * 0.90f, innerClr);
 
-            // 6. Carita auténtica anime de Taiko
-            drawTaikoFace(nx, tgY, r, isBig, isDon, 0.243f);
+                // 5. Destello especular 3D superior
+                C2D_DrawCircleSolid(nx - r * 0.30f, tgY - r * 0.30f, 0.241f, r * 0.24f, Ui::rgba(255, 255, 255, 130));
+
+                // 6. Carita auténtica anime de Taiko
+                drawTaikoFace(nx, tgY, r, isBig, isDon, 0.243f);
+            }
         }
     }
 
@@ -846,13 +871,20 @@ void ModeTaiko::renderTopScreen(C2D_TextBuf textBuf, int songTime, float scrollR
         drawSunburst(tgX, tgY, burstRInner, burstROuter * 0.72f, 12, Ui::rgba(255, 230, 50, 225), 0.282f, -songTime * 0.010f);
     }
 
-    // Aro exterior de madera con remaches dorados
-    C2D_DrawCircleSolid(tgX, tgY, 0.285f, NOTE_RADIUS + 5.0f, Ui::rgba(70, 32, 18, 245));
-    drawRing(tgX, tgY, NOTE_RADIUS + 4.0f, 1.6f, Ui::rgba(225, 180, 60, 240), 28, 0.29f);
+    if (pCtx && pCtx->texTaikoHitCircle.loaded) {
+        pCtx->texTaikoHitCircle.drawCenteredSprite(tgX, tgY, NOTE_RADIUS * 2.5f, 0.285f, CLR_WHITE, 0.0f);
+        if (pCtx->texTaikoHitCircleOverlay.loaded) {
+            pCtx->texTaikoHitCircleOverlay.drawCenteredSprite(tgX, tgY, NOTE_RADIUS * 2.5f, 0.288f, CLR_WHITE, 0.0f);
+        }
+    } else {
+        // Aro exterior de madera con remaches dorados
+        C2D_DrawCircleSolid(tgX, tgY, 0.285f, NOTE_RADIUS + 5.0f, Ui::rgba(70, 32, 18, 245));
+        drawRing(tgX, tgY, NOTE_RADIUS + 4.0f, 1.6f, Ui::rgba(225, 180, 60, 240), 28, 0.29f);
 
-    // Parche de cuero blanco del receptor
-    C2D_DrawCircleSolid(tgX, tgY, 0.295f, NOTE_RADIUS + 1.5f, Ui::rgba(240, 236, 226, 245));
-    C2D_DrawCircleSolid(tgX, tgY, 0.298f, NOTE_RADIUS, Ui::rgba(255, 254, 250, 255));
+        // Parche de cuero blanco del receptor
+        C2D_DrawCircleSolid(tgX, tgY, 0.295f, NOTE_RADIUS + 1.5f, Ui::rgba(240, 236, 226, 245));
+        C2D_DrawCircleSolid(tgX, tgY, 0.298f, NOTE_RADIUS, Ui::rgba(255, 254, 250, 255));
+    }
 
     // Anillo de pulso rítmico dorado
     float pulseR = NOTE_RADIUS * (0.80f + 0.20f * bpmPulse);
@@ -963,7 +995,7 @@ void ModeTaiko::renderTopScreen(C2D_TextBuf textBuf, int songTime, float scrollR
 }
 
 // --- RENDERIZADO PANTALLA INFERIOR (Tambor Wadaiko 3DS en perspectiva e interactivo 1:1) ---
-void ModeTaiko::renderBottomDrum(C2D_TextBuf textBuf, float animTick, const GameSettings* pSettings, float guideAlpha) {
+void ModeTaiko::renderBottomDrum(C2D_TextBuf textBuf, float animTick, const GameSettings* pSettings, float guideAlpha, const AppContext* pCtx) {
     float screenW = 320.0f;
     float screenH = 240.0f;
 
@@ -1168,6 +1200,6 @@ void ModeTaiko::renderBottomDrum(C2D_TextBuf textBuf, float animTick, const Game
         drawCenteredText(textBuf, cx + 83.0f, cy + 13.5f, 0.26f, keyTextClr, kKatR.c_str(), 0.26f);
 
         Ui::panel(16.0f, 8.0f, 288.0f, 22.0f, 0.85f, Ui::rgba(14, 28, 36, static_cast<u8>(235 * guideAlpha)), Ui::rgba(255, 100, 140, a));
-        drawCenteredText(textBuf, 160.0f, 19.0f, 0.32f, Ui::rgba(255, 235, 245, a), "CONTROLES TAIKO: ROJO = DON (Centro) | AZUL = KATSU (Borde)", 0.88f);
+        drawCenteredText(textBuf, 160.0f, 19.0f, 0.32f, Ui::rgba(255, 235, 245, a), LOC(STR_TAIKO_CONTROLS_HINT), 0.88f);
     }
 }

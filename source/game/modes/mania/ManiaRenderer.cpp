@@ -1,4 +1,6 @@
 #include "ModeMania.hpp"
+#include "AppContext.hpp"
+#include "backend/i18n/Localization.hpp"
 
 void ModeMania::drawCenteredText(C2D_TextBuf buf, float cx, float cy, float scale, u32 color, const char* str, float z) {
     C2D_Text text;
@@ -28,7 +30,7 @@ void ModeMania::drawRing(float x, float y, float radius, float thickness, u32 co
 }
 
 // Renderizado en Pantalla Superior (400x240) con soporte Estereoscópico 3D
-void ModeMania::renderTopScreen(C2D_TextBuf textBuf, int songTime, float speedRate, float eyeSign, float slider3DVal, bool inKiai, float bpmPulse) {
+void ModeMania::renderTopScreen(C2D_TextBuf textBuf, int songTime, float speedRate, float eyeSign, float slider3DVal, bool inKiai, float bpmPulse, const AppContext* pCtx) {
     auto depthShift = [&](float px) { return eyeSign * slider3DVal * px; };
     float dTrack = depthShift(-1.0f);
     float dReceptor = depthShift(3.0f);
@@ -60,11 +62,15 @@ void ModeMania::renderTopScreen(C2D_TextBuf textBuf, int songTime, float speedRa
             u32 colClr = isOuter ? CLR_COL_OUTER : CLR_COL_INNER;
             u8 aTop = static_cast<u8>(colHitGlow[i] * 95.0f);
             u8 aBot = static_cast<u8>(std::min(255.0f, colLightAlpha[i] * 130.0f + colHitGlow[i] * 125.0f));
-            Ui::gradV(lx + 1.0f, 0.0f, COL_WIDTH - 2.0f, HIT_Y, 0.20f,
-                      Ui::withAlpha(colClr, aTop), Ui::withAlpha(colClr, aBot));
-            if (colHitGlow[i] > 0.12f) {
-                u8 coreA = static_cast<u8>(colHitGlow[i] * 210.0f);
-                C2D_DrawRectSolid(lx + (COL_WIDTH * 0.5f) - 1.5f, 0.0f, 0.22f, 3.0f, HIT_Y, Ui::rgba(255, 255, 255, coreA));
+            if (pCtx && pCtx->texManiaStageLight.loaded) {
+                pCtx->texManiaStageLight.drawCentered(lx + COL_WIDTH * 0.5f, HIT_Y - 20.0f, COL_WIDTH, 40.0f, 0.22f, aBot);
+            } else {
+                Ui::gradV(lx + 1.0f, 0.0f, COL_WIDTH - 2.0f, HIT_Y, 0.20f,
+                          Ui::withAlpha(colClr, aTop), Ui::withAlpha(colClr, aBot));
+                if (colHitGlow[i] > 0.12f) {
+                    u8 coreA = static_cast<u8>(colHitGlow[i] * 210.0f);
+                    C2D_DrawRectSolid(lx + (COL_WIDTH * 0.5f) - 1.5f, 0.0f, 0.22f, 3.0f, HIT_Y, Ui::rgba(255, 255, 255, coreA));
+                }
             }
         }
     }
@@ -143,8 +149,17 @@ void ModeMania::renderTopScreen(C2D_TextBuf textBuf, int songTime, float speedRa
             // Cabeza de la Hold Note (si aún no se ha golpeado)
             if (!n.headJudged && yHead >= -10.0f && yHead <= 240.0f) {
                 float noteXHead = getNoteX(n.column, yHead) + 2.0f;
-                Ui::panel(noteXHead, yHead - 5.0f, noteW, 11.0f, 0.45f, mainClr, CLR_WHITE);
-                C2D_DrawRectSolid(noteXHead + 2.0f, yHead - 2.0f, 0.47f, noteW - 4.0f, 3.5f, CLR_WHITE);
+                const LoadedTexture* pNoteTex = nullptr;
+                if (pCtx) {
+                    if (isOuter && pCtx->texManiaNote1.loaded) pNoteTex = &pCtx->texManiaNote1;
+                    else if (!isOuter && pCtx->texManiaNote2.loaded) pNoteTex = &pCtx->texManiaNote2;
+                }
+                if (pNoteTex && pNoteTex->loaded) {
+                    pNoteTex->drawCentered(noteXHead + noteW * 0.5f, yHead, noteW, 11.0f, 0.45f);
+                } else {
+                    Ui::panel(noteXHead, yHead - 5.0f, noteW, 11.0f, 0.45f, mainClr, CLR_WHITE);
+                    C2D_DrawRectSolid(noteXHead + 2.0f, yHead - 2.0f, 0.47f, noteW - 4.0f, 3.5f, CLR_WHITE);
+                }
             }
         } else {
             // Nota simple (Tap Note)
@@ -153,21 +168,33 @@ void ModeMania::renderTopScreen(C2D_TextBuf textBuf, int songTime, float speedRa
 
             if (noteY >= -12.0f && noteY <= 240.0f && !n.headJudged) {
                 float noteX = getNoteX(n.column, noteY) + 2.0f;
-                // Cuerpo de nota con relieve redondeado
-                Ui::panel(noteX, noteY - 5.0f, noteW, 11.0f, 0.45f, mainClr, CLR_WHITE);
-                // Brillo interior superior blanco
-                C2D_DrawRectSolid(noteX + 2.0f, noteY - 3.0f, 0.47f, noteW - 4.0f, 3.5f, CLR_WHITE);
+                const LoadedTexture* pNoteTex = nullptr;
+                if (pCtx) {
+                    if (isOuter && pCtx->texManiaNote1.loaded) pNoteTex = &pCtx->texManiaNote1;
+                    else if (!isOuter && pCtx->texManiaNote2.loaded) pNoteTex = &pCtx->texManiaNote2;
+                }
+                if (pNoteTex && pNoteTex->loaded) {
+                    pNoteTex->drawCentered(noteX + noteW * 0.5f, noteY, noteW, 11.0f, 0.45f);
+                } else {
+                    // Cuerpo de nota con relieve redondeado
+                    Ui::panel(noteX, noteY - 5.0f, noteW, 11.0f, 0.45f, mainClr, CLR_WHITE);
+                    // Brillo interior superior blanco
+                    C2D_DrawRectSolid(noteX + 2.0f, noteY - 3.0f, 0.47f, noteW - 4.0f, 3.5f, CLR_WHITE);
+                }
             }
         }
     }
 
     // 5. Receptores (Hit Line & Targets)
     float rTrackX = TRACK_X + dReceptor;
-    C2D_DrawRectSolid(rTrackX, HIT_Y - 7.0f, 0.28f, trackW, RECEPTOR_H, Ui::rgba(10, 8, 16, 230));
-
-    // Línea de impacto luminosa
-    u32 hitLineClr = inKiai ? Ui::rgba(255, 120, 200, 240) : Ui::rgba(220, 220, 255, 220);
-    C2D_DrawLine(rTrackX, HIT_Y, hitLineClr, rTrackX + trackW, HIT_Y, hitLineClr, 2.5f, 0.50f);
+    if (pCtx && pCtx->texManiaStageBottom.loaded) {
+        pCtx->texManiaStageBottom.drawCentered(rTrackX + trackW * 0.5f, HIT_Y, trackW, 16.0f, 0.28f);
+    } else {
+        C2D_DrawRectSolid(rTrackX, HIT_Y - 7.0f, 0.28f, trackW, RECEPTOR_H, Ui::rgba(10, 8, 16, 230));
+        // Línea de impacto luminosa
+        u32 hitLineClr = inKiai ? Ui::rgba(255, 120, 200, 240) : Ui::rgba(220, 220, 255, 220);
+        C2D_DrawLine(rTrackX, HIT_Y, hitLineClr, rTrackX + trackW, HIT_Y, hitLineClr, 2.5f, 0.50f);
+    }
 
     // Cajas de receptor para cada una de las 4 columnas
     for (int i = 0; i < 4; ++i) {
@@ -224,7 +251,7 @@ void ModeMania::renderTopScreen(C2D_TextBuf textBuf, int songTime, float speedRa
 }
 
 // Renderizado en Pantalla Inferior (320x240): Teclado táctil interactivo de 4 columnas
-void ModeMania::renderBottomLanes(C2D_TextBuf textBuf, float animTick) {
+void ModeMania::renderBottomLanes(C2D_TextBuf textBuf, float animTick, const AppContext* pCtx) {
     constexpr float LANE_W = 80.0f; // 320 / 4 = 80 px por carril
 
     for (int i = 0; i < 4; ++i) {
@@ -262,7 +289,7 @@ void ModeMania::renderBottomLanes(C2D_TextBuf textBuf, float animTick) {
         const char* keySec = "";
         if (i == 0)      { keyHint = "L"; keySec = "D-PAD <"; }
         else if (i == 1) { keyHint = "^"; keySec = "D-PAD v"; }
-        else if (i == 2) { keyHint = "X"; keySec = "BOTON Y"; }
+        else if (i == 2) { keyHint = "X"; keySec = LOC(STR_MANIA_BTN_Y); }
         else if (i == 3) { keyHint = "A"; keySec = "B / R"; }
 
         // Placa decorativa de la columna
@@ -276,13 +303,13 @@ void ModeMania::renderBottomLanes(C2D_TextBuf textBuf, float animTick) {
 
     // Barra de ajuste rápido de velocidad táctil en la parte superior
     Ui::pill(10.0f, 6.0f, 75.0f, 22.0f, 0.28f, Ui::rgba(32, 24, 48, 230));
-    drawCenteredText(textBuf, 47.5f, 17.0f, 0.33f, Ui::rgba(255, 120, 150), "[-] VEL", 0.32f);
+    drawCenteredText(textBuf, 47.5f, 17.0f, 0.33f, Ui::rgba(255, 120, 150), LOC(STR_MANIA_MINUS_SPEED), 0.32f);
 
     char curSpd[32];
-    std::snprintf(curSpd, sizeof(curSpd), "VEL: %.1fx", userScrollSpeed);
+    std::snprintf(curSpd, sizeof(curSpd), LOC(STR_MANIA_SPEED_FMT), userScrollSpeed);
     Ui::pill(110.0f, 6.0f, 100.0f, 22.0f, 0.28f, Ui::rgba(24, 18, 38, 240));
     drawCenteredText(textBuf, 160.0f, 17.0f, 0.34f, Ui::rgba(255, 215, 60), curSpd, 0.32f);
 
     Ui::pill(235.0f, 6.0f, 75.0f, 22.0f, 0.28f, Ui::rgba(32, 24, 48, 230));
-    drawCenteredText(textBuf, 272.5f, 17.0f, 0.33f, Ui::rgba(80, 220, 160), "VEL [+]", 0.32f);
+    drawCenteredText(textBuf, 272.5f, 17.0f, 0.33f, Ui::rgba(80, 220, 160), LOC(STR_MANIA_PLUS_SPEED), 0.32f);
 }

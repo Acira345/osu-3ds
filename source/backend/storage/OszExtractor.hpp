@@ -263,14 +263,13 @@ inline void ensureDirectoryRecursive(const std::string& path) {
 
 inline bool shouldExtractFile(const std::string& filename) {
     // Extraer archivos de mapas (.osu), configuración de skins (.ini), audio (.mp3, .wav, .ogg),
-    // video optimizado (.3dsv, .mjpg) e imágenes de fondo/skins (.jpg, .jpeg, .png), omitiendo duplicados @2x
+    // video optimizado (.3dsv, .mjpg) e imágenes de fondo/skins (.jpg, .jpeg, .png, incluyendo soporte HD @2x)
     size_t dot = filename.find_last_of('.');
     if (dot == std::string::npos) return false;
     std::string lowName = filename;
     for (char& c : lowName) {
         if (c >= 'A' && c <= 'Z') c = c - 'A' + 'a';
     }
-    if (lowName.find("@2x.") != std::string::npos) return false;
 
     std::string ext = lowName.substr(dot);
     return (ext == ".osu" || ext == ".ini" || ext == ".mp3" || ext == ".wav" ||
@@ -346,14 +345,26 @@ inline bool extractOszFile(const std::string& oszPath, const std::string& destFo
         pos += 46 + nameLen + extraLen + commentLen;
 
         // Aplanar subcarpetas o limpiar caracteres inválidos en FAT32
+        if (entryName.find("__MACOSX") != std::string::npos) continue;
         size_t slash = entryName.find_last_of("/\\");
         std::string baseName = (slash != std::string::npos) ? entryName.substr(slash + 1) : entryName;
-        if (baseName.empty() || !shouldExtractFile(baseName)) continue;
+        if (baseName.empty() || baseName[0] == '.' || !shouldExtractFile(baseName)) continue;
 
         for (char& c : baseName) {
-            if (c == ':' || c == '*' || c == '?' || c == '"' || c == '<' || c == '>' || c == '|') {
+            unsigned char uc = static_cast<unsigned char>(c);
+            if (uc < 32 || c == ':' || c == '*' || c == '?' || c == '"' || c == '<' || c == '>' || c == '|') {
                 c = '_';
             }
+        }
+        // Limitar longitud del nombre de archivo interno en FAT32 preservando su extensión
+        if (baseName.size() > 110) {
+            size_t dotPos = baseName.find_last_of('.');
+            std::string extPart = (dotPos != std::string::npos && baseName.size() - dotPos <= 8) ? baseName.substr(dotPos) : "";
+            std::string stemPart = (dotPos != std::string::npos) ? baseName.substr(0, dotPos) : baseName;
+            if (stemPart.size() > 100) stemPart.resize(100);
+            while (!stemPart.empty() && (stemPart.back() == ' ' || stemPart.back() == '.')) stemPart.pop_back();
+            if (stemPart.empty()) stemPart = "file";
+            baseName = stemPart + extPart;
         }
 
         // Leer cabecera local (LFH)
@@ -425,10 +436,17 @@ inline int extractAllPendingArchives(const std::string& searchFolder, const std:
             if (ext == targetExt) {
                 std::string folderName = name.substr(0, name.size() - 4);
                 for (char& c : folderName) {
-                    if (c == ':' || c == '*' || c == '?' || c == '"' || c == '<' || c == '>' || c == '|') {
+                    unsigned char uc = static_cast<unsigned char>(c);
+                    if (uc < 32 || uc >= 127 || c == ':' || c == '*' || c == '?' || c == '"' || c == '<' || c == '>' || c == '|') {
                         c = '_';
                     }
                 }
+                if (folderName.size() > 60) folderName.resize(60);
+                while (!folderName.empty() && (folderName.back() == ' ' || folderName.back() == '.')) {
+                    folderName.pop_back();
+                }
+                if (folderName.empty()) folderName = "Beatmap";
+
                 std::string fullArchPath = searchFolder;
                 if (!fullArchPath.empty() && fullArchPath.back() != '/') fullArchPath += '/';
                 fullArchPath += name;
@@ -440,6 +458,9 @@ inline int extractAllPendingArchives(const std::string& searchFolder, const std:
                 if (extractOszFile(fullArchPath, destDir)) {
                     std::remove(fullArchPath.c_str());
                     extractedSets++;
+                } else {
+                    // Eliminar archivo corrupto o incompleto para que no bloquee futuras descargas
+                    std::remove(fullArchPath.c_str());
                 }
             }
         }

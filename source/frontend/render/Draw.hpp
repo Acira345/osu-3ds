@@ -11,6 +11,7 @@ void drawText(C2D_TextBuf buf, float x, float y, float scale, u32 color, const c
 void drawCenteredText(C2D_TextBuf buf, float cx, float cy, float scale, u32 color, const char* str, float z = 0.85f);
 void drawTextWithShadow(C2D_TextBuf buf, float x, float y, float scale, u32 color, const char* str, float z = 0.85f, u32 shadowColor = Ui::rgba(0, 0, 0, 220));
 void drawCenteredTextWithShadow(C2D_TextBuf buf, float cx, float cy, float scale, u32 color, const char* str, float z = 0.85f, u32 shadowColor = Ui::rgba(0, 0, 0, 220));
+void drawRightAlignedText(C2D_TextBuf buf, float rx, float y, float scale, u32 color, const char* str, float z = 0.85f);
 void drawKeyBadge(C2D_TextBuf buf, float x, float y, const char* key, const char* label, u32 keyClr, u32 textClr = Ui::rgba(255, 255, 255), float z = 0.85f);
 void drawReverseArrow(float cx, float cy, float targetX, float targetY, float size, u32 color, float z = 0.42f);
 std::string truncateString(const std::string& str, size_t maxLen);

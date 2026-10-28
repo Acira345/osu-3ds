@@ -26,7 +26,6 @@ void AppContext::init() {
     }
 
     scoreMgr.load();
-    songMgr.initAndScan(&scoreMgr);
 
     audio.initDSPAndHitsounds();
     audio.setVolumes(settings.musicVolume, settings.sfxVolume);
@@ -62,31 +61,10 @@ void AppContext::init() {
 
     applyActiveSkinAudio();
 
-    // Al arrancar el juego, reproducir siempre en primer lugar la canción emblemática ("Click the circles")
     std::srand(static_cast<unsigned int>(osGetTime()));
     selectedSet = 0;
     selectedDiff = 0;
     carouselPos = 0.0f;
-
-    std::string themePath = "romfs:/circles.mp3";
-    bool themeStarted = false;
-    FILE* fTheme = std::fopen(themePath.c_str(), "rb");
-    if (fTheme) {
-        std::fclose(fTheme);
-        themeStarted = audio.startMusic(themePath, 0, 1.0f, 0);
-        if (themeStarted) {
-            audio.setLoop(false);
-            bgLoader.cancel();
-            bgTex.unload();
-        }
-    }
-
-    if (!themeStarted && !songMgr.sets.empty()) {
-        selectedSet = std::rand() % static_cast<int>(songMgr.sets.size());
-        selectedDiff = 0;
-        carouselPos = static_cast<float>(selectedSet);
-        updateSongPreview();
-    }
 }
 
 void AppContext::beginFrame() {
@@ -150,6 +128,39 @@ void AppContext::shutdown() {
     texSkinOverlay.unload();
     texSkinApproach.unload();
     texSkinComboBurst.unload();
+    texSkinSliderBall.unload();
+    texSkinSliderFollow.unload();
+    texSkinReverseArrow.unload();
+    texSkinHit0.unload();
+    texSkinHit50.unload();
+    texSkinHit100.unload();
+    texSkinHit300.unload();
+
+    texTaikoDon.unload();
+    texTaikoKat.unload();
+    texTaikoDonBig.unload();
+    texTaikoKatBig.unload();
+    texTaikoHitCircle.unload();
+    texTaikoHitCircleOverlay.unload();
+    texTaikoDrum.unload();
+    texTaikoDrumDon.unload();
+    texTaikoDrumKat.unload();
+
+    texManiaNote1.unload();
+    texManiaNote2.unload();
+    texManiaNoteS.unload();
+    texManiaStageLight.unload();
+    texManiaStageBottom.unload();
+
+    texCatchFruitApple.unload();
+    texCatchFruitOrange.unload();
+    texCatchFruitGrape.unload();
+    texCatchFruitStrawberry.unload();
+    texCatchFruitBanana.unload();
+    texCatchFruitDrop.unload();
+    texCatchPlate.unload();
+    texCatchCatcher.unload();
+
     settings.save();
     audio.exitAll();
     if (textBuf) {
@@ -173,6 +184,7 @@ void AppContext::applyActiveSkinAudio() {
         sk.nightcoreHatWav
     );
 
+    // osu!standard
     if (!sk.cursorPng.empty())           texSkinCursor.loadFromFile(sk.cursorPng, 64, 64);
     else                                 texSkinCursor.unload();
 
@@ -190,6 +202,98 @@ void AppContext::applyActiveSkinAudio() {
 
     if (!sk.comboBurstPng.empty())       texSkinComboBurst.loadFromFile(sk.comboBurstPng, 160, 240);
     else                                 texSkinComboBurst.unload();
+
+    if (!sk.sliderBallPng.empty())       texSkinSliderBall.loadFromFile(sk.sliderBallPng, 64, 64);
+    else                                 texSkinSliderBall.unload();
+
+    if (!sk.sliderFollowPng.empty())     texSkinSliderFollow.loadFromFile(sk.sliderFollowPng, 128, 128);
+    else                                 texSkinSliderFollow.unload();
+
+    if (!sk.reverseArrowPng.empty())     texSkinReverseArrow.loadFromFile(sk.reverseArrowPng, 64, 64);
+    else                                 texSkinReverseArrow.unload();
+
+    if (!sk.hit0Png.empty())             texSkinHit0.loadFromFile(sk.hit0Png, 128, 128);
+    else                                 texSkinHit0.unload();
+
+    if (!sk.hit50Png.empty())            texSkinHit50.loadFromFile(sk.hit50Png, 128, 128);
+    else                                 texSkinHit50.unload();
+
+    if (!sk.hit100Png.empty())           texSkinHit100.loadFromFile(sk.hit100Png, 128, 128);
+    else                                 texSkinHit100.unload();
+
+    if (!sk.hit300Png.empty())           texSkinHit300.loadFromFile(sk.hit300Png, 128, 128);
+    else                                 texSkinHit300.unload();
+
+    // osu!taiko (carga sprites del skin o usa los integrados en romfs)
+    if (!sk.taikoDonPng.empty())         texTaikoDon.loadFromFile(sk.taikoDonPng, 64, 64);
+    else                                 texTaikoDon.loadFromFile("romfs:/gfx/taiko/don_note.png", 64, 64);
+
+    if (!sk.taikoKatPng.empty())         texTaikoKat.loadFromFile(sk.taikoKatPng, 64, 64);
+    else                                 texTaikoKat.loadFromFile("romfs:/gfx/taiko/kat_note.png", 64, 64);
+
+    if (!sk.taikoDonBigPng.empty())      texTaikoDonBig.loadFromFile(sk.taikoDonBigPng, 96, 96);
+    else if (!sk.taikoDonPng.empty())    texTaikoDonBig.loadFromFile(sk.taikoDonPng, 96, 96);
+    else                                 texTaikoDonBig.loadFromFile("romfs:/gfx/taiko/don_big.png", 96, 96);
+
+    if (!sk.taikoKatBigPng.empty())      texTaikoKatBig.loadFromFile(sk.taikoKatBigPng, 96, 96);
+    else if (!sk.taikoKatPng.empty())    texTaikoKatBig.loadFromFile(sk.taikoKatPng, 96, 96);
+    else                                 texTaikoKatBig.loadFromFile("romfs:/gfx/taiko/kat_big.png", 96, 96);
+
+    if (!sk.taikoHitCirclePng.empty())   texTaikoHitCircle.loadFromFile(sk.taikoHitCirclePng, 64, 64);
+    else                                 texTaikoHitCircle.unload();
+
+    if (!sk.taikoHitCircleOverlayPng.empty()) texTaikoHitCircleOverlay.loadFromFile(sk.taikoHitCircleOverlayPng, 64, 64);
+    else                                      texTaikoHitCircleOverlay.unload();
+
+    if (!sk.taikoDrumPng.empty())        texTaikoDrum.loadFromFile(sk.taikoDrumPng, 160, 140);
+    else                                 texTaikoDrum.loadFromFile("romfs:/gfx/taiko/drum_idle.png", 160, 140);
+
+    if (!sk.taikoDrumDonPng.empty())     texTaikoDrumDon.loadFromFile(sk.taikoDrumDonPng, 160, 140);
+    else                                 texTaikoDrumDon.loadFromFile("romfs:/gfx/taiko/drum_don.png", 160, 140);
+
+    if (!sk.taikoDrumKatPng.empty())     texTaikoDrumKat.loadFromFile(sk.taikoDrumKatPng, 180, 140);
+    else                                 texTaikoDrumKat.loadFromFile("romfs:/gfx/taiko/drum_kat.png", 180, 140);
+
+    // osu!mania
+    if (!sk.maniaNote1Png.empty())       texManiaNote1.loadFromFile(sk.maniaNote1Png, 64, 32);
+    else                                 texManiaNote1.unload();
+
+    if (!sk.maniaNote2Png.empty())       texManiaNote2.loadFromFile(sk.maniaNote2Png, 64, 32);
+    else                                 texManiaNote2.unload();
+
+    if (!sk.maniaNoteSPng.empty())       texManiaNoteS.loadFromFile(sk.maniaNoteSPng, 64, 32);
+    else                                 texManiaNoteS.unload();
+
+    if (!sk.maniaStageLightPng.empty())  texManiaStageLight.loadFromFile(sk.maniaStageLightPng, 64, 64);
+    else                                 texManiaStageLight.unload();
+
+    if (!sk.maniaStageBottomPng.empty()) texManiaStageBottom.loadFromFile(sk.maniaStageBottomPng, 160, 32);
+    else                                 texManiaStageBottom.unload();
+
+    // osu!catch
+    if (!sk.catchFruitApplePng.empty())      texCatchFruitApple.loadFromFile(sk.catchFruitApplePng, 48, 48);
+    else                                     texCatchFruitApple.unload();
+
+    if (!sk.catchFruitOrangePng.empty())     texCatchFruitOrange.loadFromFile(sk.catchFruitOrangePng, 48, 48);
+    else                                     texCatchFruitOrange.unload();
+
+    if (!sk.catchFruitGrapePng.empty())      texCatchFruitGrape.loadFromFile(sk.catchFruitGrapePng, 48, 48);
+    else                                     texCatchFruitGrape.unload();
+
+    if (!sk.catchFruitStrawberryPng.empty()) texCatchFruitStrawberry.loadFromFile(sk.catchFruitStrawberryPng, 48, 48);
+    else                                     texCatchFruitStrawberry.unload();
+
+    if (!sk.catchFruitBananaPng.empty())     texCatchFruitBanana.loadFromFile(sk.catchFruitBananaPng, 48, 48);
+    else                                     texCatchFruitBanana.unload();
+
+    if (!sk.catchFruitDropPng.empty())       texCatchFruitDrop.loadFromFile(sk.catchFruitDropPng, 32, 32);
+    else                                     texCatchFruitDrop.unload();
+
+    if (!sk.catchPlatePng.empty())           texCatchPlate.loadFromFile(sk.catchPlatePng, 160, 32);
+    else                                     texCatchPlate.unload();
+
+    if (!sk.catchCatcherPng.empty())         texCatchCatcher.loadFromFile(sk.catchCatcherPng, 64, 64);
+    else                                     texCatchCatcher.unload();
 }
 
 void AppContext::spawnParticles(float osuX, float osuY, u32 color, int count, float minSpd, float maxSpd, float baseSize, int maxLifeFrames) {
@@ -389,78 +493,53 @@ void AppContext::openSearchKeyboard() {
 
 bool AppContext::startSelectedBeatmap() {
     if (songMgr.sets.empty()) return false;
+    selectedSet = std::max(0, std::min(selectedSet, static_cast<int>(songMgr.sets.size()) - 1));
     const auto& curSet = songMgr.sets[selectedSet];
     if (curSet.difficulties.empty()) return false;
+    selectedDiff = std::max(0, std::min(selectedDiff, static_cast<int>(curSet.difficulties.size()) - 1));
     const auto& diffEntry = curSet.difficulties[selectedDiff];
 
-    if (!beatmap.loadFromFile(diffEntry.osuPath, false)) return false;
-    beatmap.applyMods(settings.activeMods);
-
+    // Preparar datos para la pantalla de transición y carga escalonada estilo osu!lazer
     bgLoader.cancel();
     previewDelay = 0;
-    if (!beatmap.fullBackgroundPath.empty()) {
-        bgTex.loadFromFile(beatmap.fullBackgroundPath, bgMaxW, bgMaxH);
-    }
-    if (settings.enableVideo && !beatmap.fullVideoPath.empty()) {
-        videoPlayer.openVideo(beatmap.fullVideoPath, beatmap.videoOffsetMs);
-    } else {
-        videoPlayer.closeVideo();
-    }
-
+    videoPlayer.closeVideo();
+    audio.stopMusic();
     audio.setVolumes(settings.musicVolume, settings.sfxVolume);
-    applyActiveSkinAudio();
-    if (settings.beatmapHitsounds && !beatmap.folderPath.empty()) {
-        audio.loadBeatmapHitsounds(beatmap.folderPath, beatmap.sampleSetName);
-    }
     audio.playHitSound(2);
 
-    bool isTaikoPlay = (settings.gameMode == MODE_TAIKO || diffEntry.mode == 1);
-    bool isCatchPlay = (settings.gameMode == MODE_CATCH || diffEntry.mode == 2);
-    bool isManiaPlay = (settings.gameMode == MODE_MANIA || diffEntry.mode == 3);
-    if (isTaikoPlay) {
-        taikoEngine.initFromBeatmap(beatmap);
-    } else if (isCatchPlay) {
-        catchEngine.initFromBeatmap(beatmap);
-    } else if (isManiaPlay) {
-        maniaEngine.initFromBeatmap(beatmap);
-    }
+    songIntroOsuPath = diffEntry.osuPath;
+    songIntroTitle   = curSet.title;
+    songIntroArtist  = curSet.artist;
+    songIntroVersion = diffEntry.version;
+    songIntroCreator = diffEntry.creator;
+    songIntroStars   = getModAdjustedStars(diffEntry.starRating, settings.activeMods);
+    songIntroCS      = diffEntry.cs;
+    songIntroAR      = diffEntry.ar;
+    songIntroOD      = diffEntry.od;
+    songIntroHP      = diffEntry.hp;
+    songIntroMode    = (settings.gameMode == MODE_TAIKO || diffEntry.mode == 1) ? 1
+                     : (settings.gameMode == MODE_CATCH || diffEntry.mode == 2) ? 2
+                     : (settings.gameMode == MODE_MANIA || diffEntry.mode == 3) ? 3 : 0;
 
-    int leadIn = std::max(0, beatmap.audioLeadIn);
-    if (isTaikoPlay) {
-        if (!taikoEngine.notes.empty()) {
-            int firstObjTime = taikoEngine.notes.front().time;
-            int minStartWait = 1400;
-            if (firstObjTime < minStartWait) {
-                leadIn = std::max(leadIn, minStartWait - firstObjTime);
-            }
-        }
-    } else if (isCatchPlay) {
-        if (!catchEngine.fruits.empty()) {
-            int firstObjTime = catchEngine.fruits.front().time;
-            int minStartWait = 1300;
-            if (firstObjTime < minStartWait) {
-                leadIn = std::max(leadIn, minStartWait - firstObjTime);
-            }
-        }
-    } else if (isManiaPlay) {
-        if (!maniaEngine.notes.empty()) {
-            int firstObjTime = maniaEngine.notes.front().time;
-            int minStartWait = 1200;
-            if (firstObjTime < minStartWait) {
-                leadIn = std::max(leadIn, minStartWait - firstObjTime);
-            }
-        }
-    } else if (!beatmap.circles.empty()) {
-        int firstObjTime = beatmap.circles.front().time;
-        int minStartWait = static_cast<int>(beatmap.diff.preempt) + 500;
-        if (firstObjTime < minStartWait) {
-            leadIn = std::max(leadIn, minStartWait - firstObjTime);
-        }
-    }
+    inSongIntro        = true;
+    songIntroTick      = 0;
+    songIntroLoadStage = 0;
+    songIntroLeadInMs  = 1600;
 
-    float speedRate = getModsSpeedMultiplier(settings.activeMods);
-    audio.startMusic(beatmap.fullAudioPath, leadIn, speedRate, 0);
-    gameplayFallbackStartTick = osGetTime() + leadIn;
+    if (!isReplayPlaying) {
+        currentReplay.clear();
+        currentReplay.osuKey = ScoreManager::makeKey(diffEntry.osuPath);
+        currentReplay.title = curSet.title;
+        currentReplay.artist = curSet.artist;
+        currentReplay.difficulty = diffEntry.version;
+        currentReplay.playerName = sysUser;
+        currentReplay.gameMode = songIntroMode;
+        currentReplay.activeMods = settings.activeMods;
+        currentReplay.timestamp = osGetTime();
+        currentReplay.frames.reserve(7200);
+    } else {
+        replayPlaybackIndex = 0;
+    }
 
     combo = 0;
     prevCombo = 0;
@@ -499,8 +578,6 @@ bool AppContext::startSelectedBeatmap() {
     smokeParticles.clear();
     popups.clear();
     particles.clear();
-    int curStartMode = isTaikoPlay ? 1 : isCatchPlay ? 2 : isManiaPlay ? 3 : 0;
-    localRecords = scoreMgr.getTopRecords(diffEntry.osuPath, 4, curStartMode);
     overtakeFlashAnim = 0.0f;
     hasOvertakenBest = false;
     skipAvailable = false;
@@ -508,7 +585,7 @@ bool AppContext::startSelectedBeatmap() {
     inBreakPeriod = false;
     breakRemainingMs = 0;
     breakTotalMs = 0;
-    breakNextObjPos = !beatmap.circles.empty() ? Vec2(beatmap.circles.front().x, beatmap.circles.front().y) : Vec2(256.0f, 192.0f);
+    breakNextObjPos = Vec2(256.0f, 192.0f);
     inKiai = false;
     prevInKiai = false;
     kiaiGlow = 0.0f;
@@ -655,4 +732,41 @@ void AppContext::triggerSuddenDeathFail() {
         appState = STATE_RESULTS;
     }
 }
+
+bool AppContext::playReplay(const ReplayData& rep) {
+    if (!rep.isValid()) return false;
+    currentReplay = rep;
+    isReplayPlaying = true;
+    replayPlaybackIndex = 0;
+
+    // Buscar si el beatmap de la repetición está en la biblioteca actual
+    bool found = false;
+    std::string targetKey = rep.osuKey;
+    for (size_t s = 0; s < songMgr.sets.size(); ++s) {
+        for (size_t d = 0; d < songMgr.sets[s].difficulties.size(); ++d) {
+            std::string dKey = ScoreManager::makeKey(songMgr.sets[s].difficulties[d].osuPath);
+            if (dKey == targetKey || (songMgr.sets[s].title == rep.title && songMgr.sets[s].difficulties[d].version == rep.difficulty)) {
+                selectedSet = static_cast<int>(s);
+                selectedDiff = static_cast<int>(d);
+                found = true;
+                break;
+            }
+        }
+        if (found) break;
+    }
+
+    // Configurar modo y mods coincidentes con la repetición para física exacta
+    settings.activeMods = rep.activeMods;
+    settings.gameMode = rep.gameMode;
+    return startSelectedBeatmap();
+}
+
+bool AppContext::playReplayFromFile(const std::string& path) {
+    ReplayData rep;
+    if (!ReplayManager::loadReplay(path, rep)) {
+        return false;
+    }
+    return playReplay(rep);
+}
+
 

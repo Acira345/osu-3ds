@@ -2,6 +2,241 @@
 #include "StandardMode.hpp"
 
 void runGameplayScreen(AppContext& ctx) {
+    // =========================================================
+    // 0. TRANSICIÓN DE PRESENTACIÓN Y CARGA ESCALONADA ESTILO OSU!LAZER
+    //    Evita cualquier congelamiento o bajón de FPS al iniciar el mapa.
+    // =========================================================
+    if (ctx.inSongIntro) {
+        ctx.songIntroTick++;
+
+        // Permitir cancelar con B antes de que arranque la canción
+        if (ctx.kDown & KEY_B) {
+            ctx.inSongIntro = false;
+            ctx.isReplayPlaying = false;
+            ctx.audio.stopMusic();
+            ctx.videoPlayer.closeVideo();
+            ctx.applyActiveSkinAudio();
+            ctx.appState = STATE_SONG_SELECT;
+            ctx.updateSongPreview();
+            return;
+        }
+
+        // Ejecutar 1 tarea pesada por fotograma tras completar la animación de entrada (tick >= 10)
+        if (ctx.songIntroTick == 10 && ctx.songIntroLoadStage == 0) {
+            ctx.songIntroLoadStage = 1;
+            if (!ctx.beatmap.loadFromFile(ctx.songIntroOsuPath, false)) {
+                ctx.inSongIntro = false;
+                ctx.isReplayPlaying = false;
+                ctx.appState = STATE_SONG_SELECT;
+                ctx.updateSongPreview();
+                return;
+            }
+            ctx.beatmap.applyMods(ctx.settings.activeMods);
+        } else if (ctx.songIntroTick == 13 && ctx.songIntroLoadStage == 1) {
+            ctx.songIntroLoadStage = 2;
+            // Reutilizar la textura de fondo si ya fue cargada asíncronamente en el selector
+            if (!ctx.beatmap.fullBackgroundPath.empty()) {
+                if (!(ctx.bgTex.loaded && ctx.bgTex.sourcePath == ctx.beatmap.fullBackgroundPath)) {
+                    ctx.bgTex.loadFromFile(ctx.beatmap.fullBackgroundPath, ctx.bgMaxW, ctx.bgMaxH);
+                }
+            }
+            bool isTaiko = (ctx.songIntroMode == 1);
+            bool isCatch = (ctx.songIntroMode == 2);
+            bool isMania = (ctx.songIntroMode == 3);
+            if (isTaiko)      ctx.taikoEngine.initFromBeatmap(ctx.beatmap);
+            else if (isCatch) ctx.catchEngine.initFromBeatmap(ctx.beatmap);
+            else if (isMania) ctx.maniaEngine.initFromBeatmap(ctx.beatmap);
+
+            ctx.localRecords = ctx.scoreMgr.getTopRecords(ctx.songIntroOsuPath, 4, ctx.songIntroMode);
+            ctx.breakNextObjPos = !ctx.beatmap.circles.empty()
+                ? Vec2(ctx.beatmap.circles.front().x, ctx.beatmap.circles.front().y)
+                : Vec2(256.0f, 192.0f);
+        } else if (ctx.songIntroTick == 16 && ctx.songIntroLoadStage == 2) {
+            ctx.songIntroLoadStage = 3;
+            ctx.audio.setVolumes(ctx.settings.musicVolume, ctx.settings.sfxVolume);
+            ctx.applyActiveSkinAudio();
+            if (ctx.settings.beatmapHitsounds && !ctx.beatmap.folderPath.empty()) {
+                ctx.audio.loadBeatmapHitsounds(ctx.beatmap.folderPath, ctx.beatmap.sampleSetName);
+            }
+            if (ctx.settings.enableVideo && !ctx.beatmap.fullVideoPath.empty()) {
+                ctx.videoPlayer.openVideo(ctx.beatmap.fullVideoPath, ctx.beatmap.videoOffsetMs);
+            } else {
+                ctx.videoPlayer.closeVideo();
+            }
+        } else if (ctx.songIntroTick == 19 && ctx.songIntroLoadStage == 3) {
+            ctx.songIntroLoadStage = 4;
+            bool isTaiko = (ctx.songIntroMode == 1);
+            bool isCatch = (ctx.songIntroMode == 2);
+            bool isMania = (ctx.songIntroMode == 3);
+            int leadIn = std::max(0, ctx.beatmap.audioLeadIn);
+            if (isTaiko && !ctx.taikoEngine.notes.empty()) {
+                int firstObjTime = ctx.taikoEngine.notes.front().time;
+                if (firstObjTime < 1400) leadIn = std::max(leadIn, 1400 - firstObjTime);
+            } else if (isCatch && !ctx.catchEngine.fruits.empty()) {
+                int firstObjTime = ctx.catchEngine.fruits.front().time;
+                if (firstObjTime < 1300) leadIn = std::max(leadIn, 1300 - firstObjTime);
+            } else if (isMania && !ctx.maniaEngine.notes.empty()) {
+                int firstObjTime = ctx.maniaEngine.notes.front().time;
+                if (firstObjTime < 1200) leadIn = std::max(leadIn, 1200 - firstObjTime);
+            } else if (!ctx.beatmap.circles.empty()) {
+                int firstObjTime = ctx.beatmap.circles.front().time;
+                int minStartWait = static_cast<int>(ctx.beatmap.diff.preempt) + 500;
+                if (firstObjTime < minStartWait) leadIn = std::max(leadIn, minStartWait - firstObjTime);
+            }
+            ctx.songIntroLeadInMs = leadIn;
+            float speedRate = getModsSpeedMultiplier(ctx.settings.activeMods);
+            // Pre-carga y decodifica los 3 buffers de audio iniciales en RAM y congela el reloj
+            ctx.audio.startMusic(ctx.beatmap.fullAudioPath, leadIn, speedRate, 0);
+            ctx.audio.pauseMusic();
+        } else if (ctx.songIntroTick == 21 && ctx.songIntroLoadStage == 4) {
+            ctx.songIntroLoadStage = 5;
+        }
+
+        // Animación de entrada (ticks 1..10) y salida (ticks 24..38) a 60 FPS estables
+        float inT = std::min(1.0f, static_cast<float>(ctx.songIntroTick) / 10.0f);
+        float easeIn = std::sin(inT * (static_cast<float>(M_PI) * 0.5f));
+        float outT = (ctx.songIntroTick > 24)
+            ? std::min(1.0f, static_cast<float>(ctx.songIntroTick - 24) / 14.0f)
+            : 0.0f;
+        float easeOut = outT * outT;
+
+        if (ctx.songIntroTick >= 38) {
+            ctx.inSongIntro = false;
+            ctx.audio.resumeMusic();
+            ctx.gameplayFallbackStartTick = osGetTime() + ctx.songIntroLeadInMs;
+            ctx.screenFade = 0.35f;
+        } else {
+            u32 lazerPink = Ui::rgba(255, 102, 171);
+            u32 lazerCyan = Ui::rgba(56, 210, 255);
+            u32 starClr   = getStarRatingColor(ctx.songIntroStars);
+
+            float loadPct = (ctx.songIntroLoadStage == 0) ? 0.15f
+                          : (ctx.songIntroLoadStage == 1) ? 0.38f
+                          : (ctx.songIntroLoadStage == 2) ? 0.64f
+                          : (ctx.songIntroLoadStage == 3) ? 0.86f : 1.0f;
+            const char* stageTxt = (ctx.songIntroLoadStage <= 1) ? LOC(STR_GAME_LOAD_STAGE_1)
+                                 : (ctx.songIntroLoadStage == 2) ? LOC(STR_GAME_LOAD_STAGE_2)
+                                 : (ctx.songIntroLoadStage == 3) ? LOC(STR_GAME_LOAD_STAGE_3)
+                                 : (ctx.songIntroLoadStage == 4) ? LOC(STR_GAME_LOAD_STAGE_4)
+                                 : LOC(STR_GAME_LOAD_STAGE_READY);
+
+            float slideOffset = (1.0f - easeIn) * -320.0f + easeOut * 360.0f;
+            u8 panelAlpha = static_cast<u8>(255.0f * easeIn * (1.0f - easeOut));
+
+            C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
+
+            // --- PANTALLA SUPERIOR: SPLASH DE PRESENTACIÓN DEL BEATMAP ESTILO OSU!LAZER ---
+            for (int eye = 0; eye < (ctx.stereoActive ? 2 : 1); ++eye) {
+                C3D_RenderTarget* curTop = (eye == 0) ? ctx.topScreen : ctx.topScreenRight;
+                float eyeSign = ctx.stereoActive ? ((eye == 0) ? 1.0f : -1.0f) : 0.0f;
+                auto depthShift = [&](float px) { return eyeSign * ctx.slider3D * px; };
+
+                C2D_TargetClear(curTop, Ui::rgba(10, 7, 20));
+                C2D_SceneBegin(curTop);
+
+                float dBg = depthShift(-3.0f);
+                Ui::backdrop(400.0f, 240.0f, static_cast<float>(ctx.animTick),
+                             Ui::rgba(22, 14, 38), Ui::rgba(10, 7, 20), lazerPink, 0.01f);
+                if (ctx.bgTex.loaded) {
+                    ctx.bgTex.drawRect(dBg, 0.0f, 400.0f, 240.0f, 0.02f, 255);
+                    u8 dimAlpha = static_cast<u8>((ctx.settings.bgDim * 220) / 100);
+                    C2D_DrawRectSolid(0.0f, 0.0f, 0.03f, 400.0f, 240.0f, Ui::rgba(10, 7, 18, std::max<u8>(110, dimAlpha)));
+                }
+
+                // Franjas diagonales decorativas estilo osu!lazer
+                float dCard = depthShift(2.5f) + slideOffset;
+                Ui::slantRect(-30.0f + dCard * 0.6f, 0.0f, 95.0f, 240.0f, -18.0f, 0.15f,
+                              Ui::withAlpha(lazerPink, static_cast<u8>(panelAlpha * 0.22f)));
+                Ui::slantRect(335.0f - dCard * 0.6f, 0.0f, 95.0f, 240.0f, -18.0f, 0.15f,
+                              Ui::withAlpha(lazerCyan, static_cast<u8>(panelAlpha * 0.20f)));
+
+                // Tarjeta central translúcida de presentación del mapa
+                float cX = 36.0f + dCard;
+                float cY = 32.0f;
+                float cW = 328.0f;
+                float cH = 176.0f;
+                Ui::panel(cX, cY, cW, cH, 0.25f, Ui::rgba(16, 11, 30, static_cast<u8>(panelAlpha * 0.86f)), lazerPink);
+
+                // Insignia superior: Modo + Estrellas
+                const char* modeName = (ctx.songIntroMode == 1) ? "osu!taiko"
+                                     : (ctx.songIntroMode == 2) ? "osu!catch"
+                                     : (ctx.songIntroMode == 3) ? "osu!mania"
+                                     : "osu!standard";
+                Ui::slantRect(cX + 14.0f, cY + 12.0f, 98.0f, 20.0f, -5.0f, 0.28f, lazerPink);
+                drawCenteredText(ctx.textBuf, cX + 63.0f, cY + 22.0f, 0.35f, ctx.clrWhite, modeName, 0.31f);
+
+                char starTxt[24];
+                std::snprintf(starTxt, sizeof(starTxt), "* %.2f", ctx.songIntroStars);
+                Ui::slantRect(cX + 118.0f, cY + 12.0f, 64.0f, 20.0f, -5.0f, 0.28f, starClr);
+                drawCenteredText(ctx.textBuf, cX + 150.0f, cY + 22.0f, 0.35f, Ui::rgba(18, 12, 28), starTxt, 0.31f);
+
+                if (ctx.settings.activeMods != MOD_NONE) {
+                    std::string mStr = formatModsString(ctx.settings.activeMods);
+                    Ui::slantRect(cX + 188.0f, cY + 12.0f, 76.0f, 20.0f, -5.0f, 0.28f, Ui::rgba(46, 34, 78, 225));
+                    drawCenteredText(ctx.textBuf, cX + 226.0f, cY + 22.0f, 0.33f, Ui::rgba(255, 210, 60), mStr.c_str(), 0.31f);
+                }
+
+                // Título de la canción y Artista
+                drawTextWithShadow(ctx.textBuf, cX + 14.0f, cY + 40.0f, 0.52f, ctx.clrWhite,
+                                   truncateString(ctx.songIntroTitle, 25).c_str(), 0.31f);
+                drawTextWithShadow(ctx.textBuf, cX + 14.0f, cY + 63.0f, 0.38f, Ui::rgba(215, 210, 240),
+                                   truncateString(ctx.songIntroArtist, 32).c_str(), 0.31f);
+
+                // Dificultad y Mapeador
+                char diffCreator[96];
+                std::snprintf(diffCreator, sizeof(diffCreator), LOC(STR_GAME_MAPPED_BY_FMT),
+                              truncateString(ctx.songIntroVersion, 18).c_str(),
+                              ctx.songIntroCreator.empty() ? "Unknown" : truncateString(ctx.songIntroCreator, 16).c_str());
+                drawTextWithShadow(ctx.textBuf, cX + 14.0f, cY + 84.0f, 0.35f, lazerCyan, diffCreator, 0.31f);
+
+                // Píldoras de CS / AR / OD / HP
+                float gY = cY + 108.0f;
+                Ui::metricGauge(cX + 14.0f,  gY, "CS", ctx.songIntroCS, 10.0f, ctx.textBuf, 0.29f);
+                Ui::metricGauge(cX + 92.0f,  gY, "AR", ctx.songIntroAR, 10.0f, ctx.textBuf, 0.29f);
+                Ui::metricGauge(cX + 170.0f, gY, "OD", ctx.songIntroOD, 10.0f, ctx.textBuf, 0.29f);
+                Ui::metricGauge(cX + 248.0f, gY, "HP", ctx.songIntroHP, 10.0f, ctx.textBuf, 0.29f);
+
+                // Barra de progreso inclinada estilo osu!lazer en la base de la tarjeta
+                float barX = cX + 14.0f;
+                float barY = cY + 140.0f;
+                float barW = cW - 28.0f;
+                float barH = 10.0f;
+                Ui::slantRect(barX, barY, barW, barH, -4.0f, 0.28f, Ui::rgba(28, 20, 48, 220));
+                Ui::slantRectGrad(barX, barY, std::max(8.0f, barW * loadPct), barH, -4.0f, 0.30f, lazerPink, lazerCyan);
+
+                drawCenteredTextWithShadow(ctx.textBuf, cX + cW * 0.5f, cY + 161.0f, 0.34f,
+                                           (ctx.songIntroLoadStage >= 5) ? Ui::rgba(46, 213, 115) : ctx.clrWhite,
+                                           stageTxt, 0.31f);
+            }
+
+            // --- PANTALLA INFERIOR: MEDALLÓN OSU!LAZER PULSANTE CON ANILLO DE CARGA ---
+            C2D_TargetClear(ctx.bottomScreen, Ui::rgba(10, 7, 20));
+            C2D_SceneBegin(ctx.bottomScreen);
+            Ui::backdrop(320.0f, 240.0f, static_cast<float>(ctx.animTick),
+                         Ui::rgba(20, 13, 36), Ui::rgba(10, 7, 18), lazerPink, 0.01f);
+
+            float bCx = 160.0f;
+            float bCy = 112.0f;
+            float bR  = 42.0f + std::sin(ctx.songIntroTick * 0.22f) * 2.5f;
+
+            Ui::glow(bCx, bCy, 0.18f, bR + 18.0f, Ui::withAlpha(lazerPink, 110), 4);
+            Ui::ring(bCx, bCy, 0.20f, bR + 10.0f, 2.5f, Ui::withAlpha(lazerCyan, 180), 32);
+            C2D_DrawCircleSolid(bCx, bCy, 0.25f, bR, 0xFFFFFFFF);
+            C2D_DrawCircleSolid(bCx, bCy, 0.28f, bR - 3.0f, lazerPink);
+            C2D_DrawCircleSolid(bCx, bCy, 0.30f, bR - 6.0f, Ui::rgba(85, 23, 184));
+            drawCenteredTextWithShadow(ctx.textBuf, bCx, bCy - 2.0f, 0.82f, ctx.clrWhite, "osu!", 0.35f);
+
+            char pctTxt[32];
+            std::snprintf(pctTxt, sizeof(pctTxt), LOC(STR_GAME_LOADING_PCT_FMT), loadPct * 100.0f);
+            Ui::slantRect(96.0f, 178.0f, 128.0f, 22.0f, -4.0f, 0.25f, Ui::rgba(24, 18, 44, 215));
+            Ui::slantRect(96.0f, 178.0f, 3.5f, 22.0f, -4.0f, 0.27f, lazerPink);
+            drawCenteredText(ctx.textBuf, 160.0f, 189.0f, 0.36f, ctx.clrWhite, pctTxt, 0.30f);
+
+            C3D_FrameEnd(0);
+            return;
+        }
+    }
+
     const SkinProfile& activeSkin = ctx.getActiveSkin();
     // =========================================================
     // 5. JUEGO ACTIVO + MENÚ DE PAUSA CORREGIDO
@@ -11,6 +246,14 @@ void runGameplayScreen(AppContext& ctx) {
     // En multijugador la pausa está totalmente deshabilitada para mantener la sincronía en tiempo real
     if (ctx.multiMgr.inMultiplayer) {
         ctx.isPaused = false;
+    }
+
+    if (ctx.isReplayPlaying && (ctx.kDown & KEY_B)) {
+        ctx.audio.stopMusic();
+        ctx.videoPlayer.closeVideo();
+        ctx.isReplayPlaying = false;
+        ctx.appState = STATE_RESULTS;
+        return;
     }
 
     if (!ctx.multiMgr.inMultiplayer && (ctx.kDown & KEY_START)) {
@@ -46,17 +289,24 @@ void runGameplayScreen(AppContext& ctx) {
 
         bool triggerPauseAction = (ctx.kDown & KEY_A) != 0;
 
-        // Botones táctiles en la pantalla inferior durante la pausa
-        if (ctx.touchJustDown && ctx.touch.px >= 28 && ctx.touch.px <= 292) {
-            if (ctx.touch.py >= 36 && ctx.touch.py <= 84) {
+        // Botones táctiles en la pantalla inferior durante la pausa (Círculo izquierdo o 3 botones inclinados)
+        if (ctx.touchJustDown) {
+            float dx = static_cast<float>(ctx.touch.px) - 46.0f;
+            float dy = static_cast<float>(ctx.touch.py) - 120.0f;
+            if (dx * dx + dy * dy <= 40.0f * 40.0f) {
                 ctx.pauseOption = 0;
                 triggerPauseAction = true;
-            } else if (ctx.touch.py >= 88 && ctx.touch.py <= 136) {
-                ctx.pauseOption = 1;
-                triggerPauseAction = true;
-            } else if (ctx.touch.py >= 140 && ctx.touch.py <= 188) {
-                ctx.pauseOption = 2;
-                triggerPauseAction = true;
+            } else if (ctx.touch.px >= 90 && ctx.touch.px <= 314) {
+                if (ctx.touch.py >= 38 && ctx.touch.py <= 84) {
+                    ctx.pauseOption = 0;
+                    triggerPauseAction = true;
+                } else if (ctx.touch.py >= 94 && ctx.touch.py <= 140) {
+                    ctx.pauseOption = 1;
+                    triggerPauseAction = true;
+                } else if (ctx.touch.py >= 150 && ctx.touch.py <= 196) {
+                    ctx.pauseOption = 2;
+                    triggerPauseAction = true;
+                }
             }
         }
 
@@ -306,13 +556,53 @@ void runGameplayScreen(AppContext& ctx) {
     bool k2Held = (ctx.kHeld & btnGroup2) != 0;
     bool anyHeld = (k1Held || k2Held);
     bool kActionDown = (ctx.kDown & (btnGroup1 | btnGroup2)) != 0;
-    if (!ctx.isPaused && !isAutoplay) {
+
+    if (ctx.isReplayPlaying) {
+        if (!ctx.currentReplay.frames.empty()) {
+            while (ctx.replayPlaybackIndex + 1 < ctx.currentReplay.frames.size() &&
+                   ctx.currentReplay.frames[ctx.replayPlaybackIndex + 1].timeMs <= songTime) {
+                ctx.replayPlaybackIndex++;
+            }
+            const auto& fCur = ctx.currentReplay.frames[ctx.replayPlaybackIndex];
+            static uint32_t s_prevKeys = 0;
+            uint32_t curKeys = fCur.keys;
+            uint32_t justDown = curKeys & ~s_prevKeys;
+            s_prevKeys = curKeys;
+
+            k1Held = (curKeys & REPLAY_KEY_K1) != 0;
+            k2Held = (curKeys & REPLAY_KEY_K2) != 0;
+            anyHeld = (k1Held || k2Held);
+            kActionDown = ((justDown & (REPLAY_KEY_K1 | REPLAY_KEY_K2)) != 0);
+            ctx.isTouching = (curKeys & REPLAY_KEY_TOUCH) != 0;
+            if (justDown & REPLAY_KEY_K1) ctx.k1PressCount++;
+            if (justDown & REPLAY_KEY_K2) ctx.k2PressCount++;
+        }
+    } else if (!ctx.isPaused && !isAutoplay) {
         if (ctx.kDown & btnGroup1) ctx.k1PressCount++;
         if (ctx.kDown & btnGroup2) ctx.k2PressCount++;
     }
 
     if (!ctx.isPaused) {
-        if (isAutoplay) {
+        if (ctx.isReplayPlaying) {
+            if (!ctx.currentReplay.frames.empty()) {
+                const auto& fCur = ctx.currentReplay.frames[ctx.replayPlaybackIndex];
+                if (ctx.replayPlaybackIndex + 1 < ctx.currentReplay.frames.size()) {
+                    const auto& fNext = ctx.currentReplay.frames[ctx.replayPlaybackIndex + 1];
+                    float span = static_cast<float>(fNext.timeMs - fCur.timeMs);
+                    if (span > 0.0f && songTime >= fCur.timeMs && songTime <= fNext.timeMs) {
+                        float t = static_cast<float>(songTime - fCur.timeMs) / span;
+                        ctx.cursorOsuX = fCur.x + (fNext.x - fCur.x) * t;
+                        ctx.cursorOsuY = fCur.y + (fNext.y - fCur.y) * t;
+                    } else {
+                        ctx.cursorOsuX = fCur.x;
+                        ctx.cursorOsuY = fCur.y;
+                    }
+                } else {
+                    ctx.cursorOsuX = fCur.x;
+                    ctx.cursorOsuY = fCur.y;
+                }
+            }
+        } else if (isAutoplay) {
             // Bot Autoplay: calcula la posición ideal del cursor e inputs automáticos
             anyHeld = false;
             k1Held = false;
@@ -426,6 +716,9 @@ void runGameplayScreen(AppContext& ctx) {
 
         // Actualizar Humo (Smoke) estilo osu! 'C' (activado manteniendo el botón asignado en Ajustes)
         bool smokeActive = (ctx.kHeld & ctx.settings.keyOsuSmoke) != 0;
+        if (ctx.isReplayPlaying && !ctx.currentReplay.frames.empty()) {
+            smokeActive = (ctx.currentReplay.frames[ctx.replayPlaybackIndex].keys & REPLAY_KEY_SMOKE) != 0;
+        }
         if (smokeActive && !ctx.isPaused) {
             if (ctx.smokeParticles.size() < 240) {
                 for (int sm = 0; sm < 2; ++sm) {
@@ -518,7 +811,21 @@ void runGameplayScreen(AppContext& ctx) {
             bool donDown = false;
             bool katsuDown = false;
 
-            if (isAutoplay) {
+            if (ctx.isReplayPlaying) {
+                if (!ctx.currentReplay.frames.empty()) {
+                    const auto& fCur = ctx.currentReplay.frames[ctx.replayPlaybackIndex];
+                    static uint32_t s_prevTaikoKeys = 0;
+                    uint32_t justT = fCur.keys & ~s_prevTaikoKeys;
+                    s_prevTaikoKeys = fCur.keys;
+
+                    donDown = (justT & (REPLAY_KEY_TAIKO_DON_L | REPLAY_KEY_TAIKO_DON_R)) != 0;
+                    katsuDown = (justT & (REPLAY_KEY_TAIKO_KATSU_L | REPLAY_KEY_TAIKO_KATSU_R)) != 0;
+                    if (fCur.keys & REPLAY_KEY_TAIKO_DON_L) ctx.taikoEngine.drumHitDonLeft = 1.0f;
+                    if (fCur.keys & REPLAY_KEY_TAIKO_DON_R) ctx.taikoEngine.drumHitDonRight = 1.0f;
+                    if (fCur.keys & REPLAY_KEY_TAIKO_KATSU_L) ctx.taikoEngine.drumHitKatsuLeft = 1.0f;
+                    if (fCur.keys & REPLAY_KEY_TAIKO_KATSU_R) ctx.taikoEngine.drumHitKatsuRight = 1.0f;
+                }
+            } else if (isAutoplay) {
                 if (!ctx.taikoEngine.notes.empty()) {
                     for (size_t i = ctx.taikoEngine.nextNoteIndex; i < ctx.taikoEngine.notes.size(); ++i) {
                         auto& tn = ctx.taikoEngine.notes[i];
@@ -674,7 +981,21 @@ void runGameplayScreen(AppContext& ctx) {
             bool colDown[4] = { false, false, false, false };
             bool colUp[4]   = { false, false, false, false };
 
-            if (isAutoplay) {
+            if (ctx.isReplayPlaying) {
+                if (!ctx.currentReplay.frames.empty()) {
+                    const auto& fCur = ctx.currentReplay.frames[ctx.replayPlaybackIndex];
+                    static uint32_t s_prevManiaKeys = 0;
+                    for (int c = 0; c < 4; ++c) {
+                        uint32_t mBit = (REPLAY_KEY_MANIA_0 << c);
+                        bool isHeld = (fCur.keys & mBit) != 0;
+                        bool wasHeld = (s_prevManiaKeys & mBit) != 0;
+                        if (isHeld && !wasHeld) colDown[c] = true;
+                        if (!isHeld && wasHeld) colUp[c] = true;
+                        ctx.maniaEngine.colPressed[c] = isHeld;
+                    }
+                    s_prevManiaKeys = fCur.keys;
+                }
+            } else if (isAutoplay) {
                 for (size_t i = ctx.maniaEngine.nextNoteIndex; i < ctx.maniaEngine.notes.size(); ++i) {
                     auto& mn = ctx.maniaEngine.notes[i];
                     if (mn.fullyCompleted) continue;
@@ -980,6 +1301,38 @@ void runGameplayScreen(AppContext& ctx) {
             ctx.shakeIntensity = 0.0f;
         }
 
+        // 6. Grabación continua de la repetición (Replay) si es juego normal activo
+        if (!ctx.isReplayPlaying && !ctx.isPaused && !ctx.stageFailed) {
+            uint32_t rKeys = 0;
+            if (k1Held) rKeys |= REPLAY_KEY_K1;
+            if (k2Held) rKeys |= REPLAY_KEY_K2;
+            if (ctx.isTouching) rKeys |= REPLAY_KEY_TOUCH;
+            if (smokeActive) rKeys |= REPLAY_KEY_SMOKE;
+            if (isTaikoPlay) {
+                if (ctx.taikoEngine.drumHitDonLeft > 0.05f) rKeys |= REPLAY_KEY_TAIKO_DON_L;
+                if (ctx.taikoEngine.drumHitDonRight > 0.05f) rKeys |= REPLAY_KEY_TAIKO_DON_R;
+                if (ctx.taikoEngine.drumHitKatsuLeft > 0.05f) rKeys |= REPLAY_KEY_TAIKO_KATSU_L;
+                if (ctx.taikoEngine.drumHitKatsuRight > 0.05f) rKeys |= REPLAY_KEY_TAIKO_KATSU_R;
+            }
+            if (isManiaPlay) {
+                if (ctx.kHeld & ctx.settings.keyManiaCol1) rKeys |= REPLAY_KEY_MANIA_0;
+                if (ctx.kHeld & ctx.settings.keyManiaCol2) rKeys |= REPLAY_KEY_MANIA_1;
+                if (ctx.kHeld & ctx.settings.keyManiaCol3) rKeys |= REPLAY_KEY_MANIA_2;
+                if (ctx.kHeld & ctx.settings.keyManiaCol4) rKeys |= REPLAY_KEY_MANIA_3;
+            }
+            if (isCatchPlay) {
+                if (ctx.kHeld & ctx.settings.keyCatchLeft) rKeys |= REPLAY_KEY_CATCH_L;
+                if (ctx.kHeld & ctx.settings.keyCatchRight) rKeys |= REPLAY_KEY_CATCH_R;
+                if (ctx.kHeld & ctx.settings.keyCatchDash) rKeys |= REPLAY_KEY_CATCH_DASH;
+            }
+            ReplayFrame rf;
+            rf.timeMs = songTime;
+            rf.x = ctx.cursorOsuX;
+            rf.y = ctx.cursorOsuY;
+            rf.keys = rKeys;
+            ctx.currentReplay.frames.push_back(rf);
+        }
+
         int songEndTime = isTaikoPlay ? (!ctx.taikoEngine.notes.empty() ? ctx.taikoEngine.notes.back().endTime : 0)
                         : isCatchPlay ? (!ctx.catchEngine.fruits.empty() ? ctx.catchEngine.fruits.back().time : 0)
                         : isManiaPlay ? (!ctx.maniaEngine.notes.empty() ? ctx.maniaEngine.notes.back().endTime : 0)
@@ -1026,9 +1379,39 @@ void runGameplayScreen(AppContext& ctx) {
             );
 
             int currentPlayMode = isTaikoPlay ? 1 : isCatchPlay ? 2 : isManiaPlay ? 3 : 0;
+            if (ctx.isReplayPlaying) {
+                ctx.isReplayPlaying = false;
+                ctx.appState = STATE_RESULTS;
+                return;
+            }
+
+            // Finalizar metadatos de la repetición grabada en la partida
+            ctx.currentReplay.score = ctx.score;
+            ctx.currentReplay.maxCombo = ctx.maxCombo;
+            ctx.currentReplay.accuracy = acc;
+            ctx.currentReplay.grade = grade;
+            ctx.currentReplay.count300 = ctx.count300;
+            ctx.currentReplay.count100 = ctx.count100;
+            ctx.currentReplay.count50 = ctx.count50;
+            ctx.currentReplay.countMiss = ctx.countMiss;
+            ctx.currentReplay.pp = ctx.lastEarnedPP;
+            ctx.currentReplay.gameMode = currentPlayMode;
+            ctx.currentReplay.activeMods = ctx.settings.activeMods;
+            ctx.currentReplay.title = ctx.beatmap.title;
+            ctx.currentReplay.artist = ctx.beatmap.artist;
+            ctx.currentReplay.difficulty = ctx.beatmap.version;
+            ctx.currentReplay.playerName = ctx.sysUser;
+
+            int achievedRank = -1;
             ctx.newRecordAchieved = ctx.scoreMgr.submitScore(
-                ctx.beatmap.filePath, ctx.score, ctx.maxCombo, acc, grade, ctx.settings.activeMods, ctx.lastEarnedPP, currentPlayMode
+                ctx.beatmap.filePath, ctx.score, ctx.maxCombo, acc, grade, ctx.settings.activeMods, ctx.lastEarnedPP, currentPlayMode, &achievedRank
             );
+
+            // Almacenar automáticamente la repetición de los 3 mejores récords locales
+            if (achievedRank >= 1 && achievedRank <= 3 && !(ctx.settings.activeMods & MOD_AUTO)) {
+                ReplayManager::saveTopReplay(ctx.beatmap.filePath, currentPlayMode, achievedRank, ctx.currentReplay);
+            }
+
             if (ctx.multiMgr.inMultiplayer) {
                 ctx.multiMgr.matchStarted = false;
                 ctx.multiMgr.matchInProgressFlag = false;
@@ -1110,16 +1493,16 @@ void runGameplayScreen(AppContext& ctx) {
             float liveAcc = (tJudged > 0)
                 ? ((ctx.count300 * 300.0f + ctx.count100 * 100.0f + ctx.count50 * 50.0f) / (tJudged * 300.0f)) * 100.0f
                 : 100.0f;
-            ctx.taikoEngine.renderTopScreen(ctx.textBuf, songTime, speedRate, eyeSign, slider3DVal, ctx.inKiai, bpmPulse, ctx.combo, ctx.score, ctx.hp, liveAcc, ctx.beatmap.title.c_str(), ctx.beatmap.version.c_str(), ctx.settings.taikoBgMode);
+            ctx.taikoEngine.renderTopScreen(ctx.textBuf, songTime, speedRate, eyeSign, slider3DVal, ctx.inKiai, bpmPulse, ctx.combo, ctx.score, ctx.hp, liveAcc, ctx.beatmap.title.c_str(), ctx.beatmap.version.c_str(), ctx.settings.taikoBgMode, &ctx);
         } else if (isCatchPlay) {
-            ctx.catchEngine.renderTopScreen(ctx.textBuf, songTime, speedRate, eyeSign, slider3DVal, ctx.inKiai);
+            ctx.catchEngine.renderTopScreen(ctx.textBuf, songTime, speedRate, eyeSign, slider3DVal, ctx.inKiai, &ctx);
         } else if (isManiaPlay) {
-            ctx.maniaEngine.renderTopScreen(ctx.textBuf, songTime, speedRate, eyeSign, slider3DVal, ctx.inKiai, bpmPulse);
+            ctx.maniaEngine.renderTopScreen(ctx.textBuf, songTime, speedRate, eyeSign, slider3DVal, ctx.inKiai, bpmPulse, &ctx);
         } else {
                 StandardMode::renderPlayfieldObjects(ctx, screenW, baseOffsetX, baseOffsetY, eyeSign, slider3DVal, songTime, preempt, fadeIn, hit50, rScreen, bpmPulse, isHidden, isFlashlight, activePalette);
         }
 
-        // 2B. Chispas y particulas de Sliders / Hits en plano frontal
+        // 2B. Chispas y particulas de Sliders / Hits (z = 0.54f..0.56f, debajo del cursor y overlays)
         for (const auto& pt : ctx.particles) {
             float lifeRatio = static_cast<float>(pt.life) / static_cast<float>(std::max(1, pt.maxLife));
             u8 pAlpha = static_cast<u8>(235.0f * lifeRatio);
@@ -1127,11 +1510,11 @@ void runGameplayScreen(AppContext& ctx) {
             float pr = pt.size * (0.45f + 0.55f * lifeRatio);
             float px = baseOffsetX + pt.x + ctx.shakeX + dFrontHud;
             float py = baseOffsetY + pt.y + ctx.shakeY;
-            C2D_DrawCircleSolid(px, py, 0.76f, pr * 1.6f, Ui::withAlpha(pt.color, static_cast<u8>(pAlpha * 0.35f)));
-            C2D_DrawCircleSolid(px, py, 0.78f, pr, pClr);
+            C2D_DrawCircleSolid(px, py, 0.54f, pr * 1.6f, Ui::withAlpha(pt.color, static_cast<u8>(pAlpha * 0.35f)));
+            C2D_DrawCircleSolid(px, py, 0.56f, pr, pClr);
         }
 
-        // 3. Efecto Hit Burst y calificaciones flotantes (300 / 100 / 50 / X)
+        // 3. Efecto Hit Burst y calificaciones flotantes (300 / 100 / 50 / X) (z = 0.58f..0.61f)
         float dHitPopup = depthShift(4.8f);
         for (size_t i = 0; i < ctx.popups.size(); ++i) {
             if (ctx.popups[i].state == HIT_300 && !ctx.settings.showHit300) continue;
@@ -1143,221 +1526,313 @@ void runGameplayScreen(AppContext& ctx) {
                 float burstR = ctx.popups[i].burstRadius * (1.0f + age * 0.045f);
                 u8 bAlpha = static_cast<u8>(std::max(0, ctx.popups[i].timer * 10));
                 u32 bClr = (ctx.popups[i].burstColor & 0x00FFFFFF) | (static_cast<u32>(bAlpha) << 24);
-                drawRing(px, py, burstR, 1.8f, bClr, 18, 0.79f);
+                drawRing(px, py, burstR, 1.8f, bClr, 18, 0.58f);
             }
 
             const char* txt = "300";
             u32 clr = ctx.clr300;
-            if (ctx.popups[i].state == HIT_100)      { txt = "100"; clr = ctx.clr100; }
-            else if (ctx.popups[i].state == HIT_50)  { txt = "50";  clr = ctx.clr50; }
-            else if (ctx.popups[i].state == HIT_MISS){ txt = "X";   clr = ctx.clrMiss; }
+            const LoadedTexture* pJudgTex = nullptr;
+            if (ctx.popups[i].state == HIT_300) {
+                txt = "300"; clr = ctx.clr300;
+                if (ctx.texSkinHit300.loaded) pJudgTex = &ctx.texSkinHit300;
+            } else if (ctx.popups[i].state == HIT_100) {
+                txt = "100"; clr = ctx.clr100;
+                if (ctx.texSkinHit100.loaded) pJudgTex = &ctx.texSkinHit100;
+            } else if (ctx.popups[i].state == HIT_50) {
+                txt = "50";  clr = ctx.clr50;
+                if (ctx.texSkinHit50.loaded) pJudgTex = &ctx.texSkinHit50;
+            } else if (ctx.popups[i].state == HIT_MISS) {
+                txt = "X";   clr = ctx.clrMiss;
+                if (ctx.texSkinHit0.loaded) pJudgTex = &ctx.texSkinHit0;
+            }
 
-            if (!isTaikoPlay) {
-                drawCenteredTextWithShadow(ctx.textBuf, px, py - age * 0.6f, 0.52f, clr, txt, 0.82f);
+            if (pJudgTex && pJudgTex->loaded) {
+                // Silenciar juicio si la skin usa un sprite dummy de 1x1 o 2x2 (ej. hit300 transparente en skins competitivas)
+                if (pJudgTex->origW <= 2 && pJudgTex->origH <= 2) {
+                    continue;
+                }
+                float nativeW = pJudgTex->getNativeW();
+                float nativeH = pJudgTex->getNativeH();
+                if (nativeW <= 0.0f || nativeH <= 0.0f) {
+                    nativeW = 128.0f;
+                    nativeH = 128.0f;
+                }
+                float drawW = nativeW * SCALE_FACTOR;
+                float drawH = nativeH * SCALE_FACTOR;
+
+                // Animación de pop-in/bounce idéntica a osu! stable
+                float popScale = 1.0f;
+                if (age < 3.0f) {
+                    popScale = 0.88f + (age * 0.08f);
+                } else if (age < 6.0f) {
+                    popScale = 1.04f - ((age - 3.0f) * 0.02f);
+                }
+
+                u8 jAlpha = static_cast<u8>(std::min(255, ctx.popups[i].timer * 18));
+                pJudgTex->drawCentered(px, py - age * 0.6f, drawW * popScale, drawH * popScale, 0.61f, jAlpha);
+            } else if (!isTaikoPlay) {
+                drawCenteredTextWithShadow(ctx.textBuf, px, py - age * 0.6f, 0.52f, clr, txt, 0.61f);
             }
         }
 
-        u32 hpClr = (ctx.hp > 0.5f) ? ctx.clr100 : ((ctx.hp > 0.25f) ? ctx.clr50 : ctx.clrMiss);
+        // 4. Cursor, estela y humo de osu!standard (z = 0.62f..0.68f, debajo del HUD, Descanso y Pausa)
+        if (!isTaikoPlay && !isManiaPlay && !isCatchPlay && !ctx.isPaused) {
+            StandardMode::renderCursorAndSmoke(ctx, baseOffsetX, baseOffsetY, dCursor, anyHeld);
+        }
+
+        // 5. HUD In-Game estilo osu!lazer (z = 0.70f..0.78f)
+        u32 lazerPink = Ui::rgba(255, 102, 171, 255);
+        u32 lazerCyan = Ui::rgba(56, 210, 255, 255);
+        u32 hpClr = (ctx.hp > 0.5f) ? Ui::rgba(46, 213, 115, 255) : ((ctx.hp > 0.25f) ? Ui::rgba(255, 195, 40, 255) : Ui::rgba(255, 77, 109, 255));
         if (!isTaikoPlay) {
             if (drawFullHud) {
-                // Barra de Vida (HP Bar) con degradado y borde en plano HUD frontal (Pantalla Superior)
-            C2D_DrawRectSolid(5.0f + dFrontHud, 5.0f, 0.29f, 148.0f, 11.0f, Ui::rgba(0, 0, 0, 170));
-            C2D_DrawRectSolid(7.0f + dFrontHud, 7.0f, 0.3f, 144.0f, 7.0f, ctx.clrKeyIdle);
-            if (ctx.hp > 0.0f) Ui::gradH(7.0f + dFrontHud, 7.0f, 144.0f * ctx.hp, 7.0f, 0.35f, Ui::brighten(hpClr, 0.6f), hpClr);
-            if (ctx.hp < 0.25f) {
-                float blink = 0.5f + 0.5f * std::sin(ctx.animTick * 0.35f);
-                C2D_DrawRectSolid(5.0f + dFrontHud, 5.0f, 0.4f, 148.0f, 11.0f, Ui::rgba(255, 60, 60, static_cast<int>(60 * blink)));
-            }
-
-            // Barra de progreso de la cancion
-            if (!ctx.beatmap.circles.empty()) {
-                float endT = static_cast<float>(ctx.beatmap.circles.back().endTime + 1000);
-                float prog = std::max(0.0f, std::min(1.0f, static_cast<float>(songTime) / std::max(1.0f, endT)));
-                C2D_DrawRectSolid(5.0f + dFrontHud, 18.0f, 0.3f, 148.0f, 2.0f, Ui::rgba(255, 255, 255, 40));
-                C2D_DrawRectSolid(5.0f + dFrontHud, 18.0f, 0.35f, 148.0f * prog, 2.0f, ctx.clrPrimary);
-            }
-
-            // HUD: Score, Accuracy, Live PP, Mods y Combo
-            char hudStr[64];
-            Ui::gradH(300.0f + dFrontHud, 2.0f, 100.0f, 52.0f, 0.28f, Ui::rgba(10, 8, 20, 0), Ui::rgba(10, 8, 20, 170));
-            std::snprintf(hudStr, sizeof(hudStr), "%07d", ctx.score);
-            drawText(ctx.textBuf, 322.0f + dFrontHud, 3.0f, 0.62f, ctx.clrWhite, hudStr);
-
-            int totalJudged = ctx.count300 + ctx.count100 + ctx.count50 + ctx.countMiss;
-            float acc = (totalJudged > 0)
-                ? ((ctx.count300 * 300.0f + ctx.count100 * 100.0f + ctx.count50 * 50.0f) / (totalJudged * 300.0f)) * 100.0f
-                : 100.0f;
-            std::snprintf(hudStr, sizeof(hudStr), "%.1f%%", acc);
-            drawText(ctx.textBuf, 340.0f + dFrontHud, 24.0f, 0.40f, ctx.clr300, hudStr);
-
-            float livePP = calculatePP(
-                ctx.beatmap.starRating,
-                ctx.beatmap.diff.ar,
-                ctx.beatmap.diff.od,
-                ctx.maxCombo,
-                std::max(1, totalJudged),
-                ctx.count300, ctx.count100, ctx.count50, ctx.countMiss,
-                ctx.settings.activeMods
-            );
-            std::snprintf(hudStr, sizeof(hudStr), "%.0fpp", livePP);
-            drawText(ctx.textBuf, 345.0f + dFrontHud, 38.0f, 0.36f, ctx.clrPrimary, hudStr);
-
-            if (ctx.settings.activeMods != MOD_NONE) {
-                std::string mTag = formatModsString(ctx.settings.activeMods);
-                drawText(ctx.textBuf, 330.0f + dFrontHud, 52.0f, 0.34f, ctx.clrCursor, mTag.c_str());
-            }
-
-            // Leaderboard lateral Multijugador en vivo (Estilo osu! 3DS)
-            if (ctx.multiMgr.inMultiplayer) {
-                auto rankedList = ctx.multiMgr.getLeaderboard();
-                for (size_t r = 0; r < rankedList.size() && r < 4; ++r) {
-                    const auto& item = rankedList[r];
-                    bool onLeft = (r < 2);
-                    float cardX = (onLeft ? 8.0f : 348.0f) + dFrontHud;
-                    float cardY = (r % 2 == 0) ? 55.0f : 140.0f;
-                    float cardW = 44.0f;
-                    float cardH = 46.0f;
-
-                    u32 rankClr = (r == 0) ? Ui::rgba(255, 195, 45) :
-                                  ((r == 1) ? Ui::rgba(40, 215, 235) :
-                                  ((r == 2) ? Ui::rgba(195, 100, 255) : Ui::rgba(140, 140, 160)));
-
-                    u32 cardBorderClr = item.player->isFailed ? Ui::rgba(235, 45, 45) : rankClr;
-                    Ui::panel(cardX, cardY, cardW, cardH, 0.32f, Ui::rgba(16, 14, 28, 220), cardBorderClr);
-
-                    char rStr[8];
-                    if (item.player->isFailed) {
-                        std::snprintf(rStr, sizeof(rStr), "FAIL");
-                    } else {
-                        std::snprintf(rStr, sizeof(rStr), "#%u", static_cast<unsigned int>(r + 1));
-                    }
-                    Ui::pill(cardX + 4.0f, cardY + 4.0f, cardW - 8.0f, 13.0f, 0.35f, item.player->isFailed ? Ui::rgba(235, 45, 45) : rankClr);
-                    drawCenteredText(ctx.textBuf, cardX + cardW * 0.5f, cardY + 10.0f, 0.27f, Ui::rgba(0, 0, 0, 240), rStr, 0.38f);
-
-                    std::string shortName = item.player->name;
-                    if (shortName.size() > 5) shortName = shortName.substr(0, 4) + ".";
-                    drawCenteredText(ctx.textBuf, cardX + cardW * 0.5f, cardY + 23.0f, 0.30f, item.player->isFailed ? Ui::rgba(255, 120, 120) : ctx.clrWhite, shortName.c_str(), 0.38f);
-
-                    char statStr[16];
-                    if (ctx.multiMgr.winCondition == WIN_ACCURACY) {
-                        std::snprintf(statStr, sizeof(statStr), "%.1f%%", item.player->accuracy);
-                    } else if (ctx.multiMgr.winCondition == WIN_COMBO) {
-                        std::snprintf(statStr, sizeof(statStr), "%dx", item.player->maxCombo);
-                    } else {
-                        if (item.player->score >= 1000000) {
-                            std::snprintf(statStr, sizeof(statStr), "%.1fM", item.player->score / 1000000.0f);
-                        } else {
-                            std::snprintf(statStr, sizeof(statStr), "%ldk", item.player->score / 1000);
-                        }
-                    }
-                    drawCenteredText(ctx.textBuf, cardX + cardW * 0.5f, cardY + 36.0f, 0.28f, item.player->isFailed ? Ui::rgba(255, 100, 100) : rankClr, statStr, 0.38f);
+                // --- Top-Left: Barra de Vida (HP Bar) inclinada estilo osu!lazer ---
+                float hpX = 8.0f + dFrontHud;
+                float hpY = 6.0f;
+                float hpW = 156.0f;
+                float hpH = 9.0f;
+                Ui::slantRect(hpX - 1.5f, hpY - 1.5f, hpW + 3.0f, hpH + 3.0f, -5.0f, 0.70f, Ui::rgba(10, 7, 20, 185));
+                Ui::slantRect(hpX, hpY, hpW, hpH, -5.0f, 0.71f, Ui::rgba(28, 22, 46, 210));
+                if (ctx.hp > 0.01f) {
+                    float fillW = std::max(4.0f, hpW * std::min(1.0f, ctx.hp));
+                    Ui::slantRectGrad(hpX, hpY, fillW, hpH, -5.0f, 0.72f, Ui::brighten(hpClr, 0.45f), hpClr);
                 }
-            }
+                // Acento lateral izquierdo rosa
+                Ui::slantRect(hpX - 1.5f, hpY - 1.5f, 4.0f, hpH + 3.0f, -5.0f, 0.73f, lazerPink);
 
-            // Combo con efecto pop al golpear + fantasma rojo al romper combo + pulso rítmico en Kiai
-            std::snprintf(hudStr, sizeof(hudStr), "%dx", ctx.combo);
-            float kiaiPulseScale = (ctx.kiaiGlow > 0.01f) ? (0.07f * ctx.kiaiGlow * bpmPulse) : 0.0f;
-            float cScale = 0.60f * (ctx.comboScale + kiaiPulseScale);
-            u32 comboClr = (ctx.comboBreakAnim > 0.1f) ? ctx.clrMiss :
-                ((ctx.kiaiGlow > 0.01f) ? Ui::lerpColor(ctx.clrCursor, Ui::rgba(255, 235, 110), ctx.kiaiGlow * bpmPulse * 0.75f) : ctx.clrCursor);
-            drawText(ctx.textBuf, 7.0f + dFrontHud, 234.0f - 30.0f * cScale, cScale, Ui::rgba(0, 0, 0, 160), hudStr, 0.38f);
-            drawText(ctx.textBuf, 6.0f + dFrontHud, 233.0f - 30.0f * cScale, cScale, comboClr, hudStr, 0.40f);
-            if (ctx.comboBreakAnim > 0.02f && ctx.lastBrokenCombo >= 5) {
-                char brkStr[32];
-                std::snprintf(brkStr, sizeof(brkStr), "%dx BREAK!", ctx.lastBrokenCombo);
-                u8 bAlpha = static_cast<u8>(ctx.comboBreakAnim * 235.0f);
-                float bLift = (1.0f - ctx.comboBreakAnim) * 14.0f;
-                drawText(ctx.textBuf, 8.0f + dFrontHud, 196.0f - bLift, 0.40f, Ui::rgba(255, 75, 85, bAlpha), brkStr, 0.42f);
-            }
-
-            // Hit Error Meter (barra inferior de timing adelantado / retrasado estilo osu! PC)
-            {
-                const float meterCX = 200.0f + dFrontHud;
-                const float meterY  = 232.0f;
-                const float halfW   = 62.0f;
-                float maxWin = std::max(1.0f, hit50);
-                float w100 = halfW * std::min(1.0f, ctx.beatmap.diff.hit100 / maxWin);
-                float w300 = halfW * std::min(1.0f, ctx.beatmap.diff.hit300 / maxWin);
-
-                C2D_DrawRectSolid(meterCX - halfW - 3.0f, meterY - 4.5f, 0.36f, (halfW + 3.0f) * 2.0f, 9.0f, Ui::rgba(8, 6, 16, 185));
-                C2D_DrawRectSolid(meterCX - halfW, meterY - 1.5f, 0.38f, halfW * 2.0f, 3.0f, Ui::withAlpha(ctx.clr50, 155));
-                C2D_DrawRectSolid(meterCX - w100,  meterY - 1.5f, 0.39f, w100 * 2.0f,  3.0f, Ui::withAlpha(ctx.clr100, 185));
-                C2D_DrawRectSolid(meterCX - w300,  meterY - 1.5f, 0.40f, w300 * 2.0f,  3.0f, Ui::withAlpha(ctx.clr300, 220));
-
-                for (const auto& tk : ctx.hitErrorTicks) {
-                    float norm = std::max(-1.0f, std::min(1.0f, tk.errMs / maxWin));
-                    float tx = meterCX + norm * halfW;
-                    u8 tAlpha = static_cast<u8>(std::min(255, tk.life * 2));
-                    u32 baseC = (tk.state == HIT_300) ? ctx.clr300 : ((tk.state == HIT_100) ? ctx.clr100 : ctx.clr50);
-                    u32 tClr = Ui::withAlpha(baseC, tAlpha);
-                    C2D_DrawLine(tx, meterY - 4.5f, tClr, tx, meterY + 4.5f, tClr, 1.5f, 0.43f);
+                if (ctx.hp < 0.25f) {
+                    float blink = 0.5f + 0.5f * std::sin(ctx.animTick * 0.35f);
+                    Ui::slantRect(hpX - 1.5f, hpY - 1.5f, hpW + 3.0f, hpH + 3.0f, -5.0f, 0.74f, Ui::rgba(255, 60, 75, static_cast<int>(90 * blink)));
                 }
 
-                // Marca central (0 ms perfecto) y aguja de tendencia media
-                C2D_DrawLine(meterCX, meterY - 5.5f, ctx.clrWhite, meterCX, meterY + 5.5f, ctx.clrWhite, 1.8f, 0.45f);
-                float needleNorm = std::max(-1.0f, std::min(1.0f, ctx.hitErrorNeedle / maxWin));
-                float nx = meterCX + needleNorm * halfW;
-                C2D_DrawTriangle(
-                    nx - 3.2f, meterY - 7.5f, ctx.clrWhite,
-                    nx + 3.2f, meterY - 7.5f, ctx.clrWhite,
-                    nx,        meterY - 3.2f, ctx.clrCursor,
-                    0.46f
+                // Barra de progreso de la canción inclinada debajo de la vida
+                if (!ctx.beatmap.circles.empty()) {
+                    float endT = static_cast<float>(ctx.beatmap.circles.back().endTime + 1000);
+                    float prog = std::max(0.0f, std::min(1.0f, static_cast<float>(songTime) / std::max(1.0f, endT)));
+                    Ui::slantRect(hpX - 2.0f, 18.5f, hpW, 3.0f, -3.0f, 0.71f, Ui::rgba(255, 255, 255, 45));
+                    if (prog > 0.01f) {
+                        Ui::slantRect(hpX - 2.0f, 18.5f, std::max(3.0f, hpW * prog), 3.0f, -3.0f, 0.72f, lazerPink);
+                    }
+                }
+
+                // --- Top-Right: Panel inclinado translúcido de Score, Precisión y PP ---
+                char hudStr[64];
+                float scBoxX = 274.0f + dFrontHud;
+                float scBoxY = 4.0f;
+                float scBoxW = 120.0f;
+                float scBoxH = 44.0f;
+                Ui::slantRect(scBoxX, scBoxY, scBoxW, scBoxH, -6.0f, 0.70f, Ui::rgba(14, 10, 26, 165));
+                Ui::slantRect(scBoxX + scBoxW - 4.0f, scBoxY, 4.0f, scBoxH, -6.0f, 0.72f, lazerPink);
+
+                std::snprintf(hudStr, sizeof(hudStr), "%07d", ctx.score);
+                drawTextWithShadow(ctx.textBuf, scBoxX + 10.0f, scBoxY + 2.0f, 0.56f, ctx.clrWhite, hudStr, 0.75f);
+
+                int totalJudged = ctx.count300 + ctx.count100 + ctx.count50 + ctx.countMiss;
+                float acc = (totalJudged > 0)
+                    ? ((ctx.count300 * 300.0f + ctx.count100 * 100.0f + ctx.count50 * 50.0f) / (totalJudged * 300.0f)) * 100.0f
+                    : 100.0f;
+                std::snprintf(hudStr, sizeof(hudStr), "%.1f%%", acc);
+                drawTextWithShadow(ctx.textBuf, scBoxX + 12.0f, scBoxY + 25.0f, 0.38f, lazerCyan, hudStr, 0.75f);
+
+                float livePP = calculatePP(
+                    ctx.beatmap.starRating,
+                    ctx.beatmap.diff.ar,
+                    ctx.beatmap.diff.od,
+                    ctx.maxCombo,
+                    std::max(1, totalJudged),
+                    ctx.count300, ctx.count100, ctx.count50, ctx.countMiss,
+                    ctx.settings.activeMods
                 );
-            }
+                std::snprintf(hudStr, sizeof(hudStr), "%.0fpp", livePP);
+                drawTextWithShadow(ctx.textBuf, scBoxX + 68.0f, scBoxY + 26.0f, 0.36f, lazerPink, hudStr, 0.75f);
 
-            // Key Overlay estilizado con contadores K1 / K2
-            for (int k = 0; k < 2; ++k) {
-                bool held = (k == 0) ? k1Held : k2Held;
-                int cnt   = (k == 0) ? ctx.k1PressCount : ctx.k2PressCount;
-                float ky  = 92.0f + k * 28.0f;
-                u32 kClr  = held ? ctx.clrKeyActive : Ui::rgba(28, 24, 44, 210);
-                u32 bClr  = held ? ctx.clrWhite : ctx.clrPrimary;
-                Ui::panel(364.0f + dFrontHud, ky, 32.0f, 24.0f, 0.3f, kClr);
-                C2D_DrawRectSolid(364.0f + dFrontHud, ky, 0.34f, 3.0f, 24.0f, bClr);
-                std::snprintf(hudStr, sizeof(hudStr), "%d", cnt);
-                drawCenteredText(ctx.textBuf, 381.0f + dFrontHud, ky + 12.0f, 0.37f, held ? Ui::rgba(20, 16, 30) : ctx.clrWhite, hudStr, 0.4f);
-            }
-        } else {
-            // Mini HUD superior discreto en la pantalla táctil inferior (barra fina de HP + Progreso)
-            C2D_DrawRectSolid(0.0f, 0.0f, 0.29f, 320.0f, 4.0f, Ui::rgba(0, 0, 0, 150));
-            if (ctx.hp > 0.0f) Ui::gradH(0.0f, 0.0f, 320.0f * ctx.hp, 3.0f, 0.35f, Ui::brighten(hpClr, 0.6f), hpClr);
-            if (!ctx.beatmap.circles.empty()) {
-                float endT = static_cast<float>(ctx.beatmap.circles.back().endTime + 1000);
-                float prog = std::max(0.0f, std::min(1.0f, static_cast<float>(songTime) / std::max(1.0f, endT)));
-                C2D_DrawRectSolid(0.0f, 3.0f, 0.36f, 320.0f * prog, 1.5f, ctx.clrPrimary);
+                if (ctx.settings.activeMods != MOD_NONE) {
+                    std::string mTag = formatModsString(ctx.settings.activeMods);
+                    Ui::slantRect(scBoxX + 18.0f, scBoxY + 46.0f, scBoxW - 22.0f, 14.0f, -4.0f, 0.71f, Ui::rgba(20, 14, 36, 175));
+                    drawCenteredText(ctx.textBuf, scBoxX + 18.0f + (scBoxW - 22.0f) * 0.5f, scBoxY + 53.0f, 0.32f, Ui::rgba(255, 215, 70), mTag.c_str(), 0.75f);
+                }
+
+                // Leaderboard Multijugador en vivo (osu!lazer side panel)
+                if (ctx.multiMgr.inMultiplayer) {
+                    auto rankedList = ctx.multiMgr.getLeaderboard();
+                    float mSlotX = 6.0f + dFrontHud;
+                    float mSlotY = 40.0f;
+                    float mSlotW = 86.0f;
+                    float mSlotH = 26.0f;
+                    float mSlotStep = 29.0f;
+
+                    for (size_t r = 0; r < rankedList.size() && r < 4; ++r) {
+                        const auto& item = rankedList[r];
+                        float cardY = mSlotY + r * mSlotStep;
+                        bool isMe = (item.player->isLocal);
+
+                        u32 rankMedalClr = (r == 0) ? Ui::rgba(255, 209, 102) :
+                                           ((r == 1) ? Ui::rgba(0, 229, 255) :
+                                           ((r == 2) ? Ui::rgba(180, 100, 240) : Ui::rgba(148, 163, 184)));
+
+                        u32 cardBg = item.player->isFailed ? Ui::rgba(38, 14, 20, 185) :
+                                     (isMe ? Ui::rgba(16, 30, 48, 195) : Ui::rgba(16, 12, 28, 175));
+                        u32 borderClr = item.player->isFailed ? Ui::rgba(235, 45, 45) :
+                                        (isMe ? Ui::rgba(0, 229, 255) : rankMedalClr);
+
+                        Ui::slantRect(mSlotX, cardY, mSlotW, mSlotH, -4.0f, 0.71f, cardBg);
+                        Ui::slantRect(mSlotX, cardY, 3.5f, mSlotH, -4.0f, 0.72f, borderClr);
+
+                        char rTag[8];
+                        if (item.player->isFailed) {
+                            std::snprintf(rTag, sizeof(rTag), "FAIL");
+                        } else {
+                            std::snprintf(rTag, sizeof(rTag), "#%u", static_cast<unsigned int>(r + 1));
+                        }
+
+                        drawText(ctx.textBuf, mSlotX + 6.0f, cardY + 2.5f, 0.31f,
+                            item.player->isFailed ? Ui::rgba(235, 45, 45) : (isMe ? Ui::rgba(0, 229, 255) : rankMedalClr), rTag, 0.74f);
+
+                        std::string pName = item.player->name;
+                        if (pName.size() > 6) pName = pName.substr(0, 5) + ".";
+                        drawText(ctx.textBuf, mSlotX + 24.0f, cardY + 2.5f, 0.30f,
+                            isMe ? Ui::rgba(255, 255, 255) : Ui::rgba(215, 210, 235), pName.c_str(), 0.74f);
+
+                        char statVal[24];
+                        if (ctx.multiMgr.winCondition == WIN_ACCURACY) {
+                            std::snprintf(statVal, sizeof(statVal), "%.1f%%", item.player->accuracy);
+                        } else if (ctx.multiMgr.winCondition == WIN_COMBO) {
+                            std::snprintf(statVal, sizeof(statVal), "%dx", item.player->combo);
+                        } else {
+                            if (item.player->score >= 1000000) {
+                                std::snprintf(statVal, sizeof(statVal), "%.2fM", item.player->score / 1000000.0f);
+                            } else {
+                                std::snprintf(statVal, sizeof(statVal), "%ldk", item.player->score / 1000);
+                            }
+                        }
+                        drawText(ctx.textBuf, mSlotX + 6.0f, cardY + 14.5f, 0.28f,
+                            item.player->isFailed ? Ui::rgba(235, 90, 90) : Ui::rgba(255, 209, 102), statVal, 0.74f);
+
+                        const char* gTxt = (item.player->grade[0] != '\0') ? item.player->grade : "A";
+                        u32 gClr = (gTxt[0] == 'S') ? Ui::rgba(255, 209, 102) :
+                                   ((gTxt[0] == 'A') ? ctx.clr100 : (gTxt[0] == 'F' ? Ui::rgba(235, 45, 45) : Ui::rgba(0, 229, 255)));
+                        drawCenteredText(ctx.textBuf, mSlotX + mSlotW - 10.0f, cardY + 14.5f, 0.32f, gClr, gTxt, 0.74f);
+                    }
+                }
+
+                // --- Bottom-Left: Insignia inclinada de Combo estilo osu!lazer ---
+                std::snprintf(hudStr, sizeof(hudStr), "%dx", ctx.combo);
+                float kiaiPulseScale = (ctx.kiaiGlow > 0.01f) ? (0.07f * ctx.kiaiGlow * bpmPulse) : 0.0f;
+                float cScale = 0.56f * (ctx.comboScale + kiaiPulseScale);
+                u32 comboClr = (ctx.comboBreakAnim > 0.1f) ? ctx.clrMiss :
+                    ((ctx.kiaiGlow > 0.01f) ? Ui::lerpColor(ctx.clrWhite, Ui::rgba(255, 225, 90), ctx.kiaiGlow * bpmPulse * 0.75f) : ctx.clrWhite);
+
+                float cbX = 8.0f + dFrontHud;
+                float cbY = 204.0f;
+                float cbW = 76.0f;
+                float cbH = 28.0f;
+                Ui::slantRect(cbX, cbY, cbW, cbH, -5.0f, 0.70f, Ui::rgba(14, 10, 26, 165));
+                Ui::slantRect(cbX, cbY, 4.0f, cbH, -5.0f, 0.72f, (ctx.comboBreakAnim > 0.1f) ? ctx.clrMiss : lazerPink);
+                drawTextWithShadow(ctx.textBuf, cbX + 10.0f, cbY + 14.0f - 16.0f * cScale, cScale, comboClr, hudStr, 0.75f);
+
+                if (ctx.comboBreakAnim > 0.02f && ctx.lastBrokenCombo >= 5) {
+                    char brkStr[32];
+                    std::snprintf(brkStr, sizeof(brkStr), "%dx BREAK!", ctx.lastBrokenCombo);
+                    u8 bAlpha = static_cast<u8>(ctx.comboBreakAnim * 235.0f);
+                    float bLift = (1.0f - ctx.comboBreakAnim) * 14.0f;
+                    drawTextWithShadow(ctx.textBuf, 10.0f + dFrontHud, 188.0f - bLift, 0.40f, Ui::rgba(255, 75, 95, bAlpha), brkStr, 0.76f);
+                }
+
+                // --- Bottom-Center: Hit Error Meter (barra de timing estilo osu!lazer) ---
+                {
+                    const float meterCX = 200.0f + dFrontHud;
+                    const float meterY  = 231.0f;
+                    const float halfW   = 60.0f;
+                    float maxWin = std::max(1.0f, hit50);
+                    float w100 = halfW * std::min(1.0f, ctx.beatmap.diff.hit100 / maxWin);
+                    float w300 = halfW * std::min(1.0f, ctx.beatmap.diff.hit300 / maxWin);
+
+                    Ui::pill(meterCX - halfW - 5.0f, meterY - 5.0f, (halfW + 5.0f) * 2.0f, 10.0f, 0.70f, Ui::rgba(10, 7, 20, 175));
+                    C2D_DrawRectSolid(meterCX - halfW, meterY - 1.5f, 0.71f, halfW * 2.0f, 3.0f, Ui::withAlpha(ctx.clr50, 165));
+                    C2D_DrawRectSolid(meterCX - w100,  meterY - 1.5f, 0.72f, w100 * 2.0f,  3.0f, Ui::withAlpha(ctx.clr100, 195));
+                    C2D_DrawRectSolid(meterCX - w300,  meterY - 1.5f, 0.73f, w300 * 2.0f,  3.0f, Ui::withAlpha(lazerCyan, 230));
+
+                    for (const auto& tk : ctx.hitErrorTicks) {
+                        float norm = std::max(-1.0f, std::min(1.0f, tk.errMs / maxWin));
+                        float tx = meterCX + norm * halfW;
+                        u8 tAlpha = static_cast<u8>(std::min(255, tk.life * 2));
+                        u32 baseC = (tk.state == HIT_300) ? lazerCyan : ((tk.state == HIT_100) ? ctx.clr100 : ctx.clr50);
+                        u32 tClr = Ui::withAlpha(baseC, tAlpha);
+                        C2D_DrawLine(tx, meterY - 4.0f, tClr, tx, meterY + 4.0f, tClr, 1.5f, 0.74f);
+                    }
+
+                    // Marca central (0 ms perfecto) y aguja de tendencia media
+                    C2D_DrawLine(meterCX, meterY - 5.0f, ctx.clrWhite, meterCX, meterY + 5.0f, ctx.clrWhite, 1.8f, 0.75f);
+                    float needleNorm = std::max(-1.0f, std::min(1.0f, ctx.hitErrorNeedle / maxWin));
+                    float nx = meterCX + needleNorm * halfW;
+                    C2D_DrawTriangle(
+                        nx - 3.2f, meterY - 7.2f, lazerPink,
+                        nx + 3.2f, meterY - 7.2f, lazerPink,
+                        nx,        meterY - 2.8f, ctx.clrWhite,
+                        0.76f
+                    );
+                }
+
+                // --- Right-Center: Key Overlay inclinado K1 / K2 estilo osu!lazer ---
+                for (int k = 0; k < 2; ++k) {
+                    bool held = (k == 0) ? k1Held : k2Held;
+                    int cnt   = (k == 0) ? ctx.k1PressCount : ctx.k2PressCount;
+                    float kx  = 358.0f + dFrontHud;
+                    float ky  = 90.0f + k * 28.0f;
+                    u32 kAccent = (k == 0) ? lazerPink : lazerCyan;
+                    u32 kBg = held ? Ui::withAlpha(kAccent, 230) : Ui::rgba(16, 12, 30, 175);
+                    Ui::slantRect(kx, ky, 36.0f, 23.0f, -4.0f, 0.71f, kBg);
+                    Ui::slantRect(kx + 32.5f, ky, 3.5f, 23.0f, -4.0f, 0.72f, held ? ctx.clrWhite : kAccent);
+                    std::snprintf(hudStr, sizeof(hudStr), "%d", cnt);
+                    drawCenteredText(ctx.textBuf, kx + 17.0f, ky + 11.5f, 0.37f, held ? Ui::rgba(14, 10, 24) : ctx.clrWhite, hudStr, 0.75f);
+                }
+            } else {
+                // Mini HUD superior discreto en la pantalla táctil inferior (barra fina de HP + Progreso)
+                C2D_DrawRectSolid(0.0f, 0.0f, 0.70f, 320.0f, 4.0f, Ui::rgba(0, 0, 0, 150));
+                if (ctx.hp > 0.0f) Ui::gradH(0.0f, 0.0f, 320.0f * ctx.hp, 3.0f, 0.71f, Ui::brighten(hpClr, 0.5f), hpClr);
+                if (!ctx.beatmap.circles.empty()) {
+                    float endT = static_cast<float>(ctx.beatmap.circles.back().endTime + 1000);
+                    float prog = std::max(0.0f, std::min(1.0f, static_cast<float>(songTime) / std::max(1.0f, endT)));
+                    C2D_DrawRectSolid(0.0f, 3.0f, 0.72f, 320.0f * prog, 1.5f, lazerPink);
+                }
             }
         }
+
+        if (drawFullHud && ctx.isReplayPlaying) {
+            float banX = 85.0f + dFrontHud;
+            float banY = 6.0f;
+            float banW = 230.0f;
+            float banH = 20.0f;
+            Ui::slantRect(banX, banY, banW, banH, -4.0f, 0.72f, Ui::rgba(255, 42, 133, 215));
+            Ui::slantRect(banX, banY, 3.5f, banH, -4.0f, 0.74f, Ui::rgba(0, 229, 255));
+            char repMsg[64];
+            std::snprintf(repMsg, sizeof(repMsg), LOC(STR_GAME_REPLAY_BANNER_FMT), ctx.currentReplay.playerName.c_str());
+            drawCenteredTextWithShadow(ctx.textBuf, banX + banW * 0.5f, banY + 10.5f, 0.35f, ctx.clrWhite, repMsg, 0.76f);
         }
 
-        // 1. Renderizado de Humo (Smoke) estilo osu! 'C'
-        if (!isTaikoPlay && !isManiaPlay && !isCatchPlay) {
-                StandardMode::renderCursorAndSmoke(ctx, baseOffsetX, baseOffsetY, dCursor, anyHeld);
-        }
-
-        // Marcador en vivo (Leaderboard) estilo osu! lazer en el margen izquierdo (solo Single Player; en Multi se usa el Leaderboard multijugador)
+        // Marcador en vivo (Leaderboard) estilo osu!lazer en el margen izquierdo (z = 0.71f..0.75f)
         if (drawFullHud && !isTaikoPlay && !ctx.multiMgr.inMultiplayer) {
-            float lbX = (3.0f + dFrontHud);
-            float lbW = isTaikoPlay ? 80.0f : 74.0f;
-            float lbH = isTaikoPlay ? 18.0f : 26.0f;
-            float startY = isTaikoPlay ? 196.0f : 48.0f;
+            float lbX = (6.0f + dFrontHud);
+            float lbW = 76.0f;
+            float lbH = 25.0f;
+            float startY = 42.0f;
 
-            // Grado actual de precisión de la partida en vivo
             int tJudged = ctx.count300 + ctx.count100 + ctx.count50 + ctx.countMiss;
             float liveAcc = (tJudged > 0)
                 ? ((ctx.count300 * 300.0f + ctx.count100 * 100.0f + ctx.count50 * 50.0f) / (tJudged * 300.0f)) * 100.0f
                 : 100.0f;
             const char* liveGrade = "SS";
-            u32 liveGradeClr = Ui::rgba(255, 102, 171);
+            u32 liveGradeClr = lazerPink;
             if (ctx.countMiss > 0) {
                 if (liveAcc >= 90.0f)      { liveGrade = "A"; liveGradeClr = ctx.clr100; }
-                else if (liveAcc >= 80.0f) { liveGrade = "B"; liveGradeClr = ctx.clr300; }
+                else if (liveAcc >= 80.0f) { liveGrade = "B"; liveGradeClr = lazerCyan; }
                 else if (liveAcc >= 70.0f) { liveGrade = "C"; liveGradeClr = ctx.clr50; }
                 else                       { liveGrade = "D"; liveGradeClr = ctx.clrMiss; }
             } else {
-                if (liveAcc >= 99.9f)      { liveGrade = "SS"; liveGradeClr = Ui::rgba(255, 102, 171); }
-                else if (liveAcc >= 93.0f) { liveGrade = "S";  liveGradeClr = ctx.clrCursor; }
+                if (liveAcc >= 99.9f)      { liveGrade = "SS"; liveGradeClr = lazerPink; }
+                else if (liveAcc >= 93.0f) { liveGrade = "S";  liveGradeClr = Ui::rgba(255, 215, 70); }
                 else if (liveAcc >= 85.0f) { liveGrade = "A";  liveGradeClr = ctx.clr100; }
-                else if (liveAcc >= 75.0f) { liveGrade = "B";  liveGradeClr = ctx.clr300; }
+                else if (liveAcc >= 75.0f) { liveGrade = "B";  liveGradeClr = lazerCyan; }
                 else                       { liveGrade = "C";  liveGradeClr = ctx.clr50; }
             }
 
@@ -1375,10 +1850,10 @@ void runGameplayScreen(AppContext& ctx) {
                 int bestScore = ctx.localRecords[0].bestScore;
                 const char* bGr = ctx.localRecords[0].bestGrade.c_str();
                 u32 bGrClr = ctx.clrWhite;
-                if (ctx.localRecords[0].bestGrade == "SS") bGrClr = Ui::rgba(255, 102, 171);
-                else if (ctx.localRecords[0].bestGrade == "S") bGrClr = ctx.clrCursor;
+                if (ctx.localRecords[0].bestGrade == "SS") bGrClr = lazerPink;
+                else if (ctx.localRecords[0].bestGrade == "S") bGrClr = Ui::rgba(255, 215, 70);
                 else if (ctx.localRecords[0].bestGrade == "A") bGrClr = ctx.clr100;
-                else if (ctx.localRecords[0].bestGrade == "B") bGrClr = ctx.clr300;
+                else if (ctx.localRecords[0].bestGrade == "B") bGrClr = lazerCyan;
                 else bGrClr = ctx.clrMiss;
 
                 if (ctx.score >= bestScore) {
@@ -1394,134 +1869,114 @@ void runGameplayScreen(AppContext& ctx) {
 
             for (size_t e = 0; e < entries.size(); ++e) {
                 const auto& ent = entries[e];
-                float ey = startY + e * (lbH + (isTaikoPlay ? 3.0f : 5.0f));
-                u32 cBorder = ent.isLive
-                    ? (ctx.hasOvertakenBest ? Ui::rgba(255, 215, 60) : ctx.clrCursor)
-                    : Ui::rgba(65, 55, 90);
+                float ey = startY + e * (lbH + 4.0f);
+                u32 cAccent = ent.isLive
+                    ? (ctx.hasOvertakenBest ? Ui::rgba(255, 215, 60) : lazerPink)
+                    : Ui::rgba(90, 80, 125);
                 u32 cBg = ent.isLive
-                    ? (ctx.hasOvertakenBest ? Ui::rgba(54, 44, 20, 230) : Ui::rgba(34, 26, 52, 230))
-                    : Ui::rgba(18, 14, 28, 210);
+                    ? (ctx.hasOvertakenBest ? Ui::rgba(46, 36, 18, 175) : Ui::rgba(26, 18, 44, 175))
+                    : Ui::rgba(14, 10, 24, 150);
 
                 if (ent.isLive && ctx.overtakeFlashAnim > 0.05f) {
                     cBg = Ui::lerpColor(cBg, Ui::rgba(255, 215, 60), ctx.overtakeFlashAnim * 0.5f);
-                    cBorder = Ui::rgba(255, 255, 220);
+                    cAccent = Ui::rgba(255, 255, 220);
                 }
 
-                Ui::panel(lbX, ey, lbW, lbH, 0.32f, cBg, cBorder);
-                if (isTaikoPlay) {
-                    drawText(ctx.textBuf, lbX + 4.0f, ey + 3.0f, 0.28f, ent.isLive ? ctx.clr100 : ctx.clrWhite, ent.tag, 0.35f);
-                    drawText(ctx.textBuf, lbX + 22.0f, ey + 3.0f, 0.26f, ent.isLive ? ctx.clrCursor : ctx.clrMuted, ent.name, 0.35f);
-                    drawCenteredText(ctx.textBuf, lbX + lbW - 10.0f, ey + 9.0f, 0.32f, ent.grClr, ent.gr, 0.35f);
-                    char sBuf[32];
-                    std::snprintf(sBuf, sizeof(sBuf), "%d", ent.pts);
-                    drawText(ctx.textBuf, lbX + 4.0f, ey + 9.5f, 0.24f, ctx.clrWhite, sBuf, 0.35f);
-                } else {
-                    drawText(ctx.textBuf, lbX + 4.0f, ey + 4.0f, 0.30f, ent.isLive ? ctx.clr100 : ctx.clrWhite, ent.tag, 0.35f);
-                    drawText(ctx.textBuf, lbX + 22.0f, ey + 4.0f, 0.28f, ent.isLive ? ctx.clrCursor : ctx.clrMuted, ent.name, 0.35f);
-                    drawCenteredText(ctx.textBuf, lbX + lbW - 10.0f, ey + 8.5f, 0.35f, ent.grClr, ent.gr, 0.35f);
-                    char sBuf[32];
-                    std::snprintf(sBuf, sizeof(sBuf), "%d", ent.pts);
-                    drawText(ctx.textBuf, lbX + 4.0f, ey + 15.0f, 0.27f, ctx.clrWhite, sBuf, 0.35f);
-                }
+                Ui::slantRect(lbX, ey, lbW, lbH, -4.0f, 0.71f, cBg);
+                Ui::slantRect(lbX, ey, 3.0f, lbH, -4.0f, 0.72f, cAccent);
+                drawText(ctx.textBuf, lbX + 6.0f, ey + 2.5f, 0.30f, ent.isLive ? lazerCyan : ctx.clrWhite, ent.tag, 0.74f);
+                drawText(ctx.textBuf, lbX + 23.0f, ey + 3.0f, 0.28f, ent.isLive ? lazerPink : ctx.clrMuted, ent.name, 0.74f);
+                drawCenteredText(ctx.textBuf, lbX + lbW - 11.0f, ey + 8.5f, 0.35f, ent.grClr, ent.gr, 0.74f);
+                char sBuf[32];
+                std::snprintf(sBuf, sizeof(sBuf), "%d", ent.pts);
+                drawText(ctx.textBuf, lbX + 6.0f, ey + 13.5f, 0.28f, ctx.clrWhite, sBuf, 0.74f);
             }
         }
 
-        // Pantalla central de Descanso (Break Time) con calificación, cuenta atrás y advertencia
-        if (ctx.inBreakPeriod) {
+        // 6. Pantalla central de Descanso (Break / Wait Screen) en z = 0.80f..0.88f (SIEMPRE por encima del cursor)
+        if (ctx.inBreakPeriod && !ctx.isPaused) {
             if (isTaikoPlay) {
-                // En Taiko, mantener la pista visible y mostrar un cartel limpio estilo descanso de festival arriba
                 float bcX = 200.0f + dFrontHud;
                 float bcY = 46.0f;
-                Ui::panel(bcX - 60.0f, bcY - 18.0f, 120.0f, 36.0f, 0.32f, Ui::rgba(20, 16, 34, 230), ctx.clrPrimary);
-                drawCenteredText(ctx.textBuf, bcX, bcY - 8.0f, 0.35f, ctx.clrWhite, LOC(STR_GAME_BREAK), 0.35f);
+                Ui::panel(bcX - 65.0f, bcY - 18.0f, 130.0f, 38.0f, 0.80f, Ui::rgba(16, 11, 28, 195), lazerPink);
+                drawCenteredText(ctx.textBuf, bcX, bcY - 7.0f, 0.36f, ctx.clrWhite, LOC(STR_GAME_BREAK), 0.84f);
                 char cdStr[32];
                 float sLeft = std::max(0.0f, ctx.breakRemainingMs / 1000.0f);
                 std::snprintf(cdStr, sizeof(cdStr), "%.1f s", sLeft);
-                drawCenteredText(ctx.textBuf, bcX, bcY + 6.0f, 0.32f, ctx.clr300, cdStr, 0.35f);
+                drawCenteredText(ctx.textBuf, bcX, bcY + 8.0f, 0.35f, lazerCyan, cdStr, 0.84f);
             } else {
-                C2D_DrawRectSolid(baseOffsetX + ctx.shakeX + dPlayfield, ctx.shakeY, 0.48f, 320.0f, 240.0f, Ui::rgba(10, 8, 20, 120));
+                float bcX = (screenW * 0.5f) + dFrontHud;
+                float bcY = 114.0f;
+                float cardW = 192.0f;
+                float cardH = 100.0f;
 
-                float bcX = playX(256.0f, dFrontHud);
-                float bcY = playY(116.0f);
+                // Tarjeta translúcida estilo osu!lazer por encima del cursor (z = 0.80f..0.86f)
+                Ui::panel(bcX - cardW * 0.5f, bcY - cardH * 0.5f, cardW, cardH, 0.80f, Ui::rgba(14, 10, 26, 205), lazerPink);
+                Ui::slantRect(bcX - 52.0f, bcY - 43.0f, 104.0f, 16.0f, -4.0f, 0.82f, lazerPink);
+                drawCenteredText(ctx.textBuf, bcX, bcY - 35.0f, 0.35f, ctx.clrWhite, LOC(STR_GAME_BREAK), 0.85f);
 
-                Ui::panel(bcX - 85.0f, bcY - 44.0f, 170.0f, 96.0f, 0.50f, Ui::rgba(20, 16, 34, 245), ctx.clrPrimary);
-                Ui::pill(bcX - 44.0f, bcY - 39.0f, 88.0f, 14.0f, 0.52f, Ui::rgba(255, 102, 171, 230));
-                drawCenteredText(ctx.textBuf, bcX, bcY - 32.0f, 0.32f, ctx.clrWhite, LOC(STR_GAME_BREAK), 0.54f);
-
-                // Letra grande de Accuracy Grade actual
                 int tJudged = ctx.count300 + ctx.count100 + ctx.count50 + ctx.countMiss;
                 float bAcc = (tJudged > 0)
                     ? ((ctx.count300 * 300.0f + ctx.count100 * 100.0f + ctx.count50 * 50.0f) / (tJudged * 300.0f)) * 100.0f
                     : 100.0f;
                 const char* bGrade = "SS";
-                u32 bGradeClr = Ui::rgba(255, 102, 171);
+                u32 bGradeClr = lazerPink;
                 if (ctx.countMiss > 0) {
                     if (bAcc >= 90.0f)      { bGrade = "A"; bGradeClr = ctx.clr100; }
-                    else if (bAcc >= 80.0f) { bGrade = "B"; bGradeClr = ctx.clr300; }
+                    else if (bAcc >= 80.0f) { bGrade = "B"; bGradeClr = lazerCyan; }
                     else if (bAcc >= 70.0f) { bGrade = "C"; bGradeClr = ctx.clr50; }
                     else                    { bGrade = "D"; bGradeClr = ctx.clrMiss; }
                 } else {
-                    if (bAcc >= 99.9f)      { bGrade = "SS"; bGradeClr = Ui::rgba(255, 102, 171); }
-                    else if (bAcc >= 93.0f) { bGrade = "S";  bGradeClr = ctx.clrCursor; }
+                    if (bAcc >= 99.9f)      { bGrade = "SS"; bGradeClr = lazerPink; }
+                    else if (bAcc >= 93.0f) { bGrade = "S";  bGradeClr = Ui::rgba(255, 215, 70); }
                     else if (bAcc >= 85.0f) { bGrade = "A";  bGradeClr = ctx.clr100; }
-                    else if (bAcc >= 75.0f) { bGrade = "B";  bGradeClr = ctx.clr300; }
+                    else if (bAcc >= 75.0f) { bGrade = "B";  bGradeClr = lazerCyan; }
                     else                    { bGrade = "C";  bGradeClr = ctx.clr50; }
                 }
 
-                Ui::glow(bcX, bcY - 4.0f, 0.51f, 32.0f, Ui::withAlpha(bGradeClr, 110), 3);
-                drawCenteredText(ctx.textBuf, bcX, bcY - 4.0f, 0.85f, bGradeClr, bGrade, 0.55f);
+                Ui::glow(bcX, bcY - 4.0f, 0.81f, 30.0f, Ui::withAlpha(bGradeClr, 105), 3);
+                drawCenteredTextWithShadow(ctx.textBuf, bcX, bcY - 4.0f, 0.86f, bGradeClr, bGrade, 0.85f);
 
-                char cdStr[48];
+                char cdStr[64];
                 float sLeft = std::max(0.0f, ctx.breakRemainingMs / 1000.0f);
                 std::snprintf(cdStr, sizeof(cdStr), LOC(STR_GAME_CIRCLES_IN), sLeft);
-                drawCenteredText(ctx.textBuf, bcX, bcY + 21.0f, 0.38f, ctx.clrWhite, cdStr, 0.54f);
+                drawCenteredText(ctx.textBuf, bcX, bcY + 22.0f, 0.38f, ctx.clrWhite, cdStr, 0.85f);
 
-                std::snprintf(cdStr, sizeof(cdStr), "%s: %.1f%%  •  %dx", LOC(STR_ACCURACY), bAcc, ctx.combo);
-                drawCenteredText(ctx.textBuf, bcX, bcY + 33.0f, 0.28f, ctx.clrMuted, cdStr, 0.54f);
-                drawCenteredText(ctx.textBuf, bcX, bcY + 44.0f, 0.25f, ctx.clrCursor, LOC(STR_GAME_SMOKE), 0.54f);
+                std::snprintf(cdStr, sizeof(cdStr), "%s: %.1f%%  |  %dx", LOC(STR_ACCURACY), bAcc, ctx.combo);
+                drawCenteredText(ctx.textBuf, bcX, bcY + 37.0f, 0.32f, lazerCyan, cdStr, 0.85f);
 
-                // Indicador de advertencia visual (últimos 2.2 segundos antes de que vuelvan las notas)
+                // Indicador de advertencia visual hacia la próxima nota (últimos 2.2 segundos)
                 if (ctx.breakRemainingMs <= 2200) {
                     float warnPhase = static_cast<float>(2200 - ctx.breakRemainingMs) / 2200.0f;
                     float blink = 0.5f + 0.5f * std::sin(ctx.animTick * 0.45f);
 
-                    // Pill superior parpadeante de ¡ATENTO!
-                    Ui::pill(bcX - 45.0f, bcY - 64.0f, 90.0f, 16.0f, 0.56f, Ui::withAlpha(ctx.clrMiss, static_cast<u8>(180 + 75 * blink)));
-                    drawCenteredText(ctx.textBuf, bcX, bcY - 56.0f, 0.35f, ctx.clrWhite, LOC(STR_GAME_WARNING), 0.58f);
+                    Ui::slantRect(bcX - 48.0f, bcY - 68.0f, 96.0f, 16.0f, -4.0f, 0.84f, Ui::withAlpha(ctx.clrMiss, static_cast<u8>(190 + 65 * blink)));
+                    drawCenteredText(ctx.textBuf, bcX, bcY - 60.0f, 0.35f, ctx.clrWhite, LOC(STR_GAME_WARNING), 0.86f);
 
-                    // Anillos concéntricos convergiendo hacia el próximo círculo
                     float nx = playX(ctx.breakNextObjPos.x, dCircle);
                     float ny = playY(ctx.breakNextObjPos.y);
                     float targetR = rScreen * (1.1f + (1.0f - warnPhase) * 1.5f);
 
-                    drawRing(nx, ny, targetR, 2.2f, Ui::withAlpha(ctx.clrCursor, static_cast<u8>(220 * blink)), 24, 0.58f);
-                    drawRing(nx, ny, rScreen, 1.4f, Ui::withAlpha(ctx.clrWhite, 190), 20, 0.58f);
+                    drawRing(nx, ny, targetR, 2.2f, Ui::withAlpha(lazerPink, static_cast<u8>(220 * blink)), 24, 0.86f);
+                    drawRing(nx, ny, rScreen, 1.4f, Ui::withAlpha(ctx.clrWhite, 190), 20, 0.86f);
 
-                    // Flechas laterales apuntando hacia el objetivo
                     float aDist = targetR + 8.0f;
-                    C2D_DrawTriangle(nx - aDist, ny, ctx.clrCursor, nx - aDist - 7.0f, ny - 6.0f, ctx.clrCursor, nx - aDist - 7.0f, ny + 6.0f, ctx.clrCursor, 0.59f);
-                    C2D_DrawTriangle(nx + aDist, ny, ctx.clrCursor, nx + aDist + 7.0f, ny - 6.0f, ctx.clrCursor, nx + aDist + 7.0f, ny + 6.0f, ctx.clrCursor, 0.59f);
+                    C2D_DrawTriangle(nx - aDist, ny, lazerPink, nx - aDist - 7.0f, ny - 6.0f, lazerPink, nx - aDist - 7.0f, ny + 6.0f, lazerPink, 0.87f);
+                    C2D_DrawTriangle(nx + aDist, ny, lazerPink, nx + aDist + 7.0f, ny - 6.0f, lazerPink, nx + aDist + 7.0f, ny + 6.0f, lazerPink, 0.87f);
                 }
             }
         }
 
-        // Botón SKIP >> animado con estilo osu!
+        // 7. Botón SKIP >> inclinado estilo osu!lazer (z = 0.89f..0.91f)
         if (ctx.skipAvailable && !ctx.isPaused) {
-            float skipX = drawFullHud ? (302.0f + dFrontHud) : 210.0f;
-            float skipY = drawFullHud ? 198.0f : 194.0f;
-            float skipW = drawFullHud ? 92.0f : 100.0f;
-            float skipH = drawFullHud ? 32.0f : 36.0f;
-
-            float skipPulse = 0.5f + 0.5f * std::sin(ctx.animTick * 0.25f);
-            u32 sBg = Ui::lerpColor(Ui::rgba(255, 80, 140, 240), Ui::rgba(255, 120, 180, 250), skipPulse);
-
-            Ui::panel(skipX, skipY, skipW, skipH, 0.94f, sBg, ctx.clrWhite);
-            drawCenteredText(ctx.textBuf, skipX + (skipW * 0.5f), skipY + (skipH * 0.35f), 0.46f, ctx.clrWhite, "SKIP >>", 0.96f);
-            drawCenteredText(ctx.textBuf, skipX + (skipW * 0.5f), skipY + (skipH * 0.74f), 0.26f, Ui::rgba(255, 235, 245),
-                             drawFullHud ? "ZL / ZR / START" : LOC(STR_SKIP_HINT), 0.96f);
+            float skipX = drawFullHud ? (290.0f + dFrontHud) : 206.0f;
+            float skipY = drawFullHud ? 198.0f : 196.0f;
+            float skipW = 102.0f;
+            float skipH = 32.0f;
+            Ui::slantButton(skipX, skipY, skipW, skipH, -6.0f, lazerPink, "SKIP >>", LOC(STR_GAME_SKIP_SUB), ctx.textBuf, true, 0.89f);
         }
 
-        // Combo Burst (Aparición de personaje / mascota en hitos de combo: 30x, 60x, 100x, 150x...)
+        // 8. Combo Burst (Aparición de personaje / mascota en hitos de combo)
         if (ctx.comboBurstTimer > 0 && drawFullHud && !ctx.isPaused) {
             float slideT = 1.0f;
             float alpha = 1.0f;
@@ -1545,43 +2000,35 @@ void runGameplayScreen(AppContext& ctx) {
             u8 aVal = static_cast<u8>(255.0f * alpha);
 
             if (ctx.texSkinComboBurst.loaded) {
-                ctx.texSkinComboBurst.drawRect(burstX, burstY, burstW, burstH, 0.82f, aVal);
+                ctx.texSkinComboBurst.drawRect(burstX, burstY, burstW, burstH, 0.78f, aVal);
             } else {
-                // Mascota vectorial estilizada de osu! (Chibi Pippi con orejitas anime, destellos y badge)
                 float cx = burstX + burstW * 0.5f;
                 float cy = burstY + burstH * 0.55f;
-                u32 pPink = Ui::withAlpha(Ui::rgba(255, 102, 171), aVal);
+                u32 pPink = Ui::withAlpha(lazerPink, aVal);
                 u32 pGold = Ui::withAlpha(Ui::rgba(255, 215, 60), aVal);
                 u32 pDark = Ui::withAlpha(Ui::rgba(26, 20, 42), static_cast<u8>(aVal * 0.90f));
 
-                // Resplandor de fondo
-                Ui::glow(cx, cy, 0.80f, 65.0f, Ui::withAlpha(pPink, static_cast<u8>(aVal * 0.45f)), 3);
+                Ui::glow(cx, cy, 0.76f, 65.0f, Ui::withAlpha(pPink, static_cast<u8>(aVal * 0.45f)), 3);
+                C2D_DrawCircleSolid(cx, cy - 14.0f, 0.77f, 32.0f, pPink);
+                C2D_DrawCircleSolid(cx, cy - 14.0f, 0.78f, 28.0f, pDark);
 
-                // Silueta de cuerpo y cabeza estilizada
-                C2D_DrawCircleSolid(cx, cy - 14.0f, 0.81f, 32.0f, pPink);
-                C2D_DrawCircleSolid(cx, cy - 14.0f, 0.82f, 28.0f, pDark);
+                C2D_DrawTriangle(cx - 24.0f, cy - 30.0f, pPink, cx - 10.0f, cy - 42.0f, pPink, cx - 8.0f, cy - 28.0f, pPink, 0.78f);
+                C2D_DrawTriangle(cx + 24.0f, cy - 30.0f, pPink, cx + 10.0f, cy - 42.0f, pPink, cx + 8.0f, cy - 28.0f, pPink, 0.78f);
+                C2D_DrawTriangle(cx - 20.0f, cy - 30.0f, pGold, cx - 11.0f, cy - 38.0f, pGold, cx - 9.0f, cy - 28.0f, pGold, 0.79f);
+                C2D_DrawTriangle(cx + 20.0f, cy - 30.0f, pGold, cx + 11.0f, cy - 38.0f, pGold, cx + 9.0f, cy - 28.0f, pGold, 0.79f);
 
-                // Auriculares de gatito / orejitas anime
-                C2D_DrawTriangle(cx - 24.0f, cy - 30.0f, pPink, cx - 10.0f, cy - 42.0f, pPink, cx - 8.0f, cy - 28.0f, pPink, 0.83f);
-                C2D_DrawTriangle(cx + 24.0f, cy - 30.0f, pPink, cx + 10.0f, cy - 42.0f, pPink, cx + 8.0f, cy - 28.0f, pPink, 0.83f);
-                C2D_DrawTriangle(cx - 20.0f, cy - 30.0f, pGold, cx - 11.0f, cy - 38.0f, pGold, cx - 9.0f, cy - 28.0f, pGold, 0.84f);
-                C2D_DrawTriangle(cx + 20.0f, cy - 30.0f, pGold, cx + 11.0f, cy - 38.0f, pGold, cx + 9.0f, cy - 28.0f, pGold, 0.84f);
+                drawRing(cx - 10.0f, cy - 16.0f, 6.0f, 1.8f, pPink, 14, 0.79f);
+                drawRing(cx + 10.0f, cy - 16.0f, 6.0f, 1.8f, pPink, 14, 0.79f);
+                C2D_DrawCircleSolid(cx - 12.0f, cy - 10.0f, 0.79f, 4.0f, Ui::withAlpha(Ui::rgba(255, 140, 180), aVal));
+                C2D_DrawCircleSolid(cx + 12.0f, cy - 10.0f, 0.79f, 4.0f, Ui::withAlpha(Ui::rgba(255, 140, 180), aVal));
 
-                // Ojos estilo anime felices (^^)
-                drawRing(cx - 10.0f, cy - 16.0f, 6.0f, 1.8f, pPink, 14, 0.84f);
-                drawRing(cx + 10.0f, cy - 16.0f, 6.0f, 1.8f, pPink, 14, 0.84f);
-                C2D_DrawCircleSolid(cx - 12.0f, cy - 10.0f, 0.84f, 4.0f, Ui::withAlpha(Ui::rgba(255, 140, 180), aVal));
-                C2D_DrawCircleSolid(cx + 12.0f, cy - 10.0f, 0.84f, 4.0f, Ui::withAlpha(Ui::rgba(255, 140, 180), aVal));
-
-                // Estrellas flotantes de celebración
                 float sBob = std::sin(ctx.animTick * 0.2f) * 4.0f;
-                Ui::glow(cx - 36.0f, cy - 35.0f + sBob, 0.85f, 10.0f, pGold, 2);
-                C2D_DrawCircleSolid(cx - 36.0f, cy - 35.0f + sBob, 0.86f, 4.0f, pGold);
-                Ui::glow(cx + 36.0f, cy - 25.0f - sBob, 0.85f, 10.0f, pGold, 2);
-                C2D_DrawCircleSolid(cx + 36.0f, cy - 25.0f - sBob, 0.86f, 4.5f, pGold);
+                Ui::glow(cx - 36.0f, cy - 35.0f + sBob, 0.79f, 10.0f, pGold, 2);
+                C2D_DrawCircleSolid(cx - 36.0f, cy - 35.0f + sBob, 0.79f, 4.0f, pGold);
+                Ui::glow(cx + 36.0f, cy - 25.0f - sBob, 0.79f, 10.0f, pGold, 2);
+                C2D_DrawCircleSolid(cx + 36.0f, cy - 25.0f - sBob, 0.79f, 4.5f, pGold);
             }
 
-            // Cinta o Badge con el hito: "100 COMBO!"
             char cbStr[32];
             std::snprintf(cbStr, sizeof(cbStr), "%d COMBO!", ctx.comboBurstValue);
             float pillW = 96.0f;
@@ -1589,51 +2036,108 @@ void runGameplayScreen(AppContext& ctx) {
             float pillX = burstX + (burstW - pillW) * 0.5f;
             float pillY = burstY + burstH - 26.0f;
 
-            Ui::pill(pillX, pillY, pillW, pillH, 0.85f, Ui::withAlpha(Ui::rgba(255, 102, 171), aVal));
-            drawCenteredText(ctx.textBuf, pillX + pillW * 0.5f, pillY + pillH * 0.5f, 0.38f, Ui::withAlpha(ctx.clrWhite, aVal), cbStr, 0.88f);
+            Ui::slantRect(pillX, pillY, pillW, pillH, -4.0f, 0.79f, Ui::withAlpha(lazerPink, aVal));
+            drawCenteredText(ctx.textBuf, pillX + pillW * 0.5f, pillY + pillH * 0.5f, 0.38f, Ui::withAlpha(ctx.clrWhite, aVal), cbStr, 0.80f);
         }
 
-        // Overlay de Pausa en pantalla superior (estilo osu!lazer)
+        // 9. Overlay de Pausa en pantalla superior (estilo osu!lazer con resumen de canción y estadísticas)
         if (drawFullHud && ctx.isPaused) {
             float dPause = depthShift(5.0f);
-            C2D_DrawRectSolid(0.0f, 0.0f, 0.90f, 400.0f, 240.0f, Ui::rgba(8, 6, 16, 185));
-            Ui::panel(70.0f + dPause, 36.0f, 260.0f, 168.0f, 0.92f, Ui::rgba(22, 18, 38, 248), ctx.clrPrimary);
-            drawCenteredText(ctx.textBuf, 200.0f + dPause, 58.0f, 0.62f, ctx.clrCursor, LOC(STR_GAME_PAUSED), 0.99f);
+            C2D_DrawRectSolid(0.0f, 0.0f, 0.91f, 400.0f, 240.0f, Ui::rgba(8, 6, 16, 185));
 
-            const char* pOpts[3] = { LOC(STR_PAUSE_RESUME), LOC(STR_PAUSE_RETRY), LOC(STR_PAUSE_QUIT) };
-            const char* pKeys[3] = { "A", "X", "B" };
-            u32 pClrs[3] = { ctx.clr100, ctx.clrCursor, ctx.clrPrimary };
-            for (int i = 0; i < 3; ++i) {
-                bool sel = (ctx.pauseOption == i);
-                float py = 84.0f + i * 34.0f;
-                float px = 86.0f + dPause;
-                float pw = 228.0f;
-                float ph = 28.0f;
-                u32 bg = sel ? Ui::rgba(45, 36, 72, 250) : Ui::rgba(24, 20, 38, 235);
-                Ui::button(px, py, pw, ph, 0.95f, bg, pClrs[i], sel);
+            Ui::lazerHeader(400.0f, 0.92f, LOC(STR_GAME_PAUSED), "PAUSE", lazerPink, ctx.textBuf, true);
 
-                Ui::pill(px + 8.0f, py + 5.0f, 18.0f, 18.0f, 0.96f, sel ? pClrs[i] : Ui::rgba(45, 38, 65));
-                drawCenteredText(ctx.textBuf, px + 17.0f, py + 14.0f, 0.28f, sel ? Ui::rgba(0, 0, 0, 240) : ctx.clrWhite, pKeys[i], 0.98f);
-                drawTextWithShadow(ctx.textBuf, px + 34.0f, py + 5.0f, 0.40f, ctx.clrWhite, pOpts[i], 0.98f);
+            float pCardX = 36.0f + dPause;
+            float pCardY = 38.0f;
+            float pCardW = 328.0f;
+            float pCardH = 162.0f;
+            Ui::panel(pCardX, pCardY, pCardW, pCardH, 0.93f, Ui::rgba(16, 11, 30, 195), lazerPink);
+
+            // Título y Dificultad de la canción en pausa
+            std::string pTitle = ctx.beatmap.title.empty() ? "osu! 3DS Beatmap" : ctx.beatmap.title;
+            if (pTitle.size() > 34) pTitle = pTitle.substr(0, 31) + "...";
+            drawTextWithShadow(ctx.textBuf, pCardX + 14.0f, pCardY + 10.0f, 0.46f, ctx.clrWhite, pTitle.c_str(), 0.95f);
+
+            char diffLine[96];
+            std::snprintf(diffLine, sizeof(diffLine), "%s  •  [%s]",
+                          ctx.beatmap.artist.empty() ? "Unknown" : ctx.beatmap.artist.c_str(),
+                          ctx.beatmap.version.empty() ? "Normal" : ctx.beatmap.version.c_str());
+            if (std::strlen(diffLine) > 42) diffLine[42] = '\0';
+            drawText(ctx.textBuf, pCardX + 14.0f, pCardY + 30.0f, 0.36f, lazerCyan, diffLine, 0.95f);
+
+            // Barra de progreso actual del mapa
+            float pProg = 0.0f;
+            if (!ctx.beatmap.circles.empty()) {
+                float endT = static_cast<float>(ctx.beatmap.circles.back().endTime + 1000);
+                pProg = std::max(0.0f, std::min(1.0f, static_cast<float>(songTime) / std::max(1.0f, endT)));
             }
+            Ui::slantRect(pCardX + 14.0f, pCardY + 52.0f, pCardW - 28.0f, 8.0f, -3.0f, 0.94f, Ui::rgba(28, 22, 48, 220));
+            if (pProg > 0.01f) {
+                Ui::slantRectGrad(pCardX + 14.0f, pCardY + 52.0f, std::max(6.0f, (pCardW - 28.0f) * pProg), 8.0f, -3.0f, 0.95f, lazerPink, lazerCyan);
+            }
+            char progTxt[32];
+            std::snprintf(progTxt, sizeof(progTxt), LOC(STR_GAME_PAUSE_PROGRESS_FMT), pProg * 100.0f);
+            drawText(ctx.textBuf, pCardX + 14.0f, pCardY + 64.0f, 0.34f, Ui::rgba(200, 210, 230), progTxt, 0.95f);
+
+            // 3 Cajas inclinadas con estadísticas en vivo (Score, Precisión, Combo)
+            int tJudged = ctx.count300 + ctx.count100 + ctx.count50 + ctx.countMiss;
+            float pAcc = (tJudged > 0)
+                ? ((ctx.count300 * 300.0f + ctx.count100 * 100.0f + ctx.count50 * 50.0f) / (tJudged * 300.0f)) * 100.0f
+                : 100.0f;
+
+            float statY = pCardY + 84.0f;
+            float statW = 94.0f;
+            float statH = 38.0f;
+
+            // Caja 1: Puntuación
+            Ui::slantRect(pCardX + 14.0f, statY, statW, statH, -5.0f, 0.94f, Ui::rgba(24, 18, 44, 215));
+            Ui::slantRect(pCardX + 14.0f, statY, 3.5f, statH, -5.0f, 0.95f, lazerPink);
+            drawText(ctx.textBuf, pCardX + 22.0f, statY + 4.0f, 0.30f, Ui::rgba(170, 180, 205), LOC(STR_SCORE), 0.96f);
+            char stVal[32];
+            std::snprintf(stVal, sizeof(stVal), "%07d", ctx.score);
+            drawTextWithShadow(ctx.textBuf, pCardX + 22.0f, statY + 18.0f, 0.40f, ctx.clrWhite, stVal, 0.96f);
+
+            // Caja 2: Precisión
+            Ui::slantRect(pCardX + 117.0f, statY, statW, statH, -5.0f, 0.94f, Ui::rgba(24, 18, 44, 215));
+            Ui::slantRect(pCardX + 117.0f, statY, 3.5f, statH, -5.0f, 0.95f, lazerCyan);
+            drawText(ctx.textBuf, pCardX + 125.0f, statY + 4.0f, 0.30f, Ui::rgba(170, 180, 205), LOC(STR_ACCURACY), 0.96f);
+            std::snprintf(stVal, sizeof(stVal), "%.1f%%", pAcc);
+            drawTextWithShadow(ctx.textBuf, pCardX + 125.0f, statY + 18.0f, 0.42f, lazerCyan, stVal, 0.96f);
+
+            // Caja 3: Combo
+            Ui::slantRect(pCardX + 220.0f, statY, statW, statH, -5.0f, 0.94f, Ui::rgba(24, 18, 44, 215));
+            Ui::slantRect(pCardX + 220.0f, statY, 3.5f, statH, -5.0f, 0.95f, Ui::rgba(46, 213, 115));
+            drawText(ctx.textBuf, pCardX + 228.0f, statY + 4.0f, 0.30f, Ui::rgba(170, 180, 205), LOC(STR_MAX_COMBO), 0.96f);
+            std::snprintf(stVal, sizeof(stVal), "%dx", ctx.maxCombo);
+            drawTextWithShadow(ctx.textBuf, pCardX + 228.0f, statY + 18.0f, 0.42f, Ui::rgba(46, 213, 115), stVal, 0.96f);
+
+            // Desglose de aciertos inferior (300 / 100 / 50 / X)
+            char hitsSummary[96];
+            std::snprintf(hitsSummary, sizeof(hitsSummary), "300: %d   |   100: %d   |   50: %d   |   MISS: %d",
+                          ctx.count300, ctx.count100, ctx.count50, ctx.countMiss);
+            drawCenteredText(ctx.textBuf, pCardX + pCardW * 0.5f, pCardY + 141.0f, 0.36f, ctx.clrWhite, hitsSummary, 0.96f);
+
             if (isTaikoPlay) {
                 u32 bClr = (ctx.settings.taikoBgMode == 0) ? Ui::rgba(225, 145, 25, 230) : ((ctx.settings.taikoBgMode == 1) ? Ui::rgba(45, 130, 215, 230) : Ui::rgba(165, 55, 185, 230));
-                Ui::pill(90.0f + dPause, 186.0f, 220.0f, 15.0f, 0.94f, bClr);
+                Ui::pill(90.0f + dPause, 208.0f, 220.0f, 18.0f, 0.94f, bClr);
                 char bgInfo[64];
                 std::snprintf(bgInfo, sizeof(bgInfo), "X: %s (%s)", LOC(STR_SET_TAIKO_BG), ctx.settings.getTaikoBgModeName());
-                drawCenteredText(ctx.textBuf, 200.0f + dPause, 193.5f, 0.26f, ctx.clrWhite, bgInfo, 0.99f);
+                drawCenteredText(ctx.textBuf, 200.0f + dPause, 217.0f, 0.32f, ctx.clrWhite, bgInfo, 0.96f);
+            } else {
+                drawCenteredText(ctx.textBuf, 200.0f + dPause, 216.0f, 0.35f, Ui::rgba(200, 210, 230),
+                                 LOC(STR_GAME_PAUSE_HINT), 0.95f);
             }
         }
-        // Destello inicial de Kiai Time (en primer plano sin contaminar el depth buffer de los círculos)
+        // Destello inicial de Kiai Time
         if (ctx.kiaiBurstFlash > 0.01f) {
             u8 fAlpha = static_cast<u8>(ctx.kiaiBurstFlash * 65.0f);
-            C2D_DrawRectSolid(0.0f, 0.0f, 0.82f, screenW, 240.0f, Ui::rgba(255, 240, 200, fAlpha));
+            C2D_DrawRectSolid(0.0f, 0.0f, 0.78f, screenW, 240.0f, Ui::rgba(255, 240, 200, fAlpha));
         }
 
         // Borde de aviso al romper combo (Combo Break)
         if (ctx.comboBreakAnim > 0.01f) {
             u8 cbAlpha = static_cast<u8>(ctx.comboBreakAnim * 110.0f);
-            drawRectOutline(0.0f, 0.0f, screenW, 240.0f, 4.0f, Ui::rgba(255, 60, 75, cbAlpha), 0.85f);
+            drawRectOutline(0.0f, 0.0f, screenW, 240.0f, 4.0f, Ui::rgba(255, 60, 75, cbAlpha), 0.79f);
         }
 
         Ui::drawTransition(screenW, 240.0f, ctx.screenFade, ctx.clrPrimary);
@@ -1653,91 +2157,97 @@ void runGameplayScreen(AppContext& ctx) {
     C2D_SceneBegin(ctx.bottomScreen);
 
     if (ctx.isPaused) {
-        Ui::backdrop(320.0f, 240.0f, static_cast<float>(ctx.animTick), Ui::rgba(22, 16, 38), Ui::rgba(10, 8, 18), ctx.clrPrimary, 0.01f);
-        const char* pOpts[3] = { LOC(STR_PAUSE_RESUME), LOC(STR_PAUSE_RETRY), LOC(STR_PAUSE_QUIT) };
-        const char* pKeys[3] = { "A", "X", "B" };
-        u32 pClrs[3] = { ctx.clr100, ctx.clrCursor, ctx.clrPrimary };
+        u32 lazerPink = Ui::rgba(255, 102, 171, 255);
+        Ui::backdrop(320.0f, 240.0f, static_cast<float>(ctx.animTick), Ui::rgba(20, 13, 36), Ui::rgba(10, 7, 20), lazerPink, 0.01f);
+
+        // Medallón ancla izquierdo estilo osu!lazer (tocar para CONTINUAR)
+        float mCx = 46.0f;
+        float mCy = 118.0f;
+        float mR  = 34.0f;
+        float pulse = 0.5f + 0.5f * std::sin(ctx.animTick * 0.12f);
+        Ui::ring(mCx, mCy, 0.18f, mR + 5.0f + pulse * 3.0f, 2.0f, Ui::withAlpha(lazerPink, 90), 28);
+        Ui::glow(mCx, mCy, 0.20f, mR + 6.0f, Ui::withAlpha(lazerPink, 110), 3);
+        C2D_DrawCircleSolid(mCx, mCy, 0.25f, mR, 0xFFFFFFFF);
+        C2D_DrawCircleSolid(mCx, mCy, 0.28f, mR - 2.5f, lazerPink);
+        C2D_DrawCircleSolid(mCx, mCy, 0.30f, mR - 5.5f, 0xFF5517B8);
+
+        // Icono de Pausa (||) dentro del medallón
+        C2D_DrawRectSolid(mCx - 8.5f, mCy - 11.0f, 0.35f, 5.5f, 22.0f, 0xFFFFFFFF);
+        C2D_DrawRectSolid(mCx + 3.0f, mCy - 11.0f, 0.35f, 5.5f, 22.0f, 0xFFFFFFFF);
+
+        // 3 Botones inclinados estilo osu!lazer a la derecha
+        const char* pTitles[3] = {
+            LOC(STR_PAUSE_RESUME),
+            LOC(STR_PAUSE_RETRY),
+            LOC(STR_PAUSE_QUIT)
+        };
+        const char* pSubs[3] = {
+            LOC(STR_PAUSE_SUB_RESUME),
+            LOC(STR_PAUSE_SUB_RETRY),
+            LOC(STR_PAUSE_SUB_QUIT)
+        };
+        u32 pAccents[3] = {
+            Ui::rgba(46, 213, 115, 255),  // Verde esmeralda
+            Ui::rgba(66, 144, 251, 255),  // Azul lazer
+            Ui::rgba(255, 77, 109, 255)   // Rosa/Rojo lazer
+        };
+
         for (int i = 0; i < 3; ++i) {
             bool sel = (ctx.pauseOption == i);
-            float bx = 30.0f;
-            float by = 38.0f + i * 52.0f;
-            float bw = 260.0f;
+            float bx = sel ? 92.0f : 98.0f;
+            float by = 38.0f + i * 56.0f;
+            float bw = 212.0f;
             float bh = 44.0f;
-
-            u32 bg = sel ? Ui::rgba(45, 36, 72, 250) : Ui::rgba(22, 19, 36, 235);
-            Ui::button(bx, by, bw, bh, 0.20f, bg, pClrs[i], sel);
-
-            // Pastilla indicadora de la tecla
-            Ui::pill(bx + 12.0f, by + 12.0f, 22.0f, 20.0f, 0.24f, sel ? pClrs[i] : Ui::rgba(40, 34, 58, 240));
-            drawCenteredText(ctx.textBuf, bx + 23.0f, by + 22.0f, 0.32f, sel ? Ui::rgba(0, 0, 0, 240) : ctx.clrWhite, pKeys[i], 0.28f);
-
-            // Texto del boton con sombra de alto contraste
-            drawTextWithShadow(ctx.textBuf, bx + 44.0f, by + 13.0f, 0.46f, ctx.clrWhite, pOpts[i], 0.28f);
+            Ui::slantButton(bx, by, bw, bh, -6.0f, pAccents[i], pTitles[i], pSubs[i], ctx.textBuf, sel, 0.25f);
         }
+
         if (isTaikoPlay) {
             u32 bClr = (ctx.settings.taikoBgMode == 0) ? Ui::rgba(225, 145, 25, 240) : ((ctx.settings.taikoBgMode == 1) ? Ui::rgba(45, 130, 215, 240) : Ui::rgba(165, 55, 185, 240));
             Ui::pill(40.0f, 206.0f, 240.0f, 24.0f, 0.25f, bClr);
             char bgInfo[64];
-            std::snprintf(bgInfo, sizeof(bgInfo), "%s: %s (Toca o X)", LOC(STR_SET_TAIKO_BG), ctx.settings.getTaikoBgModeName());
-            drawCenteredText(ctx.textBuf, 160.0f, 218.0f, 0.32f, ctx.clrWhite, bgInfo, 0.85f);
+            std::snprintf(bgInfo, sizeof(bgInfo), LOC(STR_TAIKO_BG_TOUCH_HINT), LOC(STR_SET_TAIKO_BG), ctx.settings.getTaikoBgModeName());
+            drawCenteredText(ctx.textBuf, 160.0f, 218.0f, 0.34f, ctx.clrWhite, bgInfo, 0.85f);
         }
         Ui::drawTransition(320.0f, 240.0f, ctx.screenFade, ctx.clrPrimary);
     } else if (isTaikoPlay) {
         // Modo osu!taiko: Tambor interactivo táctil completo en la pantalla inferior (estilo 3DS 1:1)
-        ctx.taikoEngine.renderBottomDrum(ctx.textBuf, static_cast<float>(ctx.animTick), &ctx.settings, taikoGuideAlpha);
+        ctx.taikoEngine.renderBottomDrum(ctx.textBuf, static_cast<float>(ctx.animTick), &ctx.settings, taikoGuideAlpha, &ctx);
 
-        // Botón SKIP si aplica
         if (ctx.skipAvailable) {
-            float skipPulse = 0.5f + 0.5f * std::sin(ctx.animTick * 0.25f);
-            u32 sBg = Ui::lerpColor(Ui::rgba(255, 80, 140, 240), Ui::rgba(255, 120, 180, 250), skipPulse);
-            Ui::panel(212.0f, 196.0f, 100.0f, 34.0f, 0.85f, sBg, ctx.clrWhite);
-            drawCenteredText(ctx.textBuf, 262.0f, 208.0f, 0.44f, ctx.clrWhite, "SKIP >>", 0.90f);
-            drawCenteredText(ctx.textBuf, 262.0f, 222.0f, 0.25f, Ui::rgba(255, 230, 242), LOC(STR_SKIP_HINT), 0.90f);
+            Ui::slantButton(206.0f, 196.0f, 104.0f, 34.0f, -6.0f, Ui::rgba(255, 102, 171), "SKIP >>", LOC(STR_SKIP_HINT), ctx.textBuf, true, 0.85f);
         }
         Ui::drawTransition(320.0f, 240.0f, ctx.screenFade, ctx.clrPrimary);
     } else if (isManiaPlay) {
         // Modo osu!mania: Teclado interactivo de 4 columnas en la pantalla inferior
         Ui::backdrop(320.0f, 240.0f, static_cast<float>(ctx.animTick), Ui::rgba(18, 14, 30), Ui::rgba(8, 6, 14), ctx.clrPrimary, 0.01f);
-        ctx.maniaEngine.renderBottomLanes(ctx.textBuf, static_cast<float>(ctx.animTick));
+        ctx.maniaEngine.renderBottomLanes(ctx.textBuf, static_cast<float>(ctx.animTick), &ctx);
 
-        // Mini HUD superior discreto (Barra de HP)
         u32 hpClr = (ctx.hp > 0.5f) ? ctx.clr100 : ((ctx.hp > 0.25f) ? ctx.clr50 : ctx.clrMiss);
         C2D_DrawRectSolid(0.0f, 0.0f, 0.29f, 320.0f, 4.0f, Ui::rgba(0, 0, 0, 150));
         if (ctx.hp > 0.0f) Ui::gradH(0.0f, 0.0f, 320.0f * ctx.hp, 3.0f, 0.35f, Ui::brighten(hpClr, 0.6f), hpClr);
 
-        // Botón SKIP si aplica
         if (ctx.skipAvailable) {
-            float skipPulse = 0.5f + 0.5f * std::sin(ctx.animTick * 0.25f);
-            u32 sBg = Ui::lerpColor(Ui::rgba(255, 80, 140, 240), Ui::rgba(255, 120, 180, 250), skipPulse);
-            Ui::panel(212.0f, 196.0f, 100.0f, 34.0f, 0.85f, sBg, ctx.clrWhite);
-            drawCenteredText(ctx.textBuf, 262.0f, 208.0f, 0.44f, ctx.clrWhite, "SKIP >>", 0.90f);
-            drawCenteredText(ctx.textBuf, 262.0f, 222.0f, 0.25f, Ui::rgba(255, 230, 242), LOC(STR_SKIP_HINT), 0.90f);
+            Ui::slantButton(206.0f, 196.0f, 104.0f, 34.0f, -6.0f, Ui::rgba(255, 102, 171), "SKIP >>", LOC(STR_SKIP_HINT), ctx.textBuf, true, 0.85f);
         }
         Ui::drawTransition(320.0f, 240.0f, ctx.screenFade, ctx.clrPrimary);
     } else if (isCatchPlay) {
         // Modo osu!catch: Deck de control táctil con radar de frutas en la pantalla inferior
         Ui::backdrop(320.0f, 240.0f, static_cast<float>(ctx.animTick), Ui::rgba(16, 22, 34), Ui::rgba(8, 12, 18), ctx.clrPrimary, 0.01f);
-        ctx.catchEngine.renderBottomDeck(ctx.textBuf, static_cast<float>(ctx.animTick), songTime);
+        ctx.catchEngine.renderBottomDeck(ctx.textBuf, static_cast<float>(ctx.animTick), songTime, &ctx);
 
-        // Mini HUD superior discreto (Barra de HP)
         u32 hpClr = (ctx.hp > 0.5f) ? ctx.clr100 : ((ctx.hp > 0.25f) ? ctx.clr50 : ctx.clrMiss);
         C2D_DrawRectSolid(0.0f, 0.0f, 0.29f, 320.0f, 4.0f, Ui::rgba(0, 0, 0, 150));
         if (ctx.hp > 0.0f) Ui::gradH(0.0f, 0.0f, 320.0f * ctx.hp, 3.0f, 0.35f, Ui::brighten(hpClr, 0.6f), hpClr);
 
-        // Botón SKIP si aplica
         if (ctx.skipAvailable) {
-            float skipPulse = 0.5f + 0.5f * std::sin(ctx.animTick * 0.25f);
-            u32 sBg = Ui::lerpColor(Ui::rgba(255, 80, 140, 240), Ui::rgba(255, 120, 180, 250), skipPulse);
-            Ui::panel(212.0f, 196.0f, 100.0f, 34.0f, 0.85f, sBg, ctx.clrWhite);
-            drawCenteredText(ctx.textBuf, 262.0f, 208.0f, 0.44f, ctx.clrWhite, "SKIP >>", 0.90f);
-            drawCenteredText(ctx.textBuf, 262.0f, 222.0f, 0.25f, Ui::rgba(255, 230, 242), LOC(STR_SKIP_HINT), 0.90f);
+            Ui::slantButton(206.0f, 196.0f, 104.0f, 34.0f, -6.0f, Ui::rgba(255, 102, 171), "SKIP >>", LOC(STR_SKIP_HINT), ctx.textBuf, true, 0.85f);
         }
         Ui::drawTransition(320.0f, 240.0f, ctx.screenFade, ctx.clrPrimary);
     } else if (ctx.settings.playOnBottomScreen) {
         // ¡Modo Táctil Directo! Renderiza el playfield completo 1:1 en la pantalla inferior (320x240)
         renderPlayfield(320.0f, PLAYFIELD_BOT_OFFSET_X, PLAYFIELD_BOT_OFFSET_Y, 0.0f, 0.0f, false);
     } else {
-            StandardMode::renderBottomTablet(ctx);
+        StandardMode::renderBottomTablet(ctx);
     }
 
     C3D_FrameEnd(0);

@@ -1,4 +1,5 @@
 #include "MultiSyncScreen.hpp"
+#include "backend/i18n/Localization.hpp"
 
 void runMultiSyncScreen(AppContext& ctx) {
     ctx.audio.update();
@@ -26,21 +27,22 @@ void runMultiSyncScreen(AppContext& ctx) {
 
     // Fase 1: Carga de recursos a memoria (una sola vez)
     if (!ctx.multiSyncLoaded) {
-        // Dibujar una pantalla de carga rapida antes de bloquear lectura de SD
         C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
         for (int eye = 0; eye < (ctx.stereoActive ? 2 : 1); ++eye) {
             C3D_RenderTarget* curTop = (eye == 0) ? ctx.topScreen : ctx.topScreenRight;
             C2D_TargetClear(curTop, ctx.clrBgDark);
             C2D_SceneBegin(curTop);
-            Ui::backdrop(400.0f, 240.0f, static_cast<float>(ctx.animTick), Ui::rgba(18, 14, 30), Ui::rgba(10, 8, 18), ctx.clrPrimary, 0.01f);
-            Ui::panel(50.0f, 80.0f, 300.0f, 80.0f, 0.20f, Ui::rgba(22, 19, 36, 240), Ui::rgba(40, 215, 235));
-            drawCenteredText(ctx.textBuf, 200.0f, 108.0f, 0.44f, ctx.clrWhite, LOC(STR_MULTI_LOADING_RESOURCES), 0.25f);
-            drawCenteredText(ctx.textBuf, 200.0f, 134.0f, 0.32f, ctx.clrMuted, LOC(STR_MULTI_PREP_MAP), 0.25f);
+            Ui::backdrop(400.0f, 240.0f, static_cast<float>(ctx.animTick), Ui::rgba(15, 11, 26), Ui::rgba(8, 6, 16), ctx.clrPrimary, 0.01f);
+            Ui::panel(45.0f, 65.0f, 310.0f, 110.0f, 0.20f, Ui::rgba(20, 16, 34, 245), Ui::rgba(0, 229, 255));
+            drawCenteredTextWithShadow(ctx.textBuf, 200.0f, 90.0f, 0.46f, Ui::rgba(0, 229, 255), LOC(STR_MULTI_SYNC_PREP_RES), 0.25f);
+            drawCenteredText(ctx.textBuf, 200.0f, 116.0f, 0.34f, ctx.clrWhite, LOC(STR_MULTI_SYNC_LOADING_SUB), 0.25f);
+            Ui::slantRect(65.0f, 140.0f, 270.0f, 8.0f, -4.0f, 0.22f, Ui::rgba(25, 20, 42));
+            Ui::slantRect(65.0f, 140.0f, 135.0f, 8.0f, -4.0f, 0.23f, Ui::rgba(0, 229, 255));
         }
         C2D_TargetClear(ctx.bottomScreen, ctx.clrBgDark);
         C2D_SceneBegin(ctx.bottomScreen);
-        Ui::backdrop(320.0f, 240.0f, static_cast<float>(ctx.animTick), Ui::rgba(18, 14, 30), Ui::rgba(10, 8, 18), ctx.clrPrimary, 0.01f);
-        drawCenteredText(ctx.textBuf, 160.0f, 120.0f, 0.36f, Ui::rgba(40, 215, 235), LOC(STR_MULTI_PREP_MAP), 0.25f);
+        Ui::backdrop(320.0f, 240.0f, static_cast<float>(ctx.animTick), Ui::rgba(15, 11, 26), Ui::rgba(8, 6, 16), ctx.clrPrimary, 0.01f);
+        drawCenteredTextWithShadow(ctx.textBuf, 160.0f, 120.0f, 0.38f, Ui::rgba(0, 229, 255), LOC(STR_MULTI_SYNC_LOADING_MAP), 0.25f);
         C3D_FrameEnd(0);
 
         std::string osuFileToLoad = ctx.findLocalMapFile(ctx.multiMgr.activeBeatmap.folderPath, ctx.multiMgr.activeBeatmap.osuFilename);
@@ -119,14 +121,14 @@ void runMultiSyncScreen(AppContext& ctx) {
         }
     }
 
-    // Fase 2: Coordinacion del Host (comprueba si todos estan cargados)
+    // Fase 2: Coordinación del Host
     if (ctx.multiMgr.isHost() && ctx.multiSyncLoaded && !ctx.multiMgr.matchGo) {
         if (ctx.multiMgr.areAllPlayersLoaded()) {
-            ctx.multiMgr.sendMatchGo(500); // 500 ms de margen para sincronizar el inicio simultaneo
+            ctx.multiMgr.sendMatchGo(500);
         }
     }
 
-    // Fase 3: Inicio simultaneo al recibir matchGo
+    // Fase 3: Inicio simultáneo al recibir matchGo
     if (ctx.multiMgr.matchGo) {
         ctx.audio.playHitSound(2);
         float speedRate = getModsSpeedMultiplier(ctx.settings.activeMods);
@@ -198,7 +200,7 @@ void runMultiSyncScreen(AppContext& ctx) {
         return;
     }
 
-    // Renderizado de la pantalla de espera de sincronizacion pre-partida
+    // Renderizado de pantalla de espera y sincronización estilo osu!lazer
     C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
     for (int eye = 0; eye < (ctx.stereoActive ? 2 : 1); ++eye) {
         C3D_RenderTarget* curTop = (eye == 0) ? ctx.topScreen : ctx.topScreenRight;
@@ -208,43 +210,98 @@ void runMultiSyncScreen(AppContext& ctx) {
         auto depthShift = [&](float px) { return eyeSign * ctx.slider3D * px; };
 
         float dBg = depthShift(-3.0f);
+        Ui::backdrop(400.0f, 240.0f, static_cast<float>(ctx.animTick), Ui::rgba(15, 11, 26), Ui::rgba(8, 6, 16), ctx.clrPrimary, 0.01f);
         if (ctx.bgTex.loaded) {
             ctx.bgTex.drawRect(dBg, 0.0f, 400.0f, 240.0f, 0.02f, 255);
-            C2D_DrawRectSolid(0.0f, 0.0f, 0.03f, 400.0f, 240.0f, Ui::rgba(14, 10, 24, 180));
-        } else {
-            Ui::backdrop(400.0f, 240.0f, static_cast<float>(ctx.animTick), Ui::rgba(18, 14, 30), Ui::rgba(10, 8, 18), ctx.clrPrimary, 0.01f);
+            C2D_DrawRectSolid(0.0f, 0.0f, 0.03f, 400.0f, 240.0f, Ui::rgba(12, 8, 22, 195));
         }
 
         float dPan = depthShift(2.5f);
-        Ui::panel(40.0f + dPan, 35.0f, 320.0f, 150.0f, 0.20f, Ui::rgba(20, 16, 32, 240), Ui::rgba(40, 215, 235));
-        drawCenteredText(ctx.textBuf, 200.0f + dPan, 52.0f, 0.44f, Ui::rgba(40, 215, 235), LOC(STR_MULTI_WAIT_OTHER_CONSOLES), 0.25f);
 
-        char syncTxt[64];
-        std::snprintf(syncTxt, sizeof(syncTxt), "%s: %d / %d", LOC(STR_READY), ctx.multiMgr.getLoadedPlayerCount(), ctx.multiMgr.getActivePlayerCount());
-        drawCenteredText(ctx.textBuf, 200.0f + dPan, 72.0f, 0.34f, ctx.clrWhite, syncTxt, 0.25f);
+        // Cabecera lazer
+        Ui::slantRectGrad(8.0f + dPan, 4.0f, 85.0f, 20.0f, -4.0f, 0.20f, Ui::rgba(255, 42, 133), Ui::rgba(215, 25, 105));
+        drawCenteredTextWithShadow(ctx.textBuf, 50.0f + dPan, 14.0f, 0.35f, ctx.clrWhite, "osu!3DS", 0.22f);
+        drawTextWithShadow(ctx.textBuf, 102.0f + dPan, 8.0f, 0.40f, Ui::rgba(0, 229, 255), LOC(STR_MULTI_SYNC_TITLE), 0.22f);
 
-        // Ranuras de jugadores con su estado de carga
+        char syncHeader[48];
+        std::snprintf(syncHeader, sizeof(syncHeader), LOC(STR_MULTI_SYNC_READY_FMT), ctx.multiMgr.getLoadedPlayerCount(), ctx.multiMgr.getActivePlayerCount());
+        Ui::pill(296.0f + dPan, 5.0f, 96.0f, 18.0f, 0.22f, Ui::rgba(20, 34, 58, 240));
+        drawRectOutline(296.0f + dPan, 5.0f, 96.0f, 18.0f, 1.0f, Ui::rgba(0, 229, 255), 0.24f);
+        drawCenteredText(ctx.textBuf, 344.0f + dPan, 14.0f, 0.31f, Ui::rgba(0, 229, 255), syncHeader, 0.25f);
+
+        // 4 Ranuras horizontales de jugadores sincronizándose (estilo lobby actual)
         for (int s = 0; s < MULTI_MAX_PLAYERS; ++s) {
+            float sy = 32.0f + s * 42.0f;
+            float sx = 10.0f + dPan;
+            float sw = 380.0f;
+            float sh = 38.0f;
+
             if (ctx.multiMgr.players[s].active) {
-                float py = 92.0f + s * 20.0f;
-                drawText(ctx.textBuf, 60.0f + dPan, py, 0.32f, ctx.clrWhite, ctx.multiMgr.players[s].name, 0.25f);
-                bool isL = (ctx.multiMgr.players[s].status == STATUS_LOADED);
-                Ui::pill(270.0f + dPan, py, 70.0f, 16.0f, 0.26f, isL ? Ui::rgba(30, 180, 80) : Ui::rgba(220, 140, 30));
-                drawCenteredText(ctx.textBuf, 305.0f + dPan, py + 8.0f, 0.28f, ctx.clrWhite, isL ? LOC(STR_READY) : LOC(STR_MULTI_LOADING_RESOURCES), 0.30f);
+                const auto& p = ctx.multiMgr.players[s];
+                bool isLoaded = (p.status == STATUS_LOADED);
+                u32 accentClr = isLoaded ? Ui::rgba(74, 222, 128) : Ui::rgba(255, 209, 102);
+
+                Ui::panel(sx, sy, sw, sh, 0.20f, Ui::rgba(18, 22, 38, 240), accentClr);
+                drawRectOutline(sx, sy, sw, sh, 1.2f, accentClr, 0.22f);
+
+                drawTextWithShadow(ctx.textBuf, sx + 12.0f, sy + 4.0f, 0.42f, ctx.clrWhite, p.name, 0.25f);
+
+                if (p.isHost) {
+                    Ui::pill(sx + 104.0f, sy + 5.0f, 38.0f, 14.0f, 0.26f, Ui::rgba(255, 209, 102));
+                    drawCenteredText(ctx.textBuf, sx + 123.0f, sy + 12.0f, 0.28f, Ui::rgba(0, 0, 0, 240), LOC(STR_CARD_HOST), 0.30f);
+                } else if (p.isLocal) {
+                    Ui::pill(sx + 104.0f, sy + 5.0f, 28.0f, 14.0f, 0.26f, Ui::rgba(0, 229, 255));
+                    drawCenteredText(ctx.textBuf, sx + 118.0f, sy + 12.0f, 0.28f, Ui::rgba(0, 0, 0, 240), LOC(STR_MULTI_YOU), 0.30f);
+                }
+
+                char pInfo[48];
+                std::snprintf(pInfo, sizeof(pInfo), "Ping: %ums", p.pingMs);
+                drawText(ctx.textBuf, sx + 12.0f, sy + 21.0f, 0.28f, Ui::rgba(148, 163, 184), pInfo, 0.25f);
+
+                Ui::pill(sx + sw - 120.0f, sy + 9.0f, 108.0f, 20.0f, 0.26f, isLoaded ? Ui::rgba(16, 50, 35) : Ui::rgba(45, 34, 20));
+                drawRectOutline(sx + sw - 120.0f, sy + 9.0f, 108.0f, 20.0f, 1.0f, accentClr, 0.28f);
+                drawCenteredText(ctx.textBuf, sx + sw - 66.0f, sy + 19.0f, 0.29f, accentClr,
+                    isLoaded ? LOC(STR_MULTI_SYNC_RES_READY) : LOC(STR_MULTI_SYNC_LOADING_MAP), 0.30f);
+            } else {
+                Ui::panel(sx, sy, sw, sh, 0.18f, Ui::rgba(15, 12, 24, 180));
+                drawRectOutline(sx, sy, sw, sh, 1.0f, Ui::rgba(35, 30, 50), 0.20f);
+                drawCenteredText(ctx.textBuf, sx + sw * 0.5f, sy + 19.0f, 0.34f, Ui::rgba(90, 85, 115), LOC(STR_MULTI_EMPTY_SLOT), 0.25f);
             }
         }
 
-        drawCenteredText(ctx.textBuf, 200.0f + dPan, 205.0f, 0.32f, ctx.clrMuted, LOC(STR_MULTI_SAME_TIME), 0.25f);
-        drawCenteredText(ctx.textBuf, 200.0f + dPan, 222.0f, 0.28f, Ui::rgba(255, 90, 90), LOC(STR_MULTI_BACK_TO_ROOM), 0.25f);
+        // Pie de pantalla superior
+        Ui::gradV(0.0f, 214.0f, 400.0f, 26.0f, 0.30f, Ui::rgba(14, 11, 26, 120), Ui::rgba(14, 11, 26, 250));
+        drawCenteredTextWithShadow(ctx.textBuf, 200.0f + dPan, 222.0f, 0.33f, Ui::rgba(0, 229, 255), LOC(STR_MULTI_SYNC_FOOTER), 0.32f);
+        drawRightAlignedText(ctx.textBuf, 392.0f + dPan, 222.0f, 0.28f, Ui::rgba(135, 130, 165), "400x240", 0.32f);
+
+        Ui::drawTransition(400.0f, 240.0f, ctx.screenFade, ctx.clrPrimary);
     }
 
+    // PANTALLA INFERIOR TÁCTIL (320x240)
     C2D_TargetClear(ctx.bottomScreen, ctx.clrBgDark);
     C2D_SceneBegin(ctx.bottomScreen);
-    Ui::backdrop(320.0f, 240.0f, static_cast<float>(ctx.animTick), Ui::rgba(18, 14, 30), Ui::rgba(10, 8, 18), ctx.clrPrimary, 0.01f);
-    Ui::panel(16.0f, 40.0f, 288.0f, 160.0f, 0.20f, Ui::rgba(22, 18, 36, 240), Ui::rgba(85, 75, 110));
-    drawCenteredText(ctx.textBuf, 160.0f, 65.0f, 0.44f, ctx.clrWhite, truncateString(ctx.multiMgr.activeBeatmap.title, 24).c_str(), 0.25f);
-    drawCenteredText(ctx.textBuf, 160.0f, 85.0f, 0.34f, ctx.clrMuted, truncateString(ctx.multiMgr.activeBeatmap.artist, 26).c_str(), 0.25f);
-    drawCenteredText(ctx.textBuf, 160.0f, 105.0f, 0.34f, Ui::rgba(255, 205, 50), truncateString(ctx.multiMgr.activeBeatmap.version, 24).c_str(), 0.25f);
-    drawCenteredText(ctx.textBuf, 160.0f, 145.0f, 0.38f, Ui::rgba(40, 215, 235), LOC(STR_MULTI_SYNC_CLOCK), 0.25f);
+    Ui::backdrop(320.0f, 240.0f, static_cast<float>(ctx.animTick), Ui::rgba(15, 11, 26), Ui::rgba(8, 6, 16), ctx.clrPrimary, 0.01f);
+
+    drawTextWithShadow(ctx.textBuf, 12.0f, 8.0f, 0.40f, Ui::rgba(0, 229, 255), LOC(STR_MULTI_SYNC_CLOCKS), 0.20f);
+
+    // Tarjeta del mapa en preparación
+    Ui::panel(10.0f, 32.0f, 300.0f, 150.0f, 0.20f, Ui::rgba(13, 17, 31, 255), Ui::rgba(0, 229, 255));
+    drawTextWithShadow(ctx.textBuf, 20.0f, 40.0f, 0.30f, Ui::rgba(0, 229, 255), LOC(STR_MULTI_SYNC_MAP_IN_PLAY), 0.25f);
+    drawTextWithShadow(ctx.textBuf, 20.0f, 58.0f, 0.48f, ctx.clrWhite, truncateString(ctx.multiMgr.activeBeatmap.title, 22).c_str(), 0.25f);
+    drawText(ctx.textBuf, 20.0f, 80.0f, 0.34f, Ui::rgba(148, 163, 184), truncateString(ctx.multiMgr.activeBeatmap.artist, 26).c_str(), 0.25f);
+
+    char vBuf[64];
+    std::snprintf(vBuf, sizeof(vBuf), LOC(STR_MULTI_DIFF_STARS_FMT), ctx.multiMgr.activeBeatmap.version.c_str(), ctx.multiMgr.activeBeatmap.starRating);
+    drawTextWithShadow(ctx.textBuf, 20.0f, 100.0f, 0.34f, Ui::rgba(255, 209, 102), vBuf, 0.25f);
+
+    float pulse = 0.5f + 0.5f * std::sin(ctx.animTick * 0.12f);
+    Ui::pill(20.0f, 130.0f, 280.0f, 36.0f, 0.22f, Ui::rgba(20, 25, 45));
+    drawRectOutline(20.0f, 130.0f, 280.0f, 36.0f, 1.2f, Ui::rgba(0, 229, 255), 0.24f);
+    drawCenteredTextWithShadow(ctx.textBuf, 160.0f, 148.0f, 0.38f, Ui::lerpColor(Ui::rgba(0, 229, 255), ctx.clrWhite, pulse), LOC(STR_MULTI_SYNC_AUDIO_LEADIN), 0.26f);
+
+    // Botón de cancelación
+    Ui::button(10.0f, 194.0f, 300.0f, 38.0f, 0.20f, Ui::rgba(35, 18, 26), Ui::rgba(235, 45, 65), false);
+    drawCenteredTextWithShadow(ctx.textBuf, 160.0f, 213.0f, 0.38f, ctx.clrWhite, LOC(STR_MULTI_SYNC_CANCEL_BTN), 0.25f);
+
     C3D_FrameEnd(0);
 }

@@ -1,53 +1,206 @@
 #include "SettingsScreen.hpp"
 
+namespace {
+
+enum TouchInteractMode {
+    TOUCH_NONE = 0,
+    TOUCH_CANDIDATE_TAP = 1,
+    TOUCH_SCROLL_LIST = 2,
+    TOUCH_SLIDER = 3,
+    TOUCH_SCROLLBAR = 4
+};
+
+static float s_scrollY[5]       = { 0.0f, 0.0f, 0.0f, 0.0f, 0.0f };
+static float s_targetScrollY[5] = { 0.0f, 0.0f, 0.0f, 0.0f, 0.0f };
+static TouchInteractMode s_touchMode = TOUCH_NONE;
+static float s_touchStartX = 0.0f;
+static float s_touchStartY = 0.0f;
+static float s_touchStartScroll = 0.0f;
+static int   s_touchCandidateIdx = -1;
+static int   s_touchSliderOpt = -1;
+static bool  s_tabletEditorOpen = false;
+static int   s_liveTapCountK1 = 0;
+static int   s_liveTapCountK2 = 0;
+static int   s_liveBurstTimer = 0;
+static int   s_liveLastHitKey = 0; // 1 = K1, 2 = K2
+
+inline bool isEsp() {
+    return Localization::getLanguage() == LANG_ES;
+}
+
+} // namespace
+
 void runSettingsScreen(AppContext& ctx) {
     const SkinProfile& activeSkin = ctx.getActiveSkin();
     ctx.audio.update();
     if (!ctx.calibrationMode && ctx.settings.songPreview && !ctx.audio.isPreviewLoading() && ctx.audio.isSongFinished()) {
         ctx.rotateMenuSong();
     }
-    auto getTabForOption = [](int opt) -> int {
-        if (opt >= 0 && opt <= 3) return 0;
-        if (opt >= 4 && opt <= 7) return 1;
-        if (opt >= 8 && opt <= 11) return 2;
-        if ((opt >= 12 && opt <= 15) || opt == 20 || opt == 22) return 3;
-        if ((opt >= 16 && opt <= 19) || opt == 21) return 4;
+
+    // Organización de apartados por sección (6 por sección, 5 en Teclas):
+    // Tab 0 (PANTALLA): 0=Dónde Jugar, 23=Toque Stylus, 24=Editor Visual Táctil, 1=Tamaño Área, 2=Posición X, 3=Posición Y
+    // Tab 1 (TECLAS):   4=Acción 1, 5=Acción 2, 6=Acción 3, 7=Acción 4, 25=Restablecer Modo
+    // Tab 2 (AUDIO):    8=Vol Música, 9=Vol Efectos, 10=Offset Audio, 26=Calibrador Rítmico, 11=Hitsounds Mapa, 27=Música en Menú
+    // Tab 3 (JUEGO):    12=Modo Principal, 22=Idioma, 14=Sliders Serpiente, 15=Combo Bursts, 20=Mostrar 300s, 21=Descargas Multi
+    // Tab 4 (VISUAL):   13=Skin Activo, 17=Tamaño Cursor, 18=Oscurecer Fondo, 28=Marco Playfield, 19=Videos Fondo, 16=Fondo Taiko
+    const int tabItems[5][6] = {
+        { 0, 23, 24, 1, 2, 3 },
+        { 4, 5, 6, 7, 25, -1 },
+        { 8, 9, 10, 26, 11, 27 },
+        { 12, 22, 14, 15, 20, 21 },
+        { 13, 17, 18, 28, 19, 16 }
+    };
+    const int tabItemCounts[5] = { 6, 5, 6, 6, 6 };
+
+    auto getTabForOption = [&](int opt) -> int {
+        for (int t = 0; t < 5; ++t) {
+            for (int i = 0; i < tabItemCounts[t]; ++i) {
+                if (tabItems[t][i] == opt) return t;
+            }
+        }
         return 0;
     };
-    const int tabItems[5][6] = {
-        { 0, 1, 2, 3, -1, -1 },
-        { 4, 5, 6, 7, -1, -1 },
-        { 8, 9, 10, 11, -1, -1 },
-        { 22, 12, 13, 14, 15, 20 },
-        { 16, 17, 18, 19, 21, -1 }
+
+    auto getRowInTab = [&](int tab, int opt) -> int {
+        for (int i = 0; i < tabItemCounts[tab]; ++i) {
+            if (tabItems[tab][i] == opt) return i;
+        }
+        return 0;
     };
-    const int tabItemCounts[5] = { 4, 4, 4, 6, 5 };
-    int activeTab = getTabForOption(ctx.settingsOption); // 0: TABLET, 1: CONTROLES, 2: AUDIO, 3: JUEGO, 4: VISUAL
 
-    if (ctx.capturingKeyIndex != -1) {
+    int activeTab = getTabForOption(ctx.settingsOption);
+
+    // Geometría del área desplazable en pantalla inferior (320x240)
+    auto getViewportMetrics = [&](int tab, float& outTop, float& outBottom, float& outCardH, float& outStep, float& outMaxScroll) {
+        outTop = (tab == 1) ? 55.0f : 32.0f;
+        outBottom = 198.0f;
+        outCardH = 38.0f;
+        outStep = 43.0f;
+        int cnt = tabItemCounts[tab];
+        float contentH = (cnt > 0) ? ((cnt - 1) * outStep + outCardH + 6.0f) : 0.0f;
+        float viewH = outBottom - outTop;
+        outMaxScroll = std::max(0.0f, contentH - viewH);
+    };
+
+    auto ensureSelectedVisible = [&](int tab, int opt) {
+        float vTop, vBot, cH, step, maxSc;
+        getViewportMetrics(tab, vTop, vBot, cH, step, maxSc);
+        int idx = getRowInTab(tab, opt);
+        float itemTop = idx * step;
+        float itemBot = itemTop + cH;
+        float viewH = vBot - vTop;
+        if (itemTop < s_targetScrollY[tab] + 4.0f) {
+            s_targetScrollY[tab] = std::max(0.0f, itemTop - 4.0f);
+        } else if (itemBot > s_targetScrollY[tab] + viewH - 4.0f) {
+            s_targetScrollY[tab] = std::min(maxSc, itemBot - viewH + 4.0f);
+        }
+    };
+
+    // Contadores de prueba en vivo para la pestaña TECLAS
+    if (s_liveBurstTimer > 0) s_liveBurstTimer--;
+    if (activeTab == 1 && ctx.capturingKeyIndex == -1) {
+        uint32_t m1 = ctx.settings.keyOsuK1;
+        uint32_t m2 = ctx.settings.keyOsuK2;
+        if (ctx.settingsControlsMode == MODE_TAIKO) {
+            m1 = ctx.settings.keyTaikoDonLeft | ctx.settings.keyTaikoDonRight;
+            m2 = ctx.settings.keyTaikoKatsuLeft | ctx.settings.keyTaikoKatsuRight;
+        } else if (ctx.settingsControlsMode == MODE_CATCH) {
+            m1 = ctx.settings.keyCatchLeft | ctx.settings.keyCatchRight;
+            m2 = ctx.settings.keyCatchDash;
+        } else if (ctx.settingsControlsMode == MODE_MANIA) {
+            m1 = ctx.settings.keyManiaCol1 | ctx.settings.keyManiaCol2;
+            m2 = ctx.settings.keyManiaCol3 | ctx.settings.keyManiaCol4;
+        }
+        if (ctx.kDown & m1) {
+            s_liveTapCountK1++;
+            s_liveBurstTimer = 16;
+            s_liveLastHitKey = 1;
+        }
+        if (ctx.kDown & m2) {
+            s_liveTapCountK2++;
+            s_liveBurstTimer = 16;
+            s_liveLastHitKey = 2;
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // MODO 1: EDITOR VISUAL DE ÁREA TÁCTIL EN PANTALLA COMPLETA (Tab 0)
+    // -------------------------------------------------------------------------
+    if (s_tabletEditorOpen) {
+        if (ctx.kDown & (KEY_B | KEY_START)) {
+            s_tabletEditorOpen = false;
+            ctx.settings.save();
+            ctx.audio.playHitSound(0);
+            return;
+        }
+        if (ctx.kDown & KEY_Y) {
+            ctx.settings.resetTabletArea();
+            ctx.audio.playHitSound(2);
+        }
+        int scaleStep = 0;
+        if (ctx.kDown & (KEY_DLEFT | KEY_DDOWN | KEY_L)) scaleStep = -1;
+        if (ctx.kDown & (KEY_DRIGHT | KEY_DUP | KEY_R))  scaleStep = +1;
+        if (scaleStep != 0) {
+            ctx.settings.tabletScale += scaleStep * 0.05f;
+            ctx.settings.clampValues();
+            ctx.audio.playHitSound(0);
+        }
+        if (std::abs(ctx.cpad.dx) > 18 || std::abs(ctx.cpad.dy) > 18) {
+            ctx.settings.tabletCenterX += (ctx.cpad.dx / 156.0f) * 3.0f;
+            ctx.settings.tabletCenterY -= (ctx.cpad.dy / 156.0f) * 3.0f;
+            ctx.settings.clampValues();
+        }
+        if (ctx.touchJustDown && ctx.touch.py >= 204 && ctx.touch.px >= 90 && ctx.touch.px <= 230) {
+            s_tabletEditorOpen = false;
+            ctx.settings.save();
+            ctx.audio.playHitSound(0);
+            return;
+        }
+        if (ctx.isTouching && ctx.touch.py < 200) {
+            ctx.settings.tabletCenterX = ctx.touch.px;
+            ctx.settings.tabletCenterY = ctx.touch.py;
+            ctx.settings.clampValues();
+            ctx.settings.mapTouchToOsu(ctx.touch.px, ctx.touch.py, ctx.cursorOsuX, ctx.cursorOsuY);
+        }
+    }
+    // -------------------------------------------------------------------------
+    // MODO 2: CAPTURA DE BOTÓN EN PESTAÑA TECLAS
+    // -------------------------------------------------------------------------
+    else if (ctx.capturingKeyIndex != -1) {
         u32 anyKey = ctx.kDown & (KEY_A | KEY_B | KEY_X | KEY_Y | KEY_L | KEY_R | KEY_ZL | KEY_ZR | KEY_DUP | KEY_DDOWN | KEY_DLEFT | KEY_DRIGHT | KEY_SELECT | KEY_START);
-        if (ctx.touchJustDown) {
-            u32 touchedKey = 0;
-            if (activeTab == 1) {
-                if (ctx.touch.px >= 28 && ctx.touch.px <= 70 && ctx.touch.py >= 68 && ctx.touch.py <= 84) touchedKey = KEY_L;
-                else if (ctx.touch.px >= 250 && ctx.touch.px <= 292 && ctx.touch.py >= 68 && ctx.touch.py <= 84) touchedKey = KEY_R;
-                else if (ctx.touch.px >= 72 && ctx.touch.px <= 100 && ctx.touch.py >= 68 && ctx.touch.py <= 82) touchedKey = KEY_ZL;
-                else if (ctx.touch.px >= 220 && ctx.touch.px <= 248 && ctx.touch.py >= 68 && ctx.touch.py <= 82) touchedKey = KEY_ZR;
-                else if (ctx.touch.px >= 53 && ctx.touch.px <= 67 && ctx.touch.py >= 135 && ctx.touch.py <= 150) touchedKey = KEY_DUP;
-                else if (ctx.touch.px >= 53 && ctx.touch.px <= 67 && ctx.touch.py >= 155 && ctx.touch.py <= 170) touchedKey = KEY_DDOWN;
-                else if (ctx.touch.px >= 42 && ctx.touch.px <= 55 && ctx.touch.py >= 145 && ctx.touch.py <= 162) touchedKey = KEY_DLEFT;
-                else if (ctx.touch.px >= 63 && ctx.touch.px <= 78 && ctx.touch.py >= 145 && ctx.touch.py <= 162) touchedKey = KEY_DRIGHT;
-                else if (std::hypot(ctx.touch.px - 258.0f, ctx.touch.py - 124.0f) <= 12.0f) touchedKey = KEY_X;
-                else if (std::hypot(ctx.touch.px - 258.0f, ctx.touch.py - 156.0f) <= 12.0f) touchedKey = KEY_B;
-                else if (std::hypot(ctx.touch.px - 242.0f, ctx.touch.py - 140.0f) <= 12.0f) touchedKey = KEY_Y;
-                else if (std::hypot(ctx.touch.px - 274.0f, ctx.touch.py - 140.0f) <= 12.0f) touchedKey = KEY_A;
-                else if (ctx.touch.px >= 118 && ctx.touch.px <= 140 && ctx.touch.py >= 174 && ctx.touch.py <= 188) touchedKey = KEY_SELECT;
-                else if (ctx.touch.px >= 180 && ctx.touch.px <= 202 && ctx.touch.py >= 174 && ctx.touch.py <= 188) touchedKey = KEY_START;
-            }
+        bool fromTouchBtn = false;
 
+        if (ctx.touchJustDown) {
+            // Botones táctiles en el modal de captura (Permite asignar incluso el botón B tocándolo en pantalla)
+            struct TouchKeyChip { float x, y, w, h; u32 mask; };
+            const TouchKeyChip chips[] = {
+                { 18.0f,  86.0f, 42.0f, 22.0f, KEY_L },
+                { 64.0f,  86.0f, 42.0f, 22.0f, KEY_ZL },
+                { 214.0f, 86.0f, 42.0f, 22.0f, KEY_ZR },
+                { 260.0f, 86.0f, 42.0f, 22.0f, KEY_R },
+                { 18.0f,  116.0f, 42.0f, 22.0f, KEY_DUP },
+                { 64.0f,  116.0f, 42.0f, 22.0f, KEY_DDOWN },
+                { 18.0f,  144.0f, 42.0f, 22.0f, KEY_DLEFT },
+                { 64.0f,  144.0f, 42.0f, 22.0f, KEY_DRIGHT },
+                { 214.0f, 116.0f, 42.0f, 22.0f, KEY_X },
+                { 260.0f, 116.0f, 42.0f, 22.0f, KEY_Y },
+                { 214.0f, 144.0f, 42.0f, 22.0f, KEY_A },
+                { 260.0f, 144.0f, 42.0f, 22.0f, KEY_B },
+                { 114.0f, 144.0f, 44.0f, 22.0f, KEY_SELECT },
+                { 162.0f, 144.0f, 44.0f, 22.0f, KEY_START }
+            };
+            u32 touchedKey = 0;
+            for (const auto& ch : chips) {
+                if (ctx.touch.px >= ch.x && ctx.touch.px <= ch.x + ch.w &&
+                    ctx.touch.py >= ch.y && ctx.touch.py <= ch.y + ch.h) {
+                    touchedKey = ch.mask;
+                    break;
+                }
+            }
             if (touchedKey != 0) {
                 anyKey = touchedKey;
-            } else {
+                fromTouchBtn = true;
+            } else if (ctx.touch.py >= 178 && ctx.touch.py <= 206 && ctx.touch.px >= 90 && ctx.touch.px <= 230) {
                 ctx.capturingKeyIndex = -1;
                 ctx.audio.playHitSound(0);
                 return;
@@ -55,7 +208,7 @@ void runSettingsScreen(AppContext& ctx) {
         }
 
         if (anyKey) {
-            if (anyKey & KEY_B) {
+            if ((anyKey & KEY_B) && !fromTouchBtn) {
                 ctx.capturingKeyIndex = -1;
                 ctx.audio.playHitSound(0);
             } else {
@@ -89,313 +242,443 @@ void runSettingsScreen(AppContext& ctx) {
             }
         }
         return;
-    } else if (ctx.kDown & KEY_B) {
-        ctx.calibrationMode = false;
-        ctx.settings.save();
-        ctx.audio.setVolumes(ctx.settings.musicVolume, ctx.settings.sfxVolume);
-        ctx.audio.playHitSound(0);
-        ctx.appState = ctx.settingsReturnState;
-        if (ctx.appState == STATE_SONG_SELECT || ctx.appState == STATE_MAIN_MENU) ctx.updateSongPreview();
-        return;
     }
-
-    if (ctx.capturingKeyIndex == -1 && (ctx.kDown & KEY_X)) {
-        if (activeTab == 1) {
-            ctx.settings.resetControlsToDefault(ctx.settingsControlsMode);
-            ctx.audio.playHitSound(2);
-        } else {
-            ctx.calibrationMode = !ctx.calibrationMode;
-            ctx.calibSamples.clear();
-            ctx.calibStartTick = osGetTime();
-            ctx.calibLastBeatIndex = -1;
-            if (ctx.calibrationMode) ctx.audio.stopMusic();
-            ctx.audio.playHitSound(2);
-        }
-    }
-
-    if (ctx.capturingKeyIndex == -1 && (ctx.kDown & KEY_Y)) {
-        if (activeTab == 1) {
-            ctx.settings.resetControlsToDefault(ctx.settingsControlsMode);
-            ctx.audio.playHitSound(2);
-        } else {
-            ctx.settings.resetTabletArea();
+    // -------------------------------------------------------------------------
+    // MODO 3: NAVEGACIÓN NORMAL Y DESPLAZAMIENTO DEL MENÚ
+    // -------------------------------------------------------------------------
+    else {
+        if (ctx.kDown & KEY_B) {
+            if (ctx.calibrationMode) {
+                ctx.calibrationMode = false;
+                ctx.settings.save();
+                ctx.audio.playHitSound(0);
+                if (ctx.settings.songPreview) ctx.updateSongPreview();
+                return;
+            }
+            ctx.calibrationMode = false;
+            ctx.settings.save();
+            ctx.audio.setVolumes(ctx.settings.musicVolume, ctx.settings.sfxVolume);
             ctx.audio.playHitSound(0);
+            ctx.appState = ctx.settingsReturnState;
+            if (ctx.appState == STATE_SONG_SELECT || ctx.appState == STATE_MAIN_MENU) ctx.updateSongPreview();
+            return;
         }
-    }
 
-    // Cambiar de categoría con gatillos L / R o ZL / ZR (5 categorías)
-    if (activeTab != 1) {
+        if (ctx.kDown & KEY_START) {
+            ctx.calibrationMode = false;
+            ctx.settings.save();
+            ctx.audio.setVolumes(ctx.settings.musicVolume, ctx.settings.sfxVolume);
+            ctx.audio.playHitSound(2);
+            ctx.appState = ctx.settingsReturnState;
+            if (ctx.appState == STATE_SONG_SELECT || ctx.appState == STATE_MAIN_MENU) ctx.updateSongPreview();
+            return;
+        }
+
+        if (ctx.kDown & KEY_X) {
+            if (activeTab == 1) {
+                ctx.settings.resetControlsToDefault(ctx.settingsControlsMode);
+                ctx.settings.save();
+                ctx.audio.playHitSound(2);
+            } else if (activeTab == 0) {
+                s_tabletEditorOpen = true;
+                ctx.audio.playHitSound(2);
+            } else {
+                ctx.calibrationMode = !ctx.calibrationMode;
+                ctx.calibSamples.clear();
+                ctx.calibStartTick = osGetTime();
+                ctx.calibLastBeatIndex = -1;
+                if (ctx.calibrationMode) ctx.audio.stopMusic();
+                else if (ctx.settings.songPreview) ctx.updateSongPreview();
+                ctx.audio.playHitSound(2);
+            }
+        }
+
+        if (ctx.kDown & KEY_Y) {
+            if (activeTab == 1) {
+                ctx.settings.resetControlsToDefault(ctx.settingsControlsMode);
+                ctx.settings.save();
+                ctx.audio.playHitSound(2);
+            } else {
+                ctx.settings.resetTabletArea();
+                ctx.settings.save();
+                ctx.audio.playHitSound(0);
+            }
+        }
+
+        // Cambiar de pestaña con L / R / ZL / ZR
         if (ctx.kDown & (KEY_L | KEY_ZL)) {
             activeTab = (activeTab + 4) % 5;
             ctx.settingsOption = tabItems[activeTab][0];
+            ensureSelectedVisible(activeTab, ctx.settingsOption);
             ctx.audio.playHitSound(0);
         }
         if (ctx.kDown & (KEY_R | KEY_ZR)) {
             activeTab = (activeTab + 1) % 5;
             ctx.settingsOption = tabItems[activeTab][0];
+            ensureSelectedVisible(activeTab, ctx.settingsOption);
             ctx.audio.playHitSound(0);
         }
-    } else {
-        if (ctx.kDown & KEY_ZL) {
-            activeTab = (activeTab + 4) % 5;
-            ctx.settingsOption = tabItems[activeTab][0];
-            ctx.audio.playHitSound(0);
-        }
-        if (ctx.kDown & KEY_ZR) {
-            activeTab = (activeTab + 1) % 5;
-            ctx.settingsOption = tabItems[activeTab][0];
-            ctx.audio.playHitSound(0);
-        }
-    }
 
-    // Tocar pestañas superiores o botones inferiores en pantalla táctil
-    if (ctx.touchJustDown && !ctx.calibrationMode && ctx.capturingKeyIndex == -1) {
-        if (ctx.touch.py >= 6 && ctx.touch.py <= 30) {
-            for (int t = 0; t < 5; ++t) {
-                float tx = 7.0f + t * 62.0f;
-                if (ctx.touch.px >= tx && ctx.touch.px <= tx + 58.0f) {
-                    activeTab = t;
-                    ctx.settingsOption = tabItems[t][0];
-                    ctx.audio.playHitSound(0);
-                    break;
-                }
+        // Calibrador de audio activo
+        if (ctx.calibrationMode) {
+            u64 elapsed = osGetTime() - ctx.calibStartTick;
+            int beatIdx = static_cast<int>(elapsed / 500);
+            if (beatIdx > ctx.calibLastBeatIndex) {
+                ctx.calibLastBeatIndex = beatIdx;
+                ctx.audio.playHitSound((beatIdx % 4 == 0) ? 2 : 0);
             }
-        } else if (ctx.touch.py >= 204 && ctx.touch.py <= 234) {
-            if (ctx.touch.px >= 10 && ctx.touch.px <= 104) { // CALIBRAR (X) / RESTABLECER (Tab Teclas)
-                if (activeTab == 1) {
-                    ctx.settings.resetControlsToDefault(ctx.settingsControlsMode);
-                    ctx.audio.playHitSound(2);
-                } else {
-                    ctx.calibrationMode = !ctx.calibrationMode;
-                    ctx.calibSamples.clear();
-                    ctx.calibStartTick = osGetTime();
-                    ctx.calibLastBeatIndex = -1;
-                    if (ctx.calibrationMode) ctx.audio.stopMusic();
-                    ctx.audio.playHitSound(2);
-                }
-            } else if (ctx.touch.px >= 110 && ctx.touch.px <= 204) { // RESET (Y)
-                if (activeTab == 1) {
-                    ctx.settings.resetControlsToDefault(ctx.settingsControlsMode);
-                    ctx.audio.playHitSound(2);
-                } else {
-                    ctx.settings.resetTabletArea();
-                    ctx.audio.playHitSound(0);
-                }
-            } else if (ctx.touch.px >= 210 && ctx.touch.px <= 304) { // GUARDAR (B)
-                ctx.calibrationMode = false;
-                ctx.capturingKeyIndex = -1;
-                ctx.settings.save();
-                ctx.audio.setVolumes(ctx.settings.musicVolume, ctx.settings.sfxVolume);
-                ctx.audio.playHitSound(0);
-                ctx.appState = ctx.settingsReturnState;
-                if (ctx.appState == STATE_SONG_SELECT || ctx.appState == STATE_MAIN_MENU) ctx.updateSongPreview();
-                return;
-            }
-        }
-    }
 
-    if (ctx.calibrationMode) {
-        u64 elapsed = osGetTime() - ctx.calibStartTick;
-        int beatIdx = static_cast<int>(elapsed / 500);
-        if (beatIdx > ctx.calibLastBeatIndex) {
-            ctx.calibLastBeatIndex = beatIdx;
-            ctx.audio.playHitSound((beatIdx % 4 == 0) ? 2 : 0);
-        }
-
-        u32 tapKeys = KEY_A | KEY_L | KEY_R | KEY_ZL | KEY_ZR | KEY_DLEFT | KEY_DRIGHT | KEY_DUP | KEY_DDOWN;
-        if (ctx.kDown & tapKeys) {
-            int mod = static_cast<int>(elapsed % 500);
-            int err = (mod > 250) ? (mod - 500) : mod;
-            if (std::abs(err) <= 150) {
-                ctx.calibSamples.push_back(err);
-                if (ctx.calibSamples.size() > 12) ctx.calibSamples.erase(ctx.calibSamples.begin());
-                long sum = 0;
-                for (int s : ctx.calibSamples) sum += s;
-                ctx.settings.audioOffsetMs = static_cast<int>(sum / static_cast<long>(ctx.calibSamples.size()));
-                ctx.settings.clampValues();
-            }
-        }
-    } else if (ctx.capturingKeyIndex == -1) {
-        if (activeTab == 1) {
-            // En pestaña TECLAS: D-Pad Arriba / Abajo cicla únicamente entre las 4 acciones sin salirse de la pestaña
-            if (ctx.kDown & KEY_DUP) {
-                ctx.settingsOption = (ctx.settingsOption <= 4) ? 7 : (ctx.settingsOption - 1);
-                ctx.audio.playHitSound(0);
-            }
-            if (ctx.kDown & KEY_DDOWN) {
-                ctx.settingsOption = (ctx.settingsOption >= 7) ? 4 : (ctx.settingsOption + 1);
-                ctx.audio.playHitSound(0);
-            }
-            // D-Pad Izquierda / Derecha cambia de modo (STD / TAIKO / CATCH / MANIA)
-            if (ctx.kDown & KEY_DLEFT) {
-                ctx.settingsControlsMode = (ctx.settingsControlsMode + 3) % 4;
-                ctx.audio.playHitSound(2);
-            }
-            if (ctx.kDown & KEY_DRIGHT) {
-                ctx.settingsControlsMode = (ctx.settingsControlsMode + 1) % 4;
-                ctx.audio.playHitSound(2);
+            u32 tapKeys = KEY_A | KEY_L | KEY_R | KEY_ZL | KEY_ZR | KEY_DLEFT | KEY_DRIGHT | KEY_DUP | KEY_DDOWN;
+            if ((ctx.kDown & tapKeys) || ctx.touchJustDown) {
+                int mod = static_cast<int>(elapsed % 500);
+                int err = (mod > 250) ? (mod - 500) : mod;
+                if (std::abs(err) <= 150) {
+                    ctx.calibSamples.push_back(err);
+                    if (ctx.calibSamples.size() > 12) ctx.calibSamples.erase(ctx.calibSamples.begin());
+                    long sum = 0;
+                    for (int s : ctx.calibSamples) sum += s;
+                    ctx.settings.audioOffsetMs = static_cast<int>(sum / static_cast<long>(ctx.calibSamples.size()));
+                    ctx.settings.clampValues();
+                }
             }
         } else {
-            int curIdx = 0;
-            int count = tabItemCounts[activeTab];
-            for (int i = 0; i < count; ++i) {
-                if (tabItems[activeTab][i] == ctx.settingsOption) {
-                    curIdx = i;
-                    break;
+            // Función auxiliar para modificar o activar una opción
+            auto applyOptionStep = [&](int opt, int stepDir, bool isActivate) {
+                int numSkins = std::max(1, static_cast<int>(ctx.skinMgr.skins.size()));
+                switch (opt) {
+                    case 0: // Pantalla de Juego (Abajo Táctil vs Arriba 3D)
+                        ctx.settings.playOnBottomScreen = !ctx.settings.playOnBottomScreen;
+                        ctx.audio.playHitSound(2);
+                        break;
+                    case 23: // Función del Stylus (Apuntar+Golpear vs Solo Apuntar)
+                        ctx.settings.tapWithStylus = !ctx.settings.tapWithStylus;
+                        ctx.audio.playHitSound(2);
+                        break;
+                    case 24: // Abrir Editor Visual de Área en Pantalla
+                        if (isActivate || stepDir != 0) {
+                            s_tabletEditorOpen = true;
+                            ctx.audio.playHitSound(2);
+                        }
+                        break;
+                    case 1: // Tamaño Área Tablet
+                        ctx.settings.tabletScale += (stepDir != 0 ? stepDir : 1) * 0.05f;
+                        if (isActivate && stepDir == 0 && ctx.settings.tabletScale > 1.0f) ctx.settings.tabletScale = 0.50f;
+                        ctx.audio.playHitSound(0);
+                        break;
+                    case 2: // Posición Horizontal X
+                        ctx.settings.tabletCenterX += (stepDir != 0 ? stepDir : 1) * 8.0f;
+                        ctx.audio.playHitSound(0);
+                        break;
+                    case 3: // Posición Vertical Y
+                        ctx.settings.tabletCenterY += (stepDir != 0 ? stepDir : 1) * 8.0f;
+                        ctx.audio.playHitSound(0);
+                        break;
+                    case 4:
+                    case 5:
+                    case 6:
+                    case 7:
+                        if (isActivate) {
+                            ctx.capturingKeyIndex = opt;
+                            ctx.audio.playHitSound(2);
+                        } else if (stepDir != 0) {
+                            ctx.settingsControlsMode = (ctx.settingsControlsMode + (stepDir > 0 ? 1 : 3)) % 4;
+                            ctx.audio.playHitSound(2);
+                        }
+                        break;
+                    case 25: // Restablecer controles del modo actual
+                        if (isActivate || stepDir != 0) {
+                            ctx.settings.resetControlsToDefault(ctx.settingsControlsMode);
+                            ctx.settings.save();
+                            ctx.audio.playHitSound(2);
+                        }
+                        break;
+                    case 8: // Volumen Música
+                        ctx.settings.musicVolume += (stepDir != 0 ? stepDir : 1) * 5;
+                        ctx.settings.clampValues();
+                        ctx.audio.setVolumes(ctx.settings.musicVolume, ctx.settings.sfxVolume);
+                        ctx.audio.playHitSound(0);
+                        break;
+                    case 9: // Volumen Efectos
+                        ctx.settings.sfxVolume += (stepDir != 0 ? stepDir : 1) * 5;
+                        ctx.settings.clampValues();
+                        ctx.audio.setVolumes(ctx.settings.musicVolume, ctx.settings.sfxVolume);
+                        ctx.audio.playHitSound(2);
+                        break;
+                    case 10: // Offset de Audio
+                        if (isActivate && stepDir == 0) {
+                            ctx.calibrationMode = true;
+                            ctx.calibSamples.clear();
+                            ctx.calibStartTick = osGetTime();
+                            ctx.calibLastBeatIndex = -1;
+                            ctx.audio.stopMusic();
+                            ctx.audio.playHitSound(2);
+                        } else {
+                            ctx.settings.audioOffsetMs += stepDir * ((ctx.kHeld & (KEY_L | KEY_R)) ? 5 : 1);
+                            ctx.audio.playHitSound(0);
+                        }
+                        break;
+                    case 26: // Asistente de Calibración
+                        if (isActivate || stepDir != 0) {
+                            ctx.calibrationMode = true;
+                            ctx.calibSamples.clear();
+                            ctx.calibStartTick = osGetTime();
+                            ctx.calibLastBeatIndex = -1;
+                            ctx.audio.stopMusic();
+                            ctx.audio.playHitSound(2);
+                        }
+                        break;
+                    case 11: // Hitsounds del Beatmap
+                        ctx.settings.beatmapHitsounds = !ctx.settings.beatmapHitsounds;
+                        ctx.audio.playHitSound(0);
+                        break;
+                    case 27: // Preescucha en Menú
+                        ctx.settings.songPreview = !ctx.settings.songPreview;
+                        if (!ctx.settings.songPreview) ctx.audio.stopMusic();
+                        else ctx.updateSongPreview();
+                        ctx.audio.playHitSound(0);
+                        break;
+                    case 12: // Modo de Juego Principal
+                        ctx.settings.gameMode = static_cast<GameMode>((ctx.settings.gameMode + (stepDir != 0 ? stepDir : 1) + 4) % 4);
+                        ctx.audio.playHitSound(2);
+                        break;
+                    case 22: // Idioma
+                        ctx.settings.language = (ctx.settings.language + (stepDir != 0 ? stepDir : 1) + LANG_COUNT) % LANG_COUNT;
+                        Localization::setLanguage(static_cast<AppLanguage>(ctx.settings.language));
+                        ctx.audio.playHitSound(2);
+                        break;
+                    case 14: // Sliders Serpiente
+                        ctx.settings.snakingSliders = !ctx.settings.snakingSliders;
+                        ctx.audio.playHitSound(0);
+                        break;
+                    case 15: // Combo Bursts
+                        ctx.settings.comboBursts = !ctx.settings.comboBursts;
+                        ctx.audio.playHitSound(0);
+                        break;
+                    case 20: // Mostrar 300s
+                        ctx.settings.showHit300 = !ctx.settings.showHit300;
+                        ctx.audio.playHitSound(0);
+                        break;
+                    case 21: // Descargas Multijugador
+                        ctx.settings.multiDlOption = (ctx.settings.multiDlOption + 1) % 2;
+                        ctx.multiMgr.enableBgDownload = (ctx.settings.multiDlOption != 0);
+                        ctx.audio.playHitSound(0);
+                        break;
+                    case 13: // Skin Activo
+                        ctx.settings.skinIndex = (ctx.settings.skinIndex + (stepDir != 0 ? stepDir : 1) + numSkins) % numSkins;
+                        ctx.applyActiveSkinAudio();
+                        ctx.audio.playHitSound(2);
+                        break;
+                    case 17: // Tamaño del Cursor
+                        ctx.settings.cursorScale += (stepDir != 0 ? stepDir : 1) * 0.1f;
+                        ctx.audio.playHitSound(0);
+                        break;
+                    case 18: // Oscurecimiento de Fondo
+                        ctx.settings.bgDim += (stepDir != 0 ? stepDir : 1) * 5;
+                        ctx.audio.playHitSound(0);
+                        break;
+                    case 28: // Marco del Área de Juego (Safe Area Border)
+                        ctx.settings.showPlayfieldBorder = !ctx.settings.showPlayfieldBorder;
+                        ctx.audio.playHitSound(0);
+                        break;
+                    case 19: // Videos de Fondo
+                        ctx.settings.enableVideo = !ctx.settings.enableVideo;
+                        ctx.audio.playHitSound(0);
+                        break;
+                    case 16: // Estilo de Fondo en Taiko
+                        ctx.settings.taikoBgMode = (ctx.settings.taikoBgMode + (stepDir != 0 ? stepDir : 1) + 3) % 3;
+                        ctx.audio.playHitSound(0);
+                        break;
                 }
-            }
+                ctx.settings.clampValues();
+                ctx.settings.save();
+            };
+
+            // Navegación con D-Pad Arriba / Abajo dentro de la sección actual (auto-scroll)
+            int count = tabItemCounts[activeTab];
+            int curIdx = getRowInTab(activeTab, ctx.settingsOption);
+
             if (ctx.kDown & KEY_DUP) {
                 curIdx = (curIdx - 1 + count) % count;
                 ctx.settingsOption = tabItems[activeTab][curIdx];
+                ensureSelectedVisible(activeTab, ctx.settingsOption);
                 ctx.audio.playHitSound(0);
             }
             if (ctx.kDown & KEY_DDOWN) {
                 curIdx = (curIdx + 1) % count;
                 ctx.settingsOption = tabItems[activeTab][curIdx];
+                ensureSelectedVisible(activeTab, ctx.settingsOption);
                 ctx.audio.playHitSound(0);
             }
 
             int stepDir = 0;
             if (ctx.kDown & KEY_DLEFT)  stepDir = -1;
             if (ctx.kDown & KEY_DRIGHT) stepDir = +1;
-
             if (stepDir != 0) {
-                int numSkins = std::max(1, static_cast<int>(ctx.skinMgr.skins.size()));
-                switch (ctx.settingsOption) {
-                    case 0: // Modo de Entrada
-                        ctx.settings.cycleInputMode(stepDir);
-                        break;
-                    case 1: // Tamaño Área Tablet
-                        ctx.settings.tabletScale += stepDir * 0.05f;
-                        break;
-                    case 2: // Posición Horizontal X
-                        ctx.settings.tabletCenterX += stepDir * 8.0f;
-                        break;
-                    case 3: // Posición Vertical Y
-                        ctx.settings.tabletCenterY += stepDir * 8.0f;
-                        break;
-                case 8: // Volumen Música
-                    ctx.settings.musicVolume += stepDir * 5;
-                    ctx.settings.clampValues();
-                    ctx.audio.setVolumes(ctx.settings.musicVolume, ctx.settings.sfxVolume);
-                    break;
-                case 9: // Volumen Hitsounds
-                    ctx.settings.sfxVolume += stepDir * 5;
-                    ctx.settings.clampValues();
-                    ctx.audio.setVolumes(ctx.settings.musicVolume, ctx.settings.sfxVolume);
-                    ctx.audio.playHitSound(2);
-                    break;
-                case 10: // Offset de Audio
-                    ctx.settings.audioOffsetMs += stepDir * ((ctx.kHeld & (KEY_L | KEY_R)) ? 5 : 1);
-                    break;
-                case 11: // Hitsounds Propios del Beatmap
-                    ctx.settings.beatmapHitsounds = !ctx.settings.beatmapHitsounds;
-                    break;
-                case 22: // Idioma / Language
-                    ctx.settings.language = (ctx.settings.language + stepDir + LANG_COUNT) % LANG_COUNT;
-                    Localization::setLanguage(static_cast<AppLanguage>(ctx.settings.language));
-                    ctx.settings.save();
-                    ctx.audio.playHitSound(2);
-                    break;
-                case 12: // Modo de Juego (STD / TAIKO / CATCH / MANIA)
-                    ctx.settings.gameMode = static_cast<GameMode>((ctx.settings.gameMode + stepDir + 4) % 4);
-                    break;
-                case 13: // Skin Activo (.osk / Presets)
-                    ctx.settings.skinIndex = (ctx.settings.skinIndex + stepDir + numSkins) % numSkins;
-                    ctx.applyActiveSkinAudio();
-                    ctx.audio.playHitSound(2);
-                    break;
-                case 14: // Sliders Serpiente (Snaking Sliders)
-                    ctx.settings.snakingSliders = !ctx.settings.snakingSliders;
-                    break;
-                case 15: // Combo Bursts (Mascota)
-                    ctx.settings.comboBursts = !ctx.settings.comboBursts;
-                    break;
-                case 20: // Efecto Visual Golpes 300
-                    ctx.settings.showHit300 = !ctx.settings.showHit300;
-                    break;
-                case 16: // Fondo en Modo Taiko (Festivo / Imagen / Video)
-                    ctx.settings.taikoBgMode = (ctx.settings.taikoBgMode + stepDir + 3) % 3;
-                    break;
-                case 17: // Tamaño del Cursor
-                    ctx.settings.cursorScale += stepDir * 0.1f;
-                    break;
-                case 18: // Atenuación del Fondo (Dim %)
-                    ctx.settings.bgDim += stepDir * 5;
-                    break;
-                case 19: // Videos de Fondo (.3dsv)
-                    ctx.settings.enableVideo = !ctx.settings.enableVideo;
-                    break;
-                case 21: // Descargas en Multijugador
-                    ctx.settings.multiDlOption = (ctx.settings.multiDlOption + stepDir + 2) % 2;
-                    ctx.multiMgr.enableBgDownload = (ctx.settings.multiDlOption != 0);
-                    break;
+                applyOptionStep(ctx.settingsOption, stepDir, false);
             }
-            ctx.settings.clampValues();
-        }
+            if (ctx.kDown & KEY_A) {
+                applyOptionStep(ctx.settingsOption, 0, true);
+            }
 
-        if (ctx.kDown & KEY_A) {
-            if (ctx.settingsOption == 0) ctx.settings.cycleInputMode(1);
-            else if (ctx.settingsOption >= 4 && ctx.settingsOption <= 7) {
-                ctx.capturingKeyIndex = ctx.settingsOption;
-                ctx.audio.playHitSound(2);
+            // Interacción Táctil en Pantalla Inferior (Pestañas, Sub-modos, Scroll, Sliders y Botones)
+            float vTop, vBot, cH, step, maxSc;
+            getViewportMetrics(activeTab, vTop, vBot, cH, step, maxSc);
+
+            auto updateSliderFromTouch = [&](int opt, float touchX) {
+                float norm = std::max(0.0f, std::min(1.0f, (touchX - 182.0f) / 110.0f));
+                if (opt == 1) {
+                    ctx.settings.tabletScale = 0.30f + norm * 0.70f;
+                } else if (opt == 2) {
+                    ctx.settings.tabletCenterX = norm * 320.0f;
+                } else if (opt == 3) {
+                    ctx.settings.tabletCenterY = norm * 240.0f;
+                } else if (opt == 8) {
+                    ctx.settings.musicVolume = static_cast<int>(std::round(norm * 100.0f));
+                    ctx.audio.setVolumes(ctx.settings.musicVolume, ctx.settings.sfxVolume);
+                } else if (opt == 9) {
+                    ctx.settings.sfxVolume = static_cast<int>(std::round(norm * 100.0f));
+                    ctx.audio.setVolumes(ctx.settings.musicVolume, ctx.settings.sfxVolume);
+                } else if (opt == 10) {
+                    ctx.settings.audioOffsetMs = static_cast<int>(std::round(norm * 300.0f - 150.0f));
+                } else if (opt == 17) {
+                    ctx.settings.cursorScale = std::round((0.5f + norm * 1.5f) * 10.0f) / 10.0f;
+                } else if (opt == 18) {
+                    ctx.settings.bgDim = static_cast<int>(std::round(20.0f + norm * 80.0f));
+                }
+                ctx.settings.clampValues();
+                if (!ctx.settings.playOnBottomScreen) {
+                    ctx.cursorOsuX = 256.0f;
+                    ctx.cursorOsuY = 192.0f;
+                }
+            };
+
+            auto isSliderOpt = [](int opt) -> bool {
+                return (opt == 1 || opt == 2 || opt == 3 || opt == 8 || opt == 9 || opt == 10 || opt == 17 || opt == 18);
+            };
+
+            if (ctx.touchJustDown) {
+                s_touchMode = TOUCH_NONE;
+                s_touchCandidateIdx = -1;
+                s_touchSliderOpt = -1;
+
+                // 1. Pestañas superiores (y = 4..28)
+                if (ctx.touch.py >= 2 && ctx.touch.py <= 29) {
+                    for (int t = 0; t < 5; ++t) {
+                        float tx = 6.0f + t * 62.0f;
+                        if (ctx.touch.px >= tx && ctx.touch.px <= tx + 59.0f) {
+                            activeTab = t;
+                            ctx.settingsOption = tabItems[t][0];
+                            ensureSelectedVisible(t, ctx.settingsOption);
+                            ctx.audio.playHitSound(0);
+                            break;
+                        }
+                    }
+                }
+                // 2. Botones inferiores: [<- Volver al Menú] y [Guardar Cambios] (y = 202..236)
+                else if (ctx.touch.py >= 202 && ctx.touch.py <= 236) {
+                    if (ctx.touch.px >= 8 && ctx.touch.px <= 154) {
+                        ctx.calibrationMode = false;
+                        ctx.settings.save();
+                        ctx.audio.setVolumes(ctx.settings.musicVolume, ctx.settings.sfxVolume);
+                        ctx.audio.playHitSound(0);
+                        ctx.appState = ctx.settingsReturnState;
+                        if (ctx.appState == STATE_SONG_SELECT || ctx.appState == STATE_MAIN_MENU) ctx.updateSongPreview();
+                        return;
+                    } else if (ctx.touch.px >= 166 && ctx.touch.px <= 312) {
+                        ctx.calibrationMode = false;
+                        ctx.settings.save();
+                        ctx.audio.setVolumes(ctx.settings.musicVolume, ctx.settings.sfxVolume);
+                        ctx.audio.playHitSound(2);
+                        ctx.appState = ctx.settingsReturnState;
+                        if (ctx.appState == STATE_SONG_SELECT || ctx.appState == STATE_MAIN_MENU) ctx.updateSongPreview();
+                        return;
+                    }
+                }
+                // 3. Selector de modo en Pestaña TECLAS (y = 31..52)
+                else if (activeTab == 1 && ctx.touch.py >= 30 && ctx.touch.py <= 53) {
+                    for (int m = 0; m < 4; ++m) {
+                        float sx = 8.0f + m * 76.0f;
+                        if (ctx.touch.px >= sx && ctx.touch.px <= sx + 72.0f) {
+                            ctx.settingsControlsMode = m;
+                            ctx.audio.playHitSound(2);
+                            break;
+                        }
+                    }
+                }
+                // 4. Barra de desplazamiento derecha (x >= 304)
+                else if (ctx.touch.px >= 304 && ctx.touch.py >= vTop && ctx.touch.py <= vBot && maxSc > 0.0f) {
+                    s_touchMode = TOUCH_SCROLLBAR;
+                    float ratio = std::max(0.0f, std::min(1.0f, (ctx.touch.py - vTop) / (vBot - vTop)));
+                    s_targetScrollY[activeTab] = ratio * maxSc;
+                }
+                // 5. Filas dentro de la lista desplazable
+                else if (ctx.touch.py >= vTop && ctx.touch.py <= vBot) {
+                    float relY = (ctx.touch.py - vTop) + s_scrollY[activeTab];
+                    int rowIdx = static_cast<int>(relY / step);
+                    if (rowIdx >= 0 && rowIdx < tabItemCounts[activeTab]) {
+                        int opt = tabItems[activeTab][rowIdx];
+                        ctx.settingsOption = opt;
+                        if (isSliderOpt(opt) && ctx.touch.px >= 174 && ctx.touch.px <= 302) {
+                            s_touchMode = TOUCH_SLIDER;
+                            s_touchSliderOpt = opt;
+                            updateSliderFromTouch(opt, ctx.touch.px);
+                        } else {
+                            s_touchMode = TOUCH_CANDIDATE_TAP;
+                            s_touchCandidateIdx = rowIdx;
+                            s_touchStartX = ctx.touch.px;
+                            s_touchStartY = ctx.touch.py;
+                            s_touchStartScroll = s_targetScrollY[activeTab];
+                        }
+                    } else {
+                        s_touchMode = TOUCH_SCROLL_LIST;
+                        s_touchStartX = ctx.touch.px;
+                        s_touchStartY = ctx.touch.py;
+                        s_touchStartScroll = s_targetScrollY[activeTab];
+                    }
+                }
+            } else if (ctx.isTouching) {
+                if (s_touchMode == TOUCH_SLIDER && s_touchSliderOpt != -1) {
+                    updateSliderFromTouch(s_touchSliderOpt, ctx.touch.px);
+                } else if (s_touchMode == TOUCH_SCROLLBAR && maxSc > 0.0f) {
+                    float ratio = std::max(0.0f, std::min(1.0f, (ctx.touch.py - vTop) / (vBot - vTop)));
+                    s_targetScrollY[activeTab] = ratio * maxSc;
+                } else if (s_touchMode == TOUCH_CANDIDATE_TAP) {
+                    if (std::fabs(ctx.touch.py - s_touchStartY) > 6.0f) {
+                        s_touchMode = TOUCH_SCROLL_LIST;
+                    }
+                }
+                if (s_touchMode == TOUCH_SCROLL_LIST) {
+                    float dy = s_touchStartY - ctx.touch.py;
+                    s_targetScrollY[activeTab] = std::max(0.0f, std::min(maxSc, s_touchStartScroll + dy));
+                }
+            } else if (ctx.touchJustUp) {
+                if (s_touchMode == TOUCH_CANDIDATE_TAP && s_touchCandidateIdx >= 0 && s_touchCandidateIdx < tabItemCounts[activeTab]) {
+                    int opt = tabItems[activeTab][s_touchCandidateIdx];
+                    ctx.settingsOption = opt;
+                    applyOptionStep(opt, 1, true);
+                }
+                s_touchMode = TOUCH_NONE;
+                s_touchCandidateIdx = -1;
+                s_touchSliderOpt = -1;
             }
-            else if (ctx.settingsOption == 10) { // Abrir calibrador rápido
-                ctx.calibrationMode = true;
-                ctx.calibSamples.clear();
-                ctx.calibStartTick = osGetTime();
-                ctx.calibLastBeatIndex = -1;
-                ctx.audio.stopMusic();
-            }
-            else if (ctx.settingsOption == 11) ctx.settings.beatmapHitsounds = !ctx.settings.beatmapHitsounds;
-            else if (ctx.settingsOption == 22) {
-                ctx.settings.language = (ctx.settings.language + 1) % LANG_COUNT;
-                Localization::setLanguage(static_cast<AppLanguage>(ctx.settings.language));
-                ctx.settings.save();
-                ctx.audio.playHitSound(2);
-            }
-            else if (ctx.settingsOption == 12) {
-                ctx.settings.gameMode = static_cast<GameMode>((ctx.settings.gameMode + 1) % 4);
-                ctx.settings.save();
-            }
-            else if (ctx.settingsOption == 13) {
-                ctx.settings.skinIndex = (ctx.settings.skinIndex + 1) % std::max(1, static_cast<int>(ctx.skinMgr.skins.size()));
-                ctx.applyActiveSkinAudio();
-            }
-            else if (ctx.settingsOption == 14) ctx.settings.snakingSliders = !ctx.settings.snakingSliders;
-            else if (ctx.settingsOption == 15) ctx.settings.comboBursts = !ctx.settings.comboBursts;
-            else if (ctx.settingsOption == 20) {
-                ctx.settings.showHit300 = !ctx.settings.showHit300;
-                ctx.settings.save();
-            }
-            else if (ctx.settingsOption == 16) {
-                ctx.settings.taikoBgMode = (ctx.settings.taikoBgMode + 1) % 3;
-                ctx.settings.save();
-            }
-            else if (ctx.settingsOption == 19) ctx.settings.enableVideo = !ctx.settings.enableVideo;
-            else if (ctx.settingsOption == 21) {
-                ctx.settings.multiDlOption = (ctx.settings.multiDlOption + 1) % 2;
-                ctx.multiMgr.enableBgDownload = (ctx.settings.multiDlOption != 0);
-                ctx.settings.save();
-            }
-            ctx.audio.playHitSound(0);
         }
     }
-}
 
-    if (std::abs(ctx.cpad.dx) > 20 || std::abs(ctx.cpad.dy) > 20) {
-        ctx.settings.tabletCenterX += (ctx.cpad.dx / 156.0f) * 3.0f;
-        ctx.settings.tabletCenterY -= (ctx.cpad.dy / 156.0f) * 3.0f;
-        ctx.settings.clampValues();
+    // Suavizado del desplazamiento vertical en cada pestaña
+    for (int t = 0; t < 5; ++t) {
+        float vTop, vBot, cH, step, maxSc;
+        getViewportMetrics(t, vTop, vBot, cH, step, maxSc);
+        s_targetScrollY[t] = std::max(0.0f, std::min(maxSc, s_targetScrollY[t]));
+        s_scrollY[t] = Ui::approach(s_scrollY[t], s_targetScrollY[t], 0.32f);
     }
 
-    if (ctx.isTouching) {
-        if (!ctx.settings.playOnBottomScreen && (ctx.settingsOption == 2 || ctx.settingsOption == 3 || (ctx.kHeld & KEY_L))) {
-            ctx.settings.tabletCenterX = ctx.touch.px;
-            ctx.settings.tabletCenterY = ctx.touch.py;
+    // Actualizar cursor de previsualización con Circle Pad si no estamos en el editor
+    if (!s_tabletEditorOpen && (std::abs(ctx.cpad.dx) > 20 || std::abs(ctx.cpad.dy) > 20)) {
+        if (activeTab == 0 && (ctx.settingsOption == 2 || ctx.settingsOption == 3)) {
+            ctx.settings.tabletCenterX += (ctx.cpad.dx / 156.0f) * 3.0f;
+            ctx.settings.tabletCenterY -= (ctx.cpad.dy / 156.0f) * 3.0f;
             ctx.settings.clampValues();
         }
-        ctx.settings.mapTouchToOsu(ctx.touch.px, ctx.touch.py, ctx.cursorOsuX, ctx.cursorOsuY);
     }
 
     C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
@@ -403,8 +686,230 @@ void runSettingsScreen(AppContext& ctx) {
     float rx, ry, rw, rh;
     ctx.settings.getTabletRect(rx, ry, rw, rh);
     activeTab = getTabForOption(ctx.settingsOption);
+    bool esp = isEsp();
 
-    // --- PANTALLA SUPERIOR: TARJETAS REDISEÑADAS POR CATEGORÍA ESTILO OSU!LAZER ---
+    const char* tabShortNames[5] = {
+        esp ? "PANTALLA" : "SCREEN",
+        esp ? "TECLAS"   : "KEYS",
+        "AUDIO",
+        esp ? "JUEGO"    : "GAME",
+        "VISUAL"
+    };
+    const char* tabSubtitles[5] = {
+        esp ? "Pantalla de Juego y Área Táctil"        : "Gameplay Screen & Touch Area",
+        esp ? "Asignación de Teclas y Prueba en Vivo"  : "Key Bindings & Live Input Test",
+        esp ? "Volumen, Latencia y Hitsounds"          : "Volume, Offset & Hitsounds",
+        esp ? "Modo Principal, Idioma y Jugabilidad"   : "Main Mode, Language & Rules",
+        esp ? "Skin, Cursor, Fondo y Gráficos"         : "Skin, Cursor, Dim & Graphics"
+    };
+
+    // Helper para obtener título, subtítulo, valor e información detallada de cada opción
+    auto getOptionMeta = [&](int opt, std::string& outTitle, std::string& outSub, std::string& outVal, std::string& outDetail1, std::string& outDetail2) {
+        char buf[96];
+        switch (opt) {
+            case 0:
+                outTitle = esp ? "Pantalla de Juego" : "Gameplay Screen";
+                outSub   = esp ? "Dónde aparecen las notas al jugar" : "Where hit circles appear";
+                outVal   = ctx.settings.playOnBottomScreen ? (esp ? "Inferior (Táctil)" : "Bottom (Touch)") : (esp ? "Superior (3D)" : "Top (3D)");
+                outDetail1 = ctx.settings.playOnBottomScreen
+                    ? (esp ? "Tocas los círculos directamente en la pantalla táctil inferior (1:1)." : "Tap circles directly on the bottom touch screen (1:1).")
+                    : (esp ? "Las notas se ven en la pantalla superior y abajo usas el stylus como tablet." : "Notes appear on the top screen while the bottom screen acts as a tablet.");
+                outDetail2 = esp ? "Pulsa A o toca la fila para alternar entre pantalla Inferior y Superior." : "Press A or tap row to switch between Bottom and Top screen.";
+                break;
+            case 23:
+                outTitle = esp ? "Toque del Stylus (Modo Superior)" : "Stylus Tap (Top Screen Mode)";
+                outSub   = esp ? "Al tocar la tablet: golpear o solo apuntar" : "Touch taps notes or only aims cursor";
+                outVal   = ctx.settings.tapWithStylus ? (esp ? "Apunta + Golpea" : "Aim + Tap") : (esp ? "Solo Apunta (PC)" : "Aim Only (PC)");
+                outDetail1 = ctx.settings.tapWithStylus
+                    ? (esp ? "Al apoyar el stylus en la pantalla inferior también se registra un golpe." : "Touching the bottom screen both moves the cursor and taps notes.")
+                    : (esp ? "Estilo PC: el stylus solo mueve el cursor y golpeas con botones K1/K2." : "PC Hybrid style: stylus only aims the cursor; use K1/K2 buttons to tap.");
+                outDetail2 = ctx.settings.playOnBottomScreen
+                    ? (esp ? "Nota: Este ajuste aplica cuando 'Pantalla de Juego' está en Superior (3D)." : "Note: Applies when 'Gameplay Screen' is set to Top (3D).")
+                    : (esp ? "Activo ahora mismo en tu modo de Pantalla Superior." : "Currently active in your Top Screen tablet mode.");
+                break;
+            case 24:
+                outTitle = esp ? "Calibrar Área en Pantalla Táctil" : "Interactive Touch Area Editor";
+                outSub   = esp ? "Mover y ver el cuadro de tablet a pantalla completa" : "Drag and preview tablet area full-screen";
+                outVal   = esp ? "Abrir Editor (A)" : "Open Editor (A)";
+                outDetail1 = esp ? "Abre un lienzo interactivo en toda la pantalla inferior para colocar el área." : "Opens a full-screen canvas on the bottom screen to position your tablet area.";
+                outDetail2 = esp ? "Arrastra con el stylus para mover el centro y usa L/R para cambiar tamaño." : "Drag with stylus to move the center and use L/R to resize.";
+                break;
+            case 1:
+                outTitle = esp ? "Tamaño del Área Táctil" : LOC(STR_SET_TABLET_SIZE);
+                std::snprintf(buf, sizeof(buf), "%d%% (%dx%d px)", static_cast<int>(std::round(ctx.settings.tabletScale * 100.0f)), (int)rw, (int)rh);
+                outSub   = esp ? "Escala de sensibilidad en modo Tablet" : "Active tablet area dimensions";
+                outVal   = buf;
+                outDetail1 = esp ? "Un área más pequeña (ej. 65%) permite llegar a las esquinas moviendo menos la mano." : "A smaller area lets you reach corners with less hand movement.";
+                outDetail2 = esp ? "Usa Izquierda/Derecha o desliza la barra para ajustar entre 30% y 100%." : "Use Left/Right or drag the slider between 30% and 100%.";
+                break;
+            case 2:
+                outTitle = esp ? "Posición Horizontal (Eje X)" : LOC(STR_SET_POS_X);
+                std::snprintf(buf, sizeof(buf), "X = %.0f px", ctx.settings.tabletCenterX);
+                outSub   = esp ? "Desplaza el área hacia izquierda o derecha" : "Horizontal center of tablet area";
+                outVal   = buf;
+                outDetail1 = esp ? "Ajusta el centro horizontal del cuadro activo para zurdos o diestros." : "Adjust horizontal center of active area for left or right hand.";
+                outDetail2 = esp ? "También puedes moverlo con el Circle Pad o en el Editor Visual (X)." : "You can also move it with the Circle Pad or Visual Editor (X).";
+                break;
+            case 3:
+                outTitle = esp ? "Posición Vertical (Eje Y)" : LOC(STR_SET_POS_Y);
+                std::snprintf(buf, sizeof(buf), "Y = %.0f px", ctx.settings.tabletCenterY);
+                outSub   = esp ? "Desplaza el área hacia arriba o abajo" : "Vertical center of tablet area";
+                outVal   = buf;
+                outDetail1 = esp ? "Ajusta la altura del cuadro activo en la pantalla táctil inferior (320x240)." : "Adjust vertical position of active area on the 320x240 bottom screen.";
+                outDetail2 = esp ? "Pulsa Y en cualquier momento para centrar el área al 100%." : "Press Y anytime to reset tablet area to 100% centered.";
+                break;
+            case 25:
+                outTitle = esp ? "Restablecer Teclas del Modo" : "Reset Mode Controls";
+                outSub   = esp ? "Vuelve a los botones originales de este modo" : "Restore default keys for current mode";
+                outVal   = esp ? "Restaurar (A/X)" : "Reset (A/X)";
+                outDetail1 = esp ? "Restaura la configuración de botones por defecto sólo para el modo elegido." : "Restores default button mappings for the currently selected mode.";
+                outDetail2 = esp ? "Pulsa A, X o toca esta tarjeta para restablecer al instante." : "Press A, X or tap this card to reset immediately.";
+                break;
+            case 8:
+                outTitle = LOC(STR_SET_MUSIC_VOL);
+                std::snprintf(buf, sizeof(buf), "%d%%", ctx.settings.musicVolume);
+                outSub   = esp ? "Volumen general de las canciones" : "Master music playback volume";
+                outVal   = buf;
+                outDetail1 = esp ? "Controla el volumen de la pista MP3/OGG durante el menú y las partidas." : "Controls MP3/OGG music volume in menus and gameplay.";
+                outDetail2 = esp ? "Desliza la barra táctil o usa la cruceta Izquierda/Derecha." : "Drag the touch slider or use D-Pad Left/Right.";
+                break;
+            case 9:
+                outTitle = LOC(STR_SET_SFX_VOL);
+                std::snprintf(buf, sizeof(buf), "%d%%", ctx.settings.sfxVolume);
+                outSub   = esp ? "Volumen de golpes (hitsounds) e interfaz" : "Hitsounds and UI effects volume";
+                outVal   = buf;
+                outDetail1 = esp ? "Controla la intensidad de los sonidos al golpear círculos, sliders y menús." : "Controls the volume of hitcircle sounds, sliders, and menu clicks.";
+                outDetail2 = esp ? "Recomendado entre 80% y 100% para escuchar claramente el ritmo." : "Recommended between 80% and 100% for clear rhythm feedback.";
+                break;
+            case 10:
+                outTitle = LOC(STR_SET_OFFSET);
+                std::snprintf(buf, sizeof(buf), "%+d ms", ctx.settings.audioOffsetMs);
+                outSub   = esp ? "Compensación de latencia de audio" : "Audio latency compensation";
+                outVal   = buf;
+                outDetail1 = esp ? "Si tus golpes salen tarde, usa un valor negativo; si salen temprano, positivo." : "If you hit late, lower offset; if you hit early, raise offset.";
+                outDetail2 = esp ? "Mantén L/R + Izq/Der para avanzar de 5 en 5 ms, o usa el Calibrador." : "Hold L/R + Left/Right to step by 5 ms, or launch the Calibrator.";
+                break;
+            case 26:
+                outTitle = esp ? "Asistente de Calibración Rítmica" : "Rhythm Calibration Wizard";
+                outSub   = esp ? "Calcula tu offset tocando al pulso de 120 BPM" : "Tap to a 120 BPM metronome to set offset";
+                outVal   = esp ? "Iniciar (A / X)" : "Start (A / X)";
+                outDetail1 = esp ? "Escucha 4 pulsos de metrónomo y presiona cualquier botón al ritmo." : "Listen to the 120 BPM beat and tap any button in rhythm.";
+                outDetail2 = esp ? "El juego promedia tus últimas 12 pulsaciones automáticamente." : "Automatically averages your last 12 taps into the ideal offset.";
+                break;
+            case 11:
+                outTitle = LOC(STR_SET_MAP_HITSOUNDS);
+                outSub   = LOC(STR_SET_MAP_HITSOUNDS_DESC);
+                outVal   = ctx.settings.beatmapHitsounds ? LOC(STR_ON) : LOC(STR_OFF);
+                outDetail1 = esp ? "Usa los archivos WAV/OGG incluidos dentro de cada beatmap." : "Uses custom WAV/OGG hitsound samples bundled with each beatmap.";
+                outDetail2 = esp ? "Desactívalo si prefieres escuchar siempre los sonidos limpios de tu Skin." : "Disable to always use your active Skin's hitsounds instead.";
+                break;
+            case 27:
+                outTitle = esp ? "Música de Preescucha en Menú" : "Menu Song Preview";
+                outSub   = esp ? "Reproducir canciones al navegar en los menús" : "Play song previews while browsing menus";
+                outVal   = ctx.settings.songPreview ? LOC(STR_ON) : LOC(STR_OFF);
+                outDetail1 = esp ? "Reproduce automáticamente la canción seleccionada en el menú y selector." : "Automatically plays the selected beatmap's audio in menus.";
+                outDetail2 = esp ? "Puedes desactivarlo si prefieres silencio mientras navegas por la lista." : "Disable if you prefer silence while browsing your beatmaps.";
+                break;
+            case 12:
+                outTitle = LOC(STR_SET_MAIN_MODE);
+                outSub   = LOC(STR_SET_MAIN_MODE_DESC);
+                outVal   = ctx.settings.getGameModeName();
+                outDetail1 = esp ? "Define el modo activo (Standard, Taiko, Catch o Mania) en el selector." : "Sets the active gameplay ruleset (Standard, Taiko, Catch, or Mania).";
+                outDetail2 = esp ? "También puedes cambiarlo rápidamente desde las pestañas del selector." : "Can also be switched anytime from the top bar in Song Select.";
+                break;
+            case 22:
+                outTitle = LOC(STR_SET_LANGUAGE);
+                outSub   = LOC(STR_SET_LANGUAGE_DESC);
+                outVal   = ctx.settings.getLanguageName();
+                outDetail1 = esp ? "Cambia al instante el idioma de todos los menús y textos del juego." : "Instantly switches the language of all menus and labels.";
+                outDetail2 = esp ? "Idiomas incluidos: Español, English, Deutsch, Русский y Polski." : "Supported languages: Español, English, Deutsch, Русский, and Polski.";
+                break;
+            case 14:
+                outTitle = LOC(STR_SET_SNAKING);
+                outSub   = LOC(STR_SET_SNAKING_DESC);
+                outVal   = ctx.settings.snakingSliders ? LOC(STR_ON) : LOC(STR_OFF);
+                outDetail1 = esp ? "Los sliders se despliegan suavemente desde su inicio estilo osu!lazer." : "Sliders smoothly snake out from their start point like osu!lazer.";
+                outDetail2 = esp ? "Desactivarlo dibuja el cuerpo del slider estático desde el primer instante." : "Disabling draws the full slider body statically right away.";
+                break;
+            case 15:
+                outTitle = LOC(STR_SET_BURSTS);
+                outSub   = LOC(STR_SET_BURSTS_DESC);
+                outVal   = ctx.settings.comboBursts ? LOC(STR_ON) : LOC(STR_OFF);
+                outDetail1 = esp ? "Muestra el personaje del Skin en los bordes al alcanzar rachas de combo." : "Displays Skin character bursts on screen edges at combo milestones.";
+                outDetail2 = esp ? "Desactívalo para una pantalla completamente limpia sin distracciones." : "Disable for a distraction-free playfield.";
+                break;
+            case 20:
+                outTitle = LOC(STR_SET_HIT300);
+                outSub   = LOC(STR_SET_HIT300_DESC);
+                outVal   = ctx.settings.showHit300 ? LOC(STR_ON) : LOC(STR_OFF);
+                outDetail1 = esp ? "Muestra el destello '300' al acertar con precisión perfecta." : "Shows floating '300' judgement popups on perfect hits.";
+                outDetail2 = esp ? "Muchos jugadores competitivos lo ocultan para ver solo 100, 50 y Miss." : "Many competitive players hide 300s to only see 100, 50, and Miss.";
+                break;
+            case 21:
+                outTitle = LOC(STR_SET_MULTI_DL);
+                outSub   = LOC(STR_SET_MULTI_DL_DESC);
+                outVal   = ctx.settings.getMultiDlOptionName();
+                outDetail1 = esp ? "Elige si deseas descargar el fondo del mapa o solo el audio y notas en salas." : "Choose whether to download beatmap backgrounds in multiplayer rooms.";
+                outDetail2 = esp ? "'Solo Nivel' acelera la transferencia entre consolas 3DS." : "'Map Only' speeds up transfers between 3DS consoles.";
+                break;
+            case 13:
+                outTitle = LOC(STR_SET_ACTIVE_SKIN);
+                std::snprintf(buf, sizeof(buf), "%s (%d/%d)", truncateString(activeSkin.name, 16).c_str(), ctx.settings.skinIndex + 1, std::max(1, (int)ctx.skinMgr.skins.size()));
+                outSub   = esp ? "Aspecto de círculos, cursor, colores y sonidos" : "Hitcircle textures, cursor, colors & sounds";
+                outVal   = truncateString(activeSkin.name, 14);
+                outDetail1 = esp ? "Cambia entre los temas incluidos y tus propios skins en /3ds/osu-3ds/skins/." : "Switch between built-in themes and custom skins in /3ds/osu-3ds/skins/.";
+                outDetail2 = buf;
+                break;
+            case 17:
+                outTitle = LOC(STR_SET_CURSOR_SIZE);
+                std::snprintf(buf, sizeof(buf), "%.1fx", ctx.settings.cursorScale);
+                outSub   = esp ? "Tamaño del puntero durante la partida" : "Gameplay cursor size multiplier";
+                outVal   = buf;
+                outDetail1 = esp ? "Aumenta el tamaño del cursor hasta 2.0x para verlo mejor en la pantalla 3DS." : "Scale cursor up to 2.0x for better visibility on the 3DS screen.";
+                outDetail2 = esp ? "Observa la vista previa en vivo en el panel izquierdo de arriba." : "Check the live preview in the top-left panel.";
+                break;
+            case 18:
+                outTitle = LOC(STR_SET_BG_DIM);
+                std::snprintf(buf, sizeof(buf), "%d%%", ctx.settings.bgDim);
+                outSub   = esp ? "Oscurece la ilustración de fondo al jugar" : "Darkens beatmap background during gameplay";
+                outVal   = buf;
+                outDetail1 = esp ? "Un valor alto (75%-95%) hace que los círculos y el AR destaquen con claridad." : "Higher dim (75%-95%) makes hit circles stand out clearly.";
+                outDetail2 = esp ? "El panel izquierdo superior muestra el oscurecimiento exacto en vivo." : "The top-left panel previews the exact background dim in real time.";
+                break;
+            case 28:
+                outTitle = esp ? "Marco del Área de Juego" : "Playfield Safe Border";
+                outSub   = esp ? "Muestra el borde guía del área 512x384" : "Draws the 512x384 playfield boundary box";
+                outVal   = ctx.settings.showPlayfieldBorder ? LOC(STR_ON) : LOC(STR_OFF);
+                outDetail1 = esp ? "Dibuja un marco sutil alrededor del área donde pueden aparecer círculos." : "Draws a subtle border around the area where circles can spawn.";
+                outDetail2 = esp ? "Muy útil para ubicarte cuando juegas con el fondo al 95%-100% de oscuridad." : "Helpful for spatial awareness at high background dim.";
+                break;
+            case 19:
+                outTitle = LOC(STR_SET_VIDEOS);
+                outSub   = LOC(STR_SET_VIDEOS_DESC);
+                outVal   = ctx.settings.enableVideo ? LOC(STR_ON) : LOC(STR_OFF);
+                outDetail1 = esp ? "Reproduce videos .3dsv/.mjpg sincronizados en el fondo de la canción." : "Plays synchronized .3dsv/.mjpg background videos during songs.";
+                outDetail2 = esp ? "Desactívalo si prefieres máxima fluidez o fondos estáticos." : "Disable if you prefer static backgrounds.";
+                break;
+            case 16:
+                outTitle = LOC(STR_SET_TAIKO_BG);
+                outSub   = LOC(STR_SET_TAIKO_BG_DESC);
+                outVal   = ctx.settings.getTaikoBgModeName();
+                outDetail1 = esp ? "Elige entre el escenario Festivo Arcade con bailarines, Imagen o Video." : "Choose between Festive Arcade stage, Beatmap Image, or Video.";
+                outDetail2 = esp ? "El modo Festivo reacciona al Kiai Time y a tu racha de combo." : "Festive mode reacts dynamically to Kiai Time and your combo.";
+                break;
+            default:
+                outTitle = "Ajuste";
+                outSub   = "";
+                outVal   = "";
+                outDetail1 = "";
+                outDetail2 = "";
+                break;
+        }
+    };
+
+    // =========================================================================
+    // PANTALLA SUPERIOR (400x240) — CABECERA LAZER + 2 PANELES EN VIVO + PIE
+    // =========================================================================
     for (int eye = 0; eye < (ctx.stereoActive ? 2 : 1); ++eye) {
         C3D_RenderTarget* curTop = (eye == 0) ? ctx.topScreen : ctx.topScreenRight;
         float eyeSign = ctx.stereoActive ? ((eye == 0) ? 1.0f : -1.0f) : 0.0f;
@@ -412,964 +917,648 @@ void runSettingsScreen(AppContext& ctx) {
         C2D_SceneBegin(curTop);
         auto depthShift = [&](float px) { return eyeSign * ctx.slider3D * px; };
 
-        float dBg = depthShift(-3.5f);
+        float dBg = depthShift(-3.0f);
+        Ui::backdrop(400.0f, 240.0f, static_cast<float>(ctx.animTick), Ui::rgba(22, 14, 40), Ui::rgba(10, 7, 20), ctx.clrPrimary, 0.01f);
         if (ctx.bgTex.loaded) {
-            Ui::backdrop(400.0f, 240.0f, static_cast<float>(ctx.animTick), Ui::rgba(28, 18, 52), Ui::rgba(10, 8, 22), ctx.clrPrimary, 0.01f);
             ctx.bgTex.drawRect(dBg, 0.0f, 400.0f, 240.0f, 0.02f, 255);
-            u8 dimAlpha = static_cast<u8>((ctx.settings.bgDim * 220) / 100);
-            C2D_DrawRectSolid(0.0f, 0.0f, 0.03f, 400.0f, 240.0f, Ui::rgba(14, 10, 24, dimAlpha));
-        } else {
-            Ui::backdrop(400.0f, 240.0f, static_cast<float>(ctx.animTick), Ui::rgba(28, 18, 52), Ui::rgba(10, 8, 22), ctx.clrPrimary, 0.02f);
+            u8 dimAlpha = static_cast<u8>((ctx.settings.bgDim * 215) / 100);
+            C2D_DrawRectSolid(0.0f, 0.0f, 0.03f, 400.0f, 240.0f, Ui::rgba(12, 8, 22, dimAlpha));
         }
 
-        // Barra superior con pestañas de categoría
-        Ui::gradV(0.0f, 0.0f, 400.0f, 28.0f, 0.3f, Ui::rgba(18, 15, 32, 245), Ui::rgba(18, 15, 32, 160));
-        C2D_DrawRectSolid(0.0f, 27.0f, 0.31f, 400.0f, 1.5f, ctx.clrPrimary);
+        // 1. Cabecera superior inspirada en el diseño osu!lazer (0..28)
+        Ui::gradV(0.0f, 0.0f, 400.0f, 28.0f, 0.30f, Ui::rgba(18, 12, 32, 245), Ui::rgba(14, 10, 26, 215));
+        C2D_DrawRectSolid(0.0f, 27.0f, 0.31f, 400.0f, 1.5f, Ui::rgba(255, 60, 145, 220));
 
-        const char* tabNames[5] = {
-            LOC(STR_TAB_TABLET),
-            LOC(STR_TAB_CONTROLS),
-            LOC(STR_TAB_AUDIO),
-            LOC(STR_TAB_GAME),
-            LOC(STR_TAB_VISUAL)
-        };
-        for (int t = 0; t < 5; ++t) {
-            float tx = 6.0f + t * 62.0f;
-            bool isTabActive = (activeTab == t);
-            if (isTabActive) {
-                Ui::pill(tx, 4.0f, 58.0f, 19.0f, 0.32f, ctx.clrPrimary);
-                drawCenteredTextWithShadow(ctx.textBuf, tx + 29.0f, 13.5f, 0.33f, ctx.clrWhite, tabNames[t], 0.85f);
-            } else {
-                Ui::pill(tx, 4.0f, 58.0f, 19.0f, 0.32f, Ui::rgba(42, 36, 64, 240));
-                drawCenteredTextWithShadow(ctx.textBuf, tx + 29.0f, 13.5f, 0.31f, Ui::rgba(225, 220, 245), tabNames[t], 0.85f);
-            }
-        }
-        Ui::pill(320.0f, 4.0f, 44.0f, 19.0f, 0.32f, ctx.isNew3DS ? Ui::rgba(40, 75, 45, 220) : Ui::rgba(35, 30, 50, 220));
-        drawCenteredTextWithShadow(ctx.textBuf, 342.0f, 13.5f, 0.31f, ctx.isNew3DS ? ctx.clr100 : Ui::rgba(210, 205, 230), ctx.isNew3DS ? "N3DS" : "3DS", 0.85f);
+        // Insignia rosa izquierda: "AJUSTES · [SECCIÓN]"
+        Ui::slantRectGrad(6.0f, 3.0f, 106.0f, 22.0f, -5.0f, 0.32f, Ui::rgba(255, 42, 133), Ui::rgba(215, 25, 105));
+        drawTextWithShadow(ctx.textBuf, 14.0f, 4.0f, 0.29f, ctx.clrWhite, esp ? "AJUSTES ·" : "SETTINGS ·", 0.34f);
+        drawTextWithShadow(ctx.textBuf, 14.0f, 13.5f, 0.34f, ctx.clrWhite, tabShortNames[activeTab], 0.34f);
 
-        // Si la categoría activa es CONTROLES (activeTab == 1), mostramos la PREVISUALIZACIÓN VIVA DEL MODO
+        // Subtítulo central y estado de hardware a la derecha
+        drawTextWithShadow(ctx.textBuf, 118.0f, 8.0f, 0.36f, ctx.clrWhite, tabSubtitles[activeTab], 0.34f);
+        drawTextWithShadow(ctx.textBuf, 308.0f, 8.5f, 0.31f, Ui::rgba(45, 235, 160), "60 FPS", 0.34f);
+        drawTextWithShadow(ctx.textBuf, 350.0f, 8.5f, 0.31f, Ui::rgba(80, 200, 255), ctx.isNew3DS ? "N3DS" : "PICA200", 0.34f);
+
+        float dPanel = depthShift(1.6f);
+        float panL_X = 10.0f + dPanel;
+        float panR_X = 202.0f + dPanel;
+        float panY   = 33.0f;
+        float panW   = 188.0f;
+        float panH   = 175.0f;
+
+        // 2. Paneles Laterales de Contexto y Comprobación en Vivo
         if (activeTab == 1) {
-            float panX = 12.0f + depthShift(1.8f);
-            float panY = 32.0f;
-            float panW = 376.0f;
-            float panH = 178.0f;
-            Ui::panel(panX, panY, panW, panH, 0.14f, Ui::rgba(18, 14, 28, 240), Ui::rgba(65, 52, 95));
+            // --- PESTAÑA TECLAS: Idéntica al diseño de referencia ---
+            Ui::panel(panL_X, panY, panW, panH, 0.14f, Ui::rgba(16, 11, 28, 232), Ui::rgba(255, 65, 150));
+            drawTextWithShadow(ctx.textBuf, panL_X + 10.0f, panY + 7.0f, 0.33f, Ui::rgba(255, 75, 160),
+                esp ? "COMPROBACIÓN DE PULSACIONES" : "LIVE INPUT CHECK", 0.18f);
+            drawRightAlignedText(ctx.textBuf, panL_X + panW - 8.0f, panY + 7.5f, 0.30f, Ui::rgba(45, 235, 160),
+                esp ? "EN VIVO" : "LIVE", 0.18f);
 
-            const char* subNames[4] = { "osu! (Standard)", "osu!taiko", "osu!catch", "osu!mania (4K)" };
-            char mTitleBuf[64];
-            std::snprintf(mTitleBuf, sizeof(mTitleBuf), "%s: %s", LOC(STR_PREVIEW), subNames[ctx.settingsControlsMode]);
-            u32 mTitleColors[4] = {
-                Ui::rgba(255, 102, 171),
-                Ui::rgba(255, 75, 80),
-                Ui::rgba(45, 215, 115),
-                Ui::rgba(60, 205, 255)
+            float boxX = panL_X + 10.0f;
+            float boxY = panY + 24.0f;
+            float boxW = panW - 20.0f;
+            float boxH = 122.0f;
+            Ui::panel(boxX, boxY, boxW, boxH, 0.16f, Ui::rgba(8, 6, 15, 245), Ui::rgba(50, 38, 78));
+
+            bool k1Down = false, k2Down = false;
+            if (ctx.settingsControlsMode == MODE_STD) {
+                k1Down = (ctx.kHeld & ctx.settings.keyOsuK1) != 0;
+                k2Down = (ctx.kHeld & ctx.settings.keyOsuK2) != 0;
+                float cx = boxX + boxW * 0.5f;
+                float cy = boxY + 52.0f;
+                bool activeHit = k1Down || k2Down || (s_liveBurstTimer > 0);
+                float rad = activeHit ? (29.0f + (s_liveBurstTimer * 0.35f)) : 27.0f;
+                u32 cClr = (k2Down || s_liveLastHitKey == 2) ? Ui::rgba(65, 175, 255) : Ui::rgba(255, 55, 145);
+
+                Ui::glow(cx, cy, 0.18f, rad + 12.0f, Ui::withAlpha(cClr, activeHit ? 150 : 85), 3);
+                C2D_DrawCircleSolid(cx, cy, 0.20f, rad, Ui::withAlpha(cClr, 220));
+                C2D_DrawCircleSolid(cx, cy, 0.21f, rad - 3.0f, Ui::rgba(115, 20, 68));
+                drawRing(cx, cy, rad, 2.2f, Ui::rgba(255, 130, 195), 28, 0.22f);
+                if (s_liveBurstTimer > 0) {
+                    float br = 28.0f + (16 - s_liveBurstTimer) * 1.6f;
+                    u8 ba = static_cast<u8>((s_liveBurstTimer * 220) / 16);
+                    drawRing(cx, cy, br, 2.0f, Ui::rgba(255, 230, 110, ba), 24, 0.23f);
+                }
+                drawCenteredTextWithShadow(ctx.textBuf, cx, cy - 8.0f, 0.58f, ctx.clrWhite,
+                    (k2Down || s_liveLastHitKey == 2) ? "2" : "1", 0.24f);
+            } else if (ctx.settingsControlsMode == MODE_TAIKO) {
+                bool dL = (ctx.kHeld & ctx.settings.keyTaikoDonLeft) != 0;
+                bool dR = (ctx.kHeld & ctx.settings.keyTaikoDonRight) != 0;
+                bool kL = (ctx.kHeld & ctx.settings.keyTaikoKatsuLeft) != 0;
+                bool kR = (ctx.kHeld & ctx.settings.keyTaikoKatsuRight) != 0;
+                k1Down = dL || dR;
+                k2Down = kL || kR;
+                float cx = boxX + boxW * 0.5f;
+                float cy = boxY + 52.0f;
+                C2D_DrawCircleSolid(cx, cy, 0.19f, 30.0f, (kL || kR) ? Ui::rgba(60, 185, 255) : Ui::rgba(30, 80, 145));
+                C2D_DrawCircleSolid(cx, cy, 0.21f, 20.0f, (dL || dR) ? Ui::rgba(255, 75, 85) : Ui::rgba(150, 35, 45));
+                drawRing(cx, cy, 30.0f, 2.0f, ctx.clrWhite, 28, 0.22f);
+                drawCenteredTextWithShadow(ctx.textBuf, cx, cy - 6.0f, 0.42f, ctx.clrWhite,
+                    (dL || dR) ? "DON!" : ((kL || kR) ? "KATSU!" : "TAIKO"), 0.24f);
+            } else if (ctx.settingsControlsMode == MODE_CATCH) {
+                bool mL = (ctx.kHeld & ctx.settings.keyCatchLeft) != 0;
+                bool mR = (ctx.kHeld & ctx.settings.keyCatchRight) != 0;
+                bool dS = (ctx.kHeld & ctx.settings.keyCatchDash) != 0;
+                k1Down = mL || mR;
+                k2Down = dS;
+                float cx = boxX + boxW * 0.5f + (mL ? -28.0f : (mR ? 28.0f : std::sin(ctx.animTick * 0.06f) * 24.0f));
+                float cy = boxY + 68.0f;
+                C2D_DrawCircleSolid(boxX + boxW * 0.5f, boxY + 34.0f, 0.20f, 11.0f, Ui::rgba(255, 85, 95));
+                Ui::pill(cx - 24.0f, cy, 48.0f, 8.0f, 0.22f, dS ? Ui::rgba(255, 195, 50) : Ui::rgba(65, 230, 145));
+            } else {
+                bool c1 = (ctx.kHeld & ctx.settings.keyManiaCol1) != 0;
+                bool c2 = (ctx.kHeld & ctx.settings.keyManiaCol2) != 0;
+                bool c3 = (ctx.kHeld & ctx.settings.keyManiaCol3) != 0;
+                bool c4 = (ctx.kHeld & ctx.settings.keyManiaCol4) != 0;
+                k1Down = c1 || c2;
+                k2Down = c3 || c4;
+                bool cols[4] = { c1, c2, c3, c4 };
+                u32 clrs[4]  = { Ui::rgba(60, 180, 255), Ui::rgba(255, 75, 160), Ui::rgba(255, 75, 160), Ui::rgba(60, 180, 255) };
+                for (int c = 0; c < 4; ++c) {
+                    float lx = boxX + 22.0f + c * 32.0f;
+                    Ui::panel(lx, boxY + 14.0f, 28.0f, 72.0f, 0.19f, cols[c] ? clrs[c] : Ui::rgba(22, 18, 36, 240), clrs[c]);
+                }
+            }
+
+            drawCenteredText(ctx.textBuf, boxX + boxW * 0.5f, boxY + boxH - 18.0f, 0.30f, Ui::rgba(175, 170, 205),
+                esp ? "Pulsa tus teclas para probar registro" : "Press bound keys to test input", 0.24f);
+
+            char k1TapStr[32], k2TapStr[32];
+            std::snprintf(k1TapStr, sizeof(k1TapStr), "K1 Taps: %d", s_liveTapCountK1);
+            std::snprintf(k2TapStr, sizeof(k2TapStr), "K2 Taps: %d", s_liveTapCountK2);
+            drawTextWithShadow(ctx.textBuf, panL_X + 10.0f, panY + panH - 19.0f, 0.32f, k1Down ? ctx.clrWhite : Ui::rgba(190, 185, 215), k1TapStr, 0.20f);
+            drawRightAlignedText(ctx.textBuf, panL_X + panW - 10.0f, panY + panH - 19.0f, 0.32f, Ui::rgba(65, 205, 255), k2TapStr, 0.20f);
+
+            // Panel Derecho en TECLAS: Mapeo Hardware Nintendo 3DS
+            Ui::panel(panR_X, panY, panW, panH, 0.14f, Ui::rgba(14, 14, 28, 232), Ui::rgba(45, 215, 185));
+            drawTextWithShadow(ctx.textBuf, panR_X + 10.0f, panY + 7.0f, 0.32f, Ui::rgba(55, 225, 200),
+                esp ? "MAPEO HARDWARE NINTENDO 3DS" : "NINTENDO 3DS HID MAPPING", 0.18f);
+
+            const char* modeLabels[4] = { "osu!standard", "osu!taiko", "osu!catch", "osu!mania 4K" };
+            int selRow = std::max(0, std::min(3, ctx.settingsOption - 4));
+            uint32_t selMask = ctx.settings.keyOsuK1;
+            if (ctx.settingsControlsMode == MODE_STD) {
+                uint32_t m[4] = { ctx.settings.keyOsuK1, ctx.settings.keyOsuK2, ctx.settings.keyOsuSmoke, ctx.settings.keyQuickRetry };
+                selMask = m[selRow];
+            } else if (ctx.settingsControlsMode == MODE_TAIKO) {
+                uint32_t m[4] = { ctx.settings.keyTaikoDonLeft, ctx.settings.keyTaikoDonRight, ctx.settings.keyTaikoKatsuLeft, ctx.settings.keyTaikoKatsuRight };
+                selMask = m[selRow];
+            } else if (ctx.settingsControlsMode == MODE_CATCH) {
+                uint32_t m[4] = { ctx.settings.keyCatchLeft, ctx.settings.keyCatchRight, ctx.settings.keyCatchDash, ctx.settings.keyQuickRetry };
+                selMask = m[selRow];
+            } else {
+                uint32_t m[4] = { ctx.settings.keyManiaCol1, ctx.settings.keyManiaCol2, ctx.settings.keyManiaCol3, ctx.settings.keyManiaCol4 };
+                selMask = m[selRow];
+            }
+            std::string curKeyStr = truncateString(GameSettings::formatKeyMask(selMask), 16);
+
+            auto drawHwRow = [&](float ryOff, const char* lbl, const char* val, u32 valClr) {
+                drawText(ctx.textBuf, panR_X + 10.0f, panY + ryOff, 0.31f, Ui::rgba(175, 170, 205), lbl, 0.18f);
+                drawRightAlignedText(ctx.textBuf, panR_X + panW - 10.0f, panY + ryOff, 0.32f, valClr, val, 0.18f);
+                C2D_DrawLine(panR_X + 10.0f, panY + ryOff + 15.0f, Ui::rgba(45, 42, 70, 140),
+                             panR_X + panW - 10.0f, panY + ryOff + 15.0f, Ui::rgba(45, 42, 70, 140), 1.0f, 0.17f);
             };
 
-            drawTextWithShadow(ctx.textBuf, panX + 10.0f, panY + 5.0f, 0.42f, mTitleColors[ctx.settingsControlsMode], mTitleBuf, 0.16f);
-            drawTextWithShadow(ctx.textBuf, panX + 10.0f, panY + 19.0f, 0.31f, Ui::rgba(200, 195, 225), LOC(STR_CTRL_HELP_LIVE), 0.16f);
+            drawHwRow(28.0f,  esp ? "Frecuencia Polling" : "Polling Rate",   "60 Hz (16.6ms)",           Ui::rgba(45, 235, 160));
+            drawHwRow(50.0f,  esp ? "Modo Seleccionado"  : "Selected Mode",  modeLabels[ctx.settingsControlsMode], Ui::rgba(65, 205, 255));
+            drawHwRow(72.0f,  esp ? "Botones Activos"    : "Assigned Keys",  curKeyStr.c_str(),          Ui::rgba(255, 95, 175));
+            drawHwRow(94.0f,  "Anti-Ghosting",                               esp ? "Habilitado" : "Enabled", Ui::rgba(255, 210, 65));
+            drawHwRow(116.0f, esp ? "D-Pad simultáneo"   : "Simultaneous D-Pad", esp ? "Soportado" : "Supported", ctx.clrWhite);
 
-            if (ctx.capturingKeyIndex != -1) {
-                Ui::pill(panX + 180.0f, panY + 4.0f, 186.0f, 20.0f, 0.90f, Ui::rgba(255, 180, 40, 240));
-                drawCenteredTextWithShadow(ctx.textBuf, panX + 273.0f, panY + 14.0f, 0.32f, ctx.clrBgDark, LOC(STR_CTRL_ASSIGNING), 0.95f);
-            }
-
-            if (ctx.settingsControlsMode == MODE_STD) {
-                float hudX = panX + 10.0f;
-                float hudY = panY + 34.0f;
-                float hudW = 110.0f;
-
-                bool k1Active = (ctx.kHeld & ctx.settings.keyOsuK1) || (ctx.animTick % 120 >= 56 && ctx.animTick % 120 <= 64);
-                bool k2Active = (ctx.kHeld & ctx.settings.keyOsuK2) || (ctx.animTick % 120 >= 114 && ctx.animTick % 120 <= 122);
-                bool smokeActive = (ctx.kHeld & ctx.settings.keyOsuSmoke);
-                bool retryActive = (ctx.kHeld & ctx.settings.keyQuickRetry);
-
-                auto drawKeyBadge = [&](float x, float y, const char* name, const char* keyStr, bool active, u32 actClr) {
-                    u32 bg = active ? actClr : Ui::rgba(28, 22, 44, 230);
-                    Ui::pill(x, y, hudW, 29.0f, 0.18f, bg);
-                    drawTextWithShadow(ctx.textBuf, x + 8.0f, y + 4.0f, 0.33f, active ? ctx.clrWhite : ctx.clrCursor, name, 0.20f);
-                    drawTextWithShadow(ctx.textBuf, x + 8.0f, y + 16.0f, 0.30f, active ? ctx.clrWhite : Ui::rgba(225, 220, 245), keyStr, 0.20f);
-                    if (active) Ui::glow(x + hudW * 0.5f, y + 14.0f, 0.17f, 16.0f, Ui::withAlpha(actClr, 130), 2);
-                };
-
-                std::string sK1 = truncateString(GameSettings::formatKeyMask(ctx.settings.keyOsuK1), 14);
-                std::string sK2 = truncateString(GameSettings::formatKeyMask(ctx.settings.keyOsuK2), 14);
-                std::string sSm = truncateString(GameSettings::formatKeyMask(ctx.settings.keyOsuSmoke), 14);
-                std::string sRt = truncateString(GameSettings::formatKeyMask(ctx.settings.keyQuickRetry), 14);
-
-                drawKeyBadge(hudX, hudY,        LOC(STR_KEY_K1), sK1.c_str(), k1Active, Ui::rgba(180, 70, 240));
-                drawKeyBadge(hudX, hudY + 33.0f, LOC(STR_KEY_K2), sK2.c_str(), k2Active, Ui::rgba(255, 95, 180));
-                drawKeyBadge(hudX, hudY + 66.0f, LOC(STR_KEY_SMOKE),  sSm.c_str(), smokeActive, Ui::rgba(240, 200, 50));
-                drawKeyBadge(hudX, hudY + 99.0f, LOC(STR_KEY_RETRY),     sRt.c_str(), retryActive, Ui::rgba(255, 75, 75));
-
-                float pfX = panX + 128.0f;
-                float pfY = panY + 34.0f;
-                float pfW = 238.0f;
-                float pfH = 132.0f;
-                Ui::panel(pfX, pfY, pfW, pfH, 0.15f, Ui::rgba(12, 10, 20, 240), Ui::rgba(55, 45, 80));
-
-                int t = ctx.animTick % 120;
-                float c1X = pfX + 65.0f, c1Y = pfY + 66.0f;
-                float c2X = pfX + 172.0f, c2Y = pfY + 56.0f;
-
-                if (t < 60) {
-                    float appR = 16.0f + (1.0f - (t / 60.0f)) * 32.0f;
-                    drawRing(c1X, c1Y, appR, 1.5f, Ui::rgba(255, 102, 171), 22, 0.22f);
-                    C2D_DrawCircleSolid(c1X, c1Y, 0.20f, 16.0f, Ui::rgba(255, 102, 171));
-                    drawRing(c1X, c1Y, 16.0f, 2.0f, ctx.clrWhite, 22, 0.21f);
-                    drawCenteredText(ctx.textBuf, c1X, c1Y - 6.0f, 0.40f, ctx.clrWhite, "1", 0.23f);
-                } else if (t < 78) {
-                    float burstR = 16.0f + (t - 60) * 1.5f;
-                    u8 bAlpha = static_cast<u8>(255 * (1.0f - (t - 60) / 18.0f));
-                    drawRing(c1X, c1Y, burstR, 2.0f, Ui::rgba(255, 215, 60, bAlpha), 20, 0.24f);
-                    drawCenteredText(ctx.textBuf, c1X, c1Y - 10.0f - (t - 60) * 0.8f, 0.42f, Ui::rgba(100, 240, 255, bAlpha), "300", 0.25f);
-                }
-
-                if (t >= 30) {
-                    float p2 = std::min(1.0f, (t - 30) / 90.0f);
-                    float appR = 16.0f + (1.0f - p2) * 32.0f;
-                    drawRing(c2X, c2Y, appR, 1.5f, Ui::rgba(100, 180, 255), 22, 0.22f);
-                    C2D_DrawCircleSolid(c2X, c2Y, 0.20f, 16.0f, Ui::rgba(100, 180, 255));
-                    drawRing(c2X, c2Y, 16.0f, 2.0f, ctx.clrWhite, 22, 0.21f);
-                    drawCenteredText(ctx.textBuf, c2X, c2Y - 6.0f, 0.40f, ctx.clrWhite, "2", 0.23f);
-                }
-
-                float curX, curY;
-                if (t < 60) {
-                    float prog = t / 60.0f;
-                    float smooth = prog * prog * (3.0f - 2.0f * prog);
-                    curX = pfX + 20.0f + smooth * (c1X - (pfX + 20.0f));
-                    curY = pfY + 100.0f + smooth * (c1Y - (pfY + 100.0f));
-                } else {
-                    float prog = (t - 60) / 60.0f;
-                    float smooth = prog * prog * (3.0f - 2.0f * prog);
-                    curX = c1X + smooth * (c2X - c1X);
-                    curY = c1Y + smooth * (c2Y - c1Y);
-                }
-
-                Ui::glow(curX, curY, 0.26f, 12.0f, Ui::withAlpha(ctx.clrCursor, 140), 2);
-                C2D_DrawCircleSolid(curX, curY, 0.27f, 6.0f, ctx.clrCursor);
-                C2D_DrawCircleSolid(curX, curY, 0.28f, 2.0f, ctx.clrWhite);
-            }
-            else if (ctx.settingsControlsMode == MODE_TAIKO) {
-                float trkX = panX + 10.0f;
-                float trkY = panY + 34.0f;
-                float trkW = 356.0f;
-                float trkH = 70.0f;
-                Ui::panel(trkX, trkY, trkW, trkH, 0.15f, Ui::rgba(22, 18, 32, 250), Ui::rgba(70, 55, 95));
-
-                float drumX = trkX + 46.0f;
-                float drumY = trkY + trkH * 0.5f;
-
-                bool kLeftDown  = (ctx.kHeld & ctx.settings.keyTaikoKatsuLeft);
-                bool kRightDown = (ctx.kHeld & ctx.settings.keyTaikoKatsuRight);
-                bool dLeftDown  = (ctx.kHeld & ctx.settings.keyTaikoDonLeft);
-                bool dRightDown = (ctx.kHeld & ctx.settings.keyTaikoDonRight);
-
-                C2D_DrawCircleSolid(drumX, drumY, 0.17f, 28.0f, (kLeftDown || kRightDown) ? ctx.clrWhite : Ui::rgba(35, 120, 220));
-                C2D_DrawCircleSolid(drumX, drumY, 0.19f, 18.0f, (dLeftDown || dRightDown) ? ctx.clrWhite : Ui::rgba(240, 55, 65));
-
-                C2D_DrawCircleSolid(drumX - 6.0f, drumY - 2.0f, 0.21f, 2.2f, ctx.clrBgDark);
-                C2D_DrawCircleSolid(drumX + 6.0f, drumY - 2.0f, 0.21f, 2.2f, ctx.clrBgDark);
-                drawRing(drumX, drumY + 4.0f, 4.0f, 1.2f, ctx.clrBgDark, 12, 0.21f);
-
-                float targetX = trkX + 115.0f;
-                drawRing(targetX, drumY, 15.0f, 2.0f, ctx.clrWhite, 24, 0.20f);
-                drawRing(targetX, drumY, 8.0f, 1.5f, Ui::rgba(180, 175, 210), 16, 0.19f);
-
-                int loopT = ctx.animTick % 160;
-                float speed = 2.4f;
-
-                for (int n = 0; n < 4; ++n) {
-                    int nOffset = n * 40;
-                    float notePos = ((loopT + nOffset) % 160) * speed;
-                    float nx = (trkX + trkW) - notePos;
-                    if (nx >= trkX + 85.0f && nx <= trkX + trkW - 5.0f) {
-                        bool isDon = (n % 2 == 0);
-                        u32 noteClr = isDon ? Ui::rgba(245, 60, 65) : Ui::rgba(45, 135, 255);
-                        C2D_DrawCircleSolid(nx, drumY, 0.22f, 12.0f, noteClr);
-                        drawRing(nx, drumY, 12.0f, 1.8f, ctx.clrWhite, 20, 0.23f);
-
-                        if (std::abs(nx - targetX) < 6.0f) {
-                            Ui::glow(targetX, drumY, 0.25f, 22.0f, Ui::withAlpha(noteClr, 160), 2);
-                            drawCenteredText(ctx.textBuf, targetX, drumY - 24.0f, 0.38f, Ui::rgba(255, 220, 80), "GREAT 300", 0.26f);
-                        }
-                    }
-                }
-
-                float rowY = panY + 110.0f;
-                float cW = 86.0f;
-                float cH = 56.0f;
-
-                auto drawTaikoCard = [&](float cx, const char* name, const char* sub, uint32_t mask, u32 actClr, bool active) {
-                    Ui::panel(cx, rowY, cW, cH, 0.16f, active ? Ui::rgba(45, 38, 70, 255) : Ui::rgba(24, 20, 36, 230), active ? ctx.clrWhite : actClr);
-                    drawCenteredText(ctx.textBuf, cx + cW * 0.5f, rowY + 5.0f, 0.28f, actClr, name, 0.18f);
-                    drawCenteredText(ctx.textBuf, cx + cW * 0.5f, rowY + 18.0f, 0.24f, ctx.clrMuted, sub, 0.18f);
-                    std::string kStr = truncateString(GameSettings::formatKeyMask(mask), 12);
-                    Ui::pill(cx + 6.0f, rowY + 32.0f, cW - 12.0f, 18.0f, 0.19f, active ? actClr : Ui::rgba(40, 32, 60));
-                    drawCenteredText(ctx.textBuf, cx + cW * 0.5f, rowY + 41.0f, 0.26f, ctx.clrWhite, kStr.c_str(), 0.20f);
-                };
-
-                drawTaikoCard(trkX,               "DON IZQ",   LOC(STR_TAIKO_RED), ctx.settings.keyTaikoDonLeft,    Ui::rgba(245, 60, 65),  dLeftDown);
-                drawTaikoCard(trkX + cW + 4.0f,   "DON DER",   LOC(STR_TAIKO_RED), ctx.settings.keyTaikoDonRight,   Ui::rgba(245, 60, 65),  dRightDown);
-                drawTaikoCard(trkX + (cW+4.0f)*2, "KATSU IZQ", LOC(STR_TAIKO_BLUE), ctx.settings.keyTaikoKatsuLeft,  Ui::rgba(45, 135, 255), kLeftDown);
-                drawTaikoCard(trkX + (cW+4.0f)*3, "KATSU DER", LOC(STR_TAIKO_BLUE), ctx.settings.keyTaikoKatsuRight, Ui::rgba(45, 135, 255), kRightDown);
-            }
-            else if (ctx.settingsControlsMode == MODE_CATCH) {
-                float hudX = panX + 10.0f;
-                float hudY = panY + 34.0f;
-                float hudW = 110.0f;
-
-                bool cLeftActive  = (ctx.kHeld & ctx.settings.keyCatchLeft);
-                bool cRightActive = (ctx.kHeld & ctx.settings.keyCatchRight);
-                bool cDashActive  = (ctx.kHeld & ctx.settings.keyCatchDash);
-                bool cRetryActive = (ctx.kHeld & ctx.settings.keyQuickRetry);
-
-                auto drawCatchBadge = [&](float x, float y, const char* name, const char* keyStr, bool active, u32 actClr) {
-                    u32 bg = active ? actClr : Ui::rgba(28, 22, 44, 230);
-                    Ui::pill(x, y, hudW, 29.0f, 0.18f, bg);
-                    drawText(ctx.textBuf, x + 8.0f, y + 4.0f, 0.30f, active ? ctx.clrWhite : ctx.clrCursor, name, 0.20f);
-                    drawText(ctx.textBuf, x + 8.0f, y + 16.0f, 0.26f, active ? ctx.clrWhite : ctx.clrMuted, keyStr, 0.20f);
-                    if (active) Ui::glow(x + hudW * 0.5f, y + 14.0f, 0.17f, 16.0f, Ui::withAlpha(actClr, 130), 2);
-                };
-
-                std::string sL = truncateString(GameSettings::formatKeyMask(ctx.settings.keyCatchLeft), 13);
-                std::string sR = truncateString(GameSettings::formatKeyMask(ctx.settings.keyCatchRight), 13);
-                std::string sD = truncateString(GameSettings::formatKeyMask(ctx.settings.keyCatchDash), 13);
-                std::string sRt = truncateString(GameSettings::formatKeyMask(ctx.settings.keyQuickRetry), 13);
-
-                drawCatchBadge(hudX, hudY,        LOC(STR_KEY_MOVE_L), sL.c_str(), cLeftActive, Ui::rgba(50, 210, 120));
-                drawCatchBadge(hudX, hudY + 33.0f, LOC(STR_KEY_MOVE_R), sR.c_str(), cRightActive, Ui::rgba(50, 210, 120));
-                drawCatchBadge(hudX, hudY + 66.0f, LOC(STR_KEY_DASH),   sD.c_str(), cDashActive, Ui::rgba(255, 175, 30));
-                drawCatchBadge(hudX, hudY + 99.0f, LOC(STR_KEY_RETRY),  sRt.c_str(), cRetryActive, Ui::rgba(255, 75, 75));
-
-                float stX = panX + 128.0f;
-                float stY = panY + 34.0f;
-                float stW = 238.0f;
-                float stH = 132.0f;
-                Ui::panel(stX, stY, stW, stH, 0.15f, Ui::rgba(12, 10, 20, 240), Ui::rgba(50, 150, 95));
-
-                int cTick = ctx.animTick % 100;
-                float f1Y = stY + (cTick * 1.3f);
-                float f1X = stX + 70.0f;
-
-                if (f1Y < stY + stH - 18.0f) {
-                    C2D_DrawCircleSolid(f1X, f1Y, 0.20f, 9.0f, Ui::rgba(235, 50, 60));
-                    C2D_DrawRectSolid(f1X - 1.0f, f1Y - 12.0f, 0.21f, 2.0f, 4.0f, Ui::rgba(80, 180, 50));
-                }
-
-                int cTick2 = (ctx.animTick + 50) % 100;
-                float f2Y = stY + (cTick2 * 1.3f);
-                float f2X = stX + 165.0f;
-                if (f2Y < stY + stH - 18.0f) {
-                    C2D_DrawCircleSolid(f2X, f2Y, 0.20f, 8.5f, Ui::rgba(255, 160, 30));
-                    drawRing(f2X, f2Y, 5.0f, 1.2f, Ui::rgba(255, 210, 80), 12, 0.21f);
-                }
-
-                float catcherBaseX = stX + 70.0f + std::sin(ctx.animTick * 0.05f) * 60.0f;
-                if (cLeftActive)  catcherBaseX = std::max(stX + 25.0f, catcherBaseX - 3.0f);
-                if (cRightActive) catcherBaseX = std::min(stX + stW - 25.0f, catcherBaseX + 3.0f);
-
-                float plateY = stY + stH - 16.0f;
-                float plateW = 44.0f;
-
-                if (cDashActive || (cTick > 40 && cTick < 70)) {
-                    Ui::pill(catcherBaseX - plateW * 0.5f - 6.0f, plateY, plateW, 6.0f, 0.18f, Ui::rgba(255, 120, 40, 120));
-                }
-                Ui::pill(catcherBaseX - plateW * 0.5f, plateY, plateW, 6.0f, 0.22f, Ui::rgba(210, 215, 235));
-                C2D_DrawCircleSolid(catcherBaseX, plateY + 8.0f, 0.21f, 6.0f, Ui::rgba(60, 180, 100));
-            }
-            else if (ctx.settingsControlsMode == MODE_MANIA) {
-                float hudX = panX + 10.0f;
-                float hudY = panY + 34.0f;
-                float hudW = 110.0f;
-
-                bool col1Active = (ctx.kHeld & ctx.settings.keyManiaCol1) || (ctx.animTick % 80 >= 18 && ctx.animTick % 80 <= 26);
-                bool col2Active = (ctx.kHeld & ctx.settings.keyManiaCol2) || (ctx.animTick % 80 >= 38 && ctx.animTick % 80 <= 46);
-                bool col3Active = (ctx.kHeld & ctx.settings.keyManiaCol3) || (ctx.animTick % 80 >= 58 && ctx.animTick % 80 <= 66);
-                bool col4Active = (ctx.kHeld & ctx.settings.keyManiaCol4) || (ctx.animTick % 80 >= 72 && ctx.animTick % 80 <= 79);
-
-                auto drawManiaBadge = [&](float x, float y, const char* name, const char* keyStr, bool active, u32 actClr) {
-                    u32 bg = active ? actClr : Ui::rgba(28, 22, 44, 230);
-                    Ui::pill(x, y, hudW, 29.0f, 0.18f, bg);
-                    drawText(ctx.textBuf, x + 8.0f, y + 4.0f, 0.30f, active ? ctx.clrWhite : ctx.clrCursor, name, 0.20f);
-                    drawText(ctx.textBuf, x + 8.0f, y + 16.0f, 0.26f, active ? ctx.clrWhite : ctx.clrMuted, keyStr, 0.20f);
-                    if (active) Ui::glow(x + hudW * 0.5f, y + 14.0f, 0.17f, 16.0f, Ui::withAlpha(actClr, 130), 2);
-                };
-
-                std::string sC1 = truncateString(GameSettings::formatKeyMask(ctx.settings.keyManiaCol1), 13);
-                std::string sC2 = truncateString(GameSettings::formatKeyMask(ctx.settings.keyManiaCol2), 13);
-                std::string sC3 = truncateString(GameSettings::formatKeyMask(ctx.settings.keyManiaCol3), 13);
-                std::string sC4 = truncateString(GameSettings::formatKeyMask(ctx.settings.keyManiaCol4), 13);
-
-                char colBuf[4][32];
-                for (int c = 0; c < 4; ++c) {
-                    std::snprintf(colBuf[c], sizeof(colBuf[c]), LOC(STR_KEY_COL_FMT), c + 1);
-                }
-                drawManiaBadge(hudX, hudY,        colBuf[0], sC1.c_str(), col1Active, Ui::rgba(50, 160, 255));
-                drawManiaBadge(hudX, hudY + 33.0f, colBuf[1], sC2.c_str(), col2Active, Ui::rgba(235, 235, 245));
-                drawManiaBadge(hudX, hudY + 66.0f, colBuf[2], sC3.c_str(), col3Active, Ui::rgba(235, 235, 245));
-                drawManiaBadge(hudX, hudY + 99.0f, colBuf[3], sC4.c_str(), col4Active, Ui::rgba(50, 160, 255));
-
-                float mStageX = panX + 158.0f;
-                float mStageY = panY + 34.0f;
-                float colW = 44.0f;
-                float mStageW = colW * 4.0f;
-                float mStageH = 132.0f;
-
-                Ui::panel(mStageX, mStageY, mStageW, mStageH, 0.15f, Ui::rgba(14, 12, 22, 250), Ui::rgba(60, 120, 180));
-
-                for (int c = 1; c < 4; ++c) {
-                    float lx = mStageX + c * colW;
-                    C2D_DrawLine(lx, mStageY, Ui::rgba(45, 40, 65), lx, mStageY + mStageH, Ui::rgba(45, 40, 65), 1.0f, 0.16f);
-                }
-
-                float judgeY = mStageY + mStageH - 24.0f;
-                C2D_DrawRectSolid(mStageX, judgeY, 0.18f, mStageW, 2.5f, ctx.clrWhite);
-
-                bool colActs[4] = { col1Active, col2Active, col3Active, col4Active };
-                u32 colClrs[4] = { Ui::rgba(50, 160, 255), Ui::rgba(240, 240, 255), Ui::rgba(240, 240, 255), Ui::rgba(50, 160, 255) };
-
-                for (int c = 0; c < 4; ++c) {
-                    float cx = mStageX + c * colW;
-                    if (colActs[c]) {
-                        C2D_DrawRectSolid(cx + 2.0f, judgeY + 2.5f, 0.19f, colW - 4.0f, 20.0f, colClrs[c]);
-                        Ui::glow(cx + colW * 0.5f, judgeY, 0.20f, 16.0f, Ui::withAlpha(colClrs[c], 140), 2);
-                    } else {
-                        C2D_DrawRectSolid(cx + 2.0f, judgeY + 2.5f, 0.19f, colW - 4.0f, 20.0f, Ui::rgba(30, 26, 45));
-                    }
-                }
-
-                int mTick = ctx.animTick % 80;
-                float noteSpd = 1.6f;
-
-                auto drawManiaNote = [&](int col, int offset) {
-                    float ny = mStageY + (((mTick + offset) % 80) * noteSpd);
-                    if (ny < judgeY) {
-                        float nx = mStageX + col * colW + 3.0f;
-                        C2D_DrawRectSolid(nx, ny, 0.22f, colW - 6.0f, 8.0f, colClrs[col]);
-                        drawRectOutline(nx, ny, colW - 6.0f, 8.0f, 1.0f, ctx.clrWhite, 0.23f);
-                    }
-                };
-
-                drawManiaNote(0, 60);
-                drawManiaNote(1, 40);
-                drawManiaNote(2, 20);
-                drawManiaNote(3, 5);
-            }
+            Ui::panel(panR_X + 10.0f, panY + 141.0f, panW - 20.0f, 24.0f, 0.18f, Ui::rgba(10, 14, 24, 245), Ui::rgba(45, 215, 165));
+            drawText(ctx.textBuf, panR_X + 18.0f, panY + 147.0f, 0.31f, Ui::rgba(185, 190, 215), "hidScanInput()", 0.20f);
+            drawRightAlignedText(ctx.textBuf, panR_X + panW - 16.0f, panY + 147.0f, 0.31f, Ui::rgba(45, 235, 160),
+                esp ? "OK Cero Retardo" : "OK Zero Latency", 0.20f);
         } else {
-            // Renderizado de las tarjetas de la categoría activa (Tabs 0, 2, 3, 4)
-            int count = tabItemCounts[activeTab];
-            float ch = (count == 6) ? 27.0f : ((count == 5) ? 31.0f : 38.0f);
-            float step = (count == 6) ? 29.5f : ((count == 5) ? 34.0f : 44.0f);
-            float startY = (count == 6) ? 31.0f : ((count == 5) ? 32.0f : 34.0f);
-            float titleYOff = (count == 6) ? 1.5f : ((count == 5) ? 2.5f : 4.0f);
-            float descYOff  = (count == 6) ? 14.5f : ((count == 5) ? 16.5f : 20.0f);
-            float ctrlYOff  = (count == 6) ? 4.0f : ((count == 5) ? 5.5f : 8.0f);
-            float swYOff    = (count == 6) ? 4.5f : ((count == 5) ? 6.5f : 11.0f);
-            float sldYOff   = (count == 6) ? 8.5f : ((count == 5) ? 10.5f : 14.0f);
+            // --- PESTAÑAS 0 (PANTALLA), 2 (AUDIO), 3 (JUEGO), 4 (VISUAL) ---
+            Ui::panel(panL_X, panY, panW, panH, 0.14f, Ui::rgba(16, 12, 30, 230), ctx.clrPrimary);
+            Ui::panel(panR_X, panY, panW, panH, 0.14f, Ui::rgba(14, 13, 28, 230), Ui::rgba(65, 195, 255));
 
-            for (int i = 0; i < count; ++i) {
-                int optIdx = tabItems[activeTab][i];
-                bool sel = (!ctx.calibrationMode && ctx.settingsOption == optIdx);
-                float dCard = depthShift(sel ? 3.5f : 1.2f);
-                float cy = startY + i * step;
-                float cw = 376.0f;
-                float cx = 12.0f + dCard;
+            // Panel Izquierdo: Previsualización en Vivo según la sección
+            if (activeTab == 0) {
+                drawTextWithShadow(ctx.textBuf, panL_X + 10.0f, panY + 7.0f, 0.33f, Ui::rgba(255, 85, 170),
+                    esp ? "ESQUEMA DE PANTALLAS 3DS" : "3DS SCREEN LAYOUT", 0.18f);
+                drawRightAlignedText(ctx.textBuf, panL_X + panW - 8.0f, panY + 7.5f, 0.29f, Ui::rgba(45, 235, 160),
+                    esp ? "EN VIVO" : "LIVE", 0.18f);
 
-                u32 cardBg = sel ? Ui::rgba(38, 30, 64, 245) : Ui::rgba(22, 19, 36, 225);
-                Ui::panel(cx, cy, cw, ch, 0.15f, cardBg, sel ? ctx.clrPrimary : 0);
-                if (sel) {
-                    C2D_DrawRectSolid(cx, cy, 0.22f, 3.5f, ch, ctx.clrCursor);
-                    C2D_DrawLine(cx + 4.0f, cy, ctx.clrWhite, cx + cw, cy, ctx.clrWhite, 1.0f, 0.22f);
+                // Mini Pantalla Superior 3DS
+                float topMiniX = panL_X + 30.0f, topMiniY = panY + 25.0f, topMiniW = 128.0f, topMiniH = 56.0f;
+                bool notesOnTop = !ctx.settings.playOnBottomScreen;
+                Ui::panel(topMiniX, topMiniY, topMiniW, topMiniH, 0.17f,
+                    notesOnTop ? Ui::rgba(38, 20, 56, 245) : Ui::rgba(18, 16, 30, 235),
+                    notesOnTop ? Ui::rgba(255, 65, 155) : Ui::rgba(75, 70, 105));
+                drawCenteredTextWithShadow(ctx.textBuf, topMiniX + topMiniW * 0.5f, topMiniY + 6.0f, 0.29f,
+                    notesOnTop ? Ui::rgba(255, 120, 190) : Ui::rgba(170, 165, 200),
+                    notesOnTop ? (esp ? "SUPERIOR: NOTAS AQUÍ" : "TOP: NOTES HERE") : (esp ? "SUPERIOR: ESTADÍSTICAS" : "TOP: HUD & STATS"), 0.20f);
+                if (notesOnTop) {
+                    C2D_DrawCircleSolid(topMiniX + 46.0f, topMiniY + 34.0f, 0.20f, 10.0f, Ui::rgba(255, 65, 150));
+                    drawRing(topMiniX + 46.0f, topMiniY + 34.0f, 10.0f, 1.5f, ctx.clrWhite, 16, 0.21f);
+                    float curMiniX = topMiniX + 12.0f + (ctx.cursorOsuX / 512.0f) * (topMiniW - 24.0f);
+                    float curMiniY = topMiniY + 18.0f + (ctx.cursorOsuY / 384.0f) * (topMiniH - 24.0f);
+                    C2D_DrawCircleSolid(curMiniX, curMiniY, 0.22f, 4.0f, ctx.clrCursor);
+                } else {
+                    drawCenteredText(ctx.textBuf, topMiniX + topMiniW * 0.5f, topMiniY + 28.0f, 0.30f, Ui::rgba(140, 215, 255),
+                        esp ? "Fondo + Precisión + Combo" : "BG + Accuracy + Combo", 0.20f);
                 }
 
-                // Título y valor según opción
-                if (optIdx == 0) { // Modo de Entrada
-                    drawText(ctx.textBuf, cx + 12.0f, cy + titleYOff, 0.44f, sel ? ctx.clrWhite : ctx.clrCursor, LOC(STR_SET_INPUT_MODE));
-                    drawText(ctx.textBuf, cx + 12.0f, cy + descYOff, 0.35f, ctx.clrMuted, LOC(STR_SET_INPUT_MODE_DESC));
-                    Ui::pill(cx + 205.0f, cy + ctrlYOff, 160.0f, (count == 6) ? 19.0f : 22.0f, 0.25f, ctx.settings.playOnBottomScreen ? Ui::rgba(35, 110, 75) : Ui::rgba(55, 45, 95));
-                    drawCenteredText(ctx.textBuf, cx + 285.0f, cy + ctrlYOff + ((count == 6) ? 9.5f : 11.0f), 0.36f, ctx.clrWhite, ctx.settings.getInputModeLabel(), 0.85f);
-                } else if (optIdx == 1) { // Tamaño Área Tablet
-                    drawText(ctx.textBuf, cx + 12.0f, cy + titleYOff, 0.44f, sel ? ctx.clrWhite : ctx.clrCursor, LOC(STR_SET_TABLET_SIZE));
-                    char desc[64];
-                    std::snprintf(desc, sizeof(desc), "%d%% (%dx%d px)", static_cast<int>(std::round(ctx.settings.tabletScale * 100.0f)), (int)rw, (int)rh);
-                    drawText(ctx.textBuf, cx + 12.0f, cy + descYOff, 0.35f, ctx.clr300, desc);
-                    float ratio = (ctx.settings.tabletScale - 0.30f) / 0.70f;
-                    Ui::sliderBar(cx + 230.0f, cy + sldYOff, 134.0f, 10.0f, 0.25f, ratio, sel ? ctx.clrCursor : ctx.clrPrimary, sel);
-                } else if (optIdx == 2) { // Posición X
-                    drawText(ctx.textBuf, cx + 12.0f, cy + titleYOff, 0.44f, sel ? ctx.clrWhite : ctx.clrCursor, LOC(STR_SET_POS_X));
-                    char desc[64]; std::snprintf(desc, sizeof(desc), "X = %.0f px  (C-Pad / Stylus)", ctx.settings.tabletCenterX);
-                    drawText(ctx.textBuf, cx + 12.0f, cy + descYOff, 0.35f, ctx.clr300, desc);
-                    float ratio = ctx.settings.tabletCenterX / 320.0f;
-                    Ui::sliderBar(cx + 230.0f, cy + sldYOff, 134.0f, 10.0f, 0.25f, ratio, sel ? ctx.clrCursor : ctx.clrPrimary, sel);
-                } else if (optIdx == 3) { // Posición Y
-                    drawText(ctx.textBuf, cx + 12.0f, cy + titleYOff, 0.44f, sel ? ctx.clrWhite : ctx.clrCursor, LOC(STR_SET_POS_Y));
-                    char desc[64]; std::snprintf(desc, sizeof(desc), "Y = %.0f px  (C-Pad / Stylus)", ctx.settings.tabletCenterY);
-                    drawText(ctx.textBuf, cx + 12.0f, cy + descYOff, 0.35f, ctx.clr300, desc);
-                    float ratio = ctx.settings.tabletCenterY / 240.0f;
-                    Ui::sliderBar(cx + 230.0f, cy + sldYOff, 134.0f, 10.0f, 0.25f, ratio, sel ? ctx.clrCursor : ctx.clrPrimary, sel);
-                } else if (optIdx == 8) { // Volumen Música
-                    drawText(ctx.textBuf, cx + 12.0f, cy + titleYOff, 0.44f, sel ? ctx.clrWhite : ctx.clrCursor, LOC(STR_SET_MUSIC_VOL));
-                    char desc[32]; std::snprintf(desc, sizeof(desc), "%d%%", ctx.settings.musicVolume);
-                    drawText(ctx.textBuf, cx + 12.0f, cy + descYOff, 0.35f, ctx.clr300, desc);
-                    float ratio = ctx.settings.musicVolume / 100.0f;
-                    Ui::sliderBar(cx + 230.0f, cy + sldYOff, 134.0f, 10.0f, 0.25f, ratio, sel ? ctx.clrCursor : ctx.clrPrimary, sel);
-                } else if (optIdx == 9) { // Volumen Hitsounds
-                    drawText(ctx.textBuf, cx + 12.0f, cy + titleYOff, 0.44f, sel ? ctx.clrWhite : ctx.clrCursor, LOC(STR_SET_SFX_VOL));
-                    char desc[32]; std::snprintf(desc, sizeof(desc), "%d%%", ctx.settings.sfxVolume);
-                    drawText(ctx.textBuf, cx + 12.0f, cy + descYOff, 0.35f, ctx.clr300, desc);
-                    float ratio = ctx.settings.sfxVolume / 100.0f;
-                    Ui::sliderBar(cx + 230.0f, cy + sldYOff, 134.0f, 10.0f, 0.25f, ratio, sel ? ctx.clrCursor : ctx.clrPrimary, sel);
-                } else if (optIdx == 10) { // Offset de Audio
-                    drawText(ctx.textBuf, cx + 12.0f, cy + titleYOff, 0.44f, sel ? ctx.clrWhite : ctx.clrCursor, LOC(STR_SET_OFFSET));
-                    char desc[64]; std::snprintf(desc, sizeof(desc), LOC(STR_OFFSET_CALIB_HINT), ctx.settings.audioOffsetMs);
-                    drawText(ctx.textBuf, cx + 12.0f, cy + descYOff, 0.35f, ctx.clr100, desc);
-                    float ratio = (ctx.settings.audioOffsetMs + 150) / 300.0f;
-                    Ui::sliderBar(cx + 230.0f, cy + sldYOff, 134.0f, 10.0f, 0.25f, ratio, sel ? ctx.clrCursor : ctx.clr300, sel);
-                } else if (optIdx == 11) { // Hitsounds del Beatmap
-                    drawText(ctx.textBuf, cx + 12.0f, cy + titleYOff, 0.44f, sel ? ctx.clrWhite : ctx.clrCursor, LOC(STR_SET_MAP_HITSOUNDS));
-                    drawText(ctx.textBuf, cx + 12.0f, cy + descYOff, 0.35f, ctx.clrMuted, LOC(STR_SET_MAP_HITSOUNDS_DESC));
-                    Ui::toggleSwitch(cx + 312.0f, cy + swYOff, 48.0f, 18.0f, 0.25f, ctx.settings.beatmapHitsounds, ctx.clr100);
-                } else if (optIdx == 22) { // Idioma / Language
-                    drawText(ctx.textBuf, cx + 12.0f, cy + titleYOff, 0.44f, sel ? ctx.clrWhite : ctx.clrCursor, LOC(STR_SET_LANGUAGE));
-                    drawText(ctx.textBuf, cx + 12.0f, cy + descYOff, 0.35f, ctx.clrMuted, LOC(STR_SET_LANGUAGE_DESC));
-                    u32 lBg = Ui::rgba(45, 115, 215);
-                    Ui::pill(cx + 205.0f, cy + ctrlYOff, 160.0f, (count == 6) ? 19.0f : 22.0f, 0.25f, lBg);
-                    drawCenteredText(ctx.textBuf, cx + 285.0f, cy + ctrlYOff + ((count == 6) ? 9.5f : 11.0f), 0.36f, ctx.clrWhite, ctx.settings.getLanguageName(), 0.85f);
-                } else if (optIdx == 12) { // Modo de Juego
-                    drawText(ctx.textBuf, cx + 12.0f, cy + titleYOff, 0.44f, sel ? ctx.clrWhite : ctx.clrCursor, LOC(STR_SET_MAIN_MODE));
-                    drawText(ctx.textBuf, cx + 12.0f, cy + descYOff, 0.35f, ctx.clrMuted, LOC(STR_SET_MAIN_MODE_DESC));
-                    u32 mBg = (ctx.settings.gameMode == MODE_TAIKO) ? Ui::rgba(180, 45, 45) : ((ctx.settings.gameMode == MODE_CATCH) ? Ui::rgba(35, 160, 85) : ((ctx.settings.gameMode == MODE_MANIA) ? Ui::rgba(140, 35, 175) : Ui::rgba(65, 45, 115)));
-                    Ui::pill(cx + 205.0f, cy + ctrlYOff, 160.0f, (count == 6) ? 19.0f : 22.0f, 0.25f, mBg);
-                    drawCenteredText(ctx.textBuf, cx + 285.0f, cy + ctrlYOff + ((count == 6) ? 9.5f : 11.0f), 0.36f, ctx.clrWhite, ctx.settings.getGameModeName(), 0.85f);
-                } else if (optIdx == 13) { // Skin Activo
-                    drawText(ctx.textBuf, cx + 12.0f, cy + titleYOff, 0.44f, sel ? ctx.clrWhite : ctx.clrCursor, LOC(STR_SET_ACTIVE_SKIN));
-                    char desc[64]; std::snprintf(desc, sizeof(desc), "%s (%d/%d)", truncateString(activeSkin.name, 22).c_str(), ctx.settings.skinIndex + 1, (int)ctx.skinMgr.skins.size());
-                    drawText(ctx.textBuf, cx + 12.0f, cy + descYOff, 0.35f, ctx.clr300, desc);
-                    for (size_t c = 0; c < std::min((size_t)4, activeSkin.comboColors.size()); ++c) {
-                        u32 cc = C2D_Color32(activeSkin.comboColors[c].r, activeSkin.comboColors[c].g, activeSkin.comboColors[c].b, 255);
-                        C2D_DrawCircleSolid(cx + 276.0f + c * 20.0f, cy + ctrlYOff + ((count == 6) ? 9.5f : 11.0f), 0.25f, 6.5f, cc);
-                    }
-                } else if (optIdx == 14) { // Sliders Serpiente (Snaking)
-                    drawText(ctx.textBuf, cx + 12.0f, cy + titleYOff, 0.44f, sel ? ctx.clrWhite : ctx.clrCursor, LOC(STR_SET_SNAKING));
-                    drawText(ctx.textBuf, cx + 12.0f, cy + descYOff, 0.35f, ctx.clrMuted, LOC(STR_SET_SNAKING_DESC));
-                    Ui::toggleSwitch(cx + 312.0f, cy + swYOff, 48.0f, 18.0f, 0.25f, ctx.settings.snakingSliders, ctx.clr100);
-                } else if (optIdx == 15) { // Combo Bursts (Mascota)
-                    drawText(ctx.textBuf, cx + 12.0f, cy + titleYOff, 0.44f, sel ? ctx.clrWhite : ctx.clrCursor, LOC(STR_SET_BURSTS));
-                    drawText(ctx.textBuf, cx + 12.0f, cy + descYOff, 0.35f, ctx.clrMuted, LOC(STR_SET_BURSTS_DESC));
-                    Ui::toggleSwitch(cx + 312.0f, cy + swYOff, 48.0f, 18.0f, 0.25f, ctx.settings.comboBursts, ctx.clr100);
-                } else if (optIdx == 20) { // Efecto Visual Golpes 300
-                    drawText(ctx.textBuf, cx + 12.0f, cy + titleYOff, 0.44f, sel ? ctx.clrWhite : ctx.clrCursor, LOC(STR_SET_HIT300));
-                    drawText(ctx.textBuf, cx + 12.0f, cy + descYOff, 0.35f, ctx.clrMuted, LOC(STR_SET_HIT300_DESC));
-                    Ui::toggleSwitch(cx + 312.0f, cy + swYOff, 48.0f, 18.0f, 0.25f, ctx.settings.showHit300, ctx.clr100);
-                } else if (optIdx == 16) { // Fondo Taiko
-                    drawText(ctx.textBuf, cx + 12.0f, cy + titleYOff, 0.44f, sel ? ctx.clrWhite : ctx.clrCursor, LOC(STR_SET_TAIKO_BG));
-                    drawText(ctx.textBuf, cx + 12.0f, cy + descYOff, 0.35f, ctx.clrMuted, LOC(STR_SET_TAIKO_BG_DESC));
-                    u32 bClr = (ctx.settings.taikoBgMode == 0) ? Ui::rgba(225, 145, 25) : ((ctx.settings.taikoBgMode == 1) ? Ui::rgba(45, 130, 215) : Ui::rgba(165, 55, 185));
-                    Ui::pill(cx + 205.0f, cy + ctrlYOff, 160.0f, 22.0f, 0.25f, bClr);
-                    drawCenteredText(ctx.textBuf, cx + 285.0f, cy + ctrlYOff + 11.0f, 0.34f, ctx.clrWhite, ctx.settings.getTaikoBgModeName(), 0.85f);
-                } else if (optIdx == 17) { // Tamaño del Cursor
-                    drawText(ctx.textBuf, cx + 12.0f, cy + titleYOff, 0.44f, sel ? ctx.clrWhite : ctx.clrCursor, LOC(STR_SET_CURSOR_SIZE));
-                    char desc[32]; std::snprintf(desc, sizeof(desc), "%.1fx", ctx.settings.cursorScale);
-                    drawText(ctx.textBuf, cx + 12.0f, cy + descYOff, 0.35f, ctx.clr300, desc);
-                    float ratio = (ctx.settings.cursorScale - 0.5f) / 1.5f;
-                    Ui::sliderBar(cx + 230.0f, cy + sldYOff, 134.0f, 10.0f, 0.25f, ratio, sel ? ctx.clrCursor : ctx.clrPrimary, sel);
-                } else if (optIdx == 18) { // Oscurecimiento Fondo
-                    drawText(ctx.textBuf, cx + 12.0f, cy + titleYOff, 0.44f, sel ? ctx.clrWhite : ctx.clrCursor, LOC(STR_SET_BG_DIM));
-                    char desc[32]; std::snprintf(desc, sizeof(desc), "%d%%", ctx.settings.bgDim);
-                    drawText(ctx.textBuf, cx + 12.0f, cy + descYOff, 0.35f, ctx.clr300, desc);
-                    float ratio = (ctx.settings.bgDim - 20) / 80.0f;
-                    Ui::sliderBar(cx + 230.0f, cy + sldYOff, 134.0f, 10.0f, 0.25f, ratio, sel ? ctx.clrCursor : ctx.clrPrimary, sel);
-                } else if (optIdx == 19) { // Videos de Fondo
-                    drawText(ctx.textBuf, cx + 12.0f, cy + titleYOff, 0.44f, sel ? ctx.clrWhite : ctx.clrCursor, LOC(STR_SET_VIDEOS));
-                    drawText(ctx.textBuf, cx + 12.0f, cy + descYOff, 0.35f, ctx.clrMuted, LOC(STR_SET_VIDEOS_DESC));
-                    Ui::toggleSwitch(cx + 312.0f, cy + swYOff, 48.0f, 18.0f, 0.25f, ctx.settings.enableVideo, ctx.clr100);
-                } else if (optIdx == 21) { // Descargas Multijugador
-                    drawText(ctx.textBuf, cx + 12.0f, cy + titleYOff, 0.44f, sel ? ctx.clrWhite : ctx.clrCursor, LOC(STR_SET_MULTI_DL));
-                    drawText(ctx.textBuf, cx + 12.0f, cy + descYOff, 0.35f, ctx.clrMuted, LOC(STR_SET_MULTI_DL_DESC));
-                    u32 dClr = (ctx.settings.multiDlOption == 1) ? Ui::rgba(45, 130, 215) : Ui::rgba(110, 95, 140);
-                    Ui::pill(cx + 185.0f, cy + ctrlYOff, 180.0f, 22.0f, 0.25f, dClr);
-                    drawCenteredText(ctx.textBuf, cx + 275.0f, cy + ctrlYOff + 11.0f, 0.34f, ctx.clrWhite, ctx.settings.getMultiDlOptionName(), 0.85f);
+                // Mini Pantalla Inferior 3DS (con representación proporcional del área Tablet)
+                float botMiniX = panL_X + 42.0f, botMiniY = panY + 87.0f, botMiniW = 104.0f, botMiniH = 60.0f;
+                Ui::panel(botMiniX, botMiniY, botMiniW, botMiniH, 0.17f,
+                    !notesOnTop ? Ui::rgba(24, 48, 42, 245) : Ui::rgba(20, 16, 36, 245),
+                    !notesOnTop ? Ui::rgba(45, 235, 160) : Ui::rgba(165, 95, 255));
+
+                if (!notesOnTop) {
+                    drawCenteredTextWithShadow(ctx.textBuf, botMiniX + botMiniW * 0.5f, botMiniY + 6.0f, 0.29f, Ui::rgba(45, 235, 160),
+                        esp ? "INFERIOR: TOCA NOTAS 1:1" : "BOTTOM: DIRECT TOUCH 1:1", 0.20f);
+                    C2D_DrawCircleSolid(botMiniX + 52.0f, botMiniY + 36.0f, 0.20f, 11.0f, Ui::rgba(255, 65, 150));
+                    drawRing(botMiniX + 52.0f, botMiniY + 36.0f, 11.0f, 1.5f, ctx.clrWhite, 16, 0.21f);
+                } else {
+                    float mRx = botMiniX + (rx / 320.0f) * botMiniW;
+                    float mRy = botMiniY + (ry / 240.0f) * botMiniH;
+                    float mRw = (rw / 320.0f) * botMiniW;
+                    float mRh = (rh / 240.0f) * botMiniH;
+                    C2D_DrawRectSolid(mRx, mRy, 0.19f, mRw, mRh, Ui::rgba(255, 65, 150, 90));
+                    drawRectOutline(mRx, mRy, mRw, mRh, 1.5f, Ui::rgba(255, 95, 175), 0.20f);
+                    drawCenteredTextWithShadow(ctx.textBuf, botMiniX + botMiniW * 0.5f, botMiniY + 6.0f, 0.28f, Ui::rgba(220, 190, 255),
+                        esp ? "ÁREA TABLET ACTIVA" : "ACTIVE TABLET AREA", 0.21f);
                 }
+
+                const char* modeBadgeStr = ctx.settings.playOnBottomScreen
+                    ? (esp ? "TÁCTIL DIRECTO ABAJO" : "DIRECT TOUCH BOTTOM")
+                    : (ctx.settings.tapWithStylus ? (esp ? "TABLET + TAP ARRIBA" : "TABLET + TAP TOP") : (esp ? "HÍBRIDO PC ARRIBA" : "PC HYBRID TOP"));
+                drawCenteredTextWithShadow(ctx.textBuf, panL_X + panW * 0.5f, panY + 154.0f, 0.32f, Ui::rgba(65, 220, 255), modeBadgeStr, 0.20f);
+            } else if (activeTab == 2) {
+                drawTextWithShadow(ctx.textBuf, panL_X + 10.0f, panY + 7.0f, 0.33f, Ui::rgba(255, 85, 170),
+                    esp ? "MONITOR DE AUDIO Y COMPÁS" : "AUDIO & TIMING MONITOR", 0.18f);
+                float boxX = panL_X + 10.0f, boxY = panY + 24.0f, boxW = panW - 20.0f, boxH = 120.0f;
+                Ui::panel(boxX, boxY, boxW, boxH, 0.16f, Ui::rgba(8, 6, 16, 245), Ui::rgba(55, 42, 85));
+
+                float pulse = ctx.getBpmPulse();
+                float cx = boxX + boxW * 0.5f, cy = boxY + 44.0f;
+                float r = 18.0f + pulse * 6.0f;
+                Ui::glow(cx, cy, 0.18f, r + 8.0f, Ui::rgba(255, 65, 150, 110), 3);
+                C2D_DrawCircleSolid(cx, cy, 0.20f, r, Ui::rgba(255, 65, 150));
+                drawRing(cx, cy, r, 2.0f, ctx.clrWhite, 24, 0.21f);
+                drawCenteredTextWithShadow(ctx.textBuf, cx, cy - 5.0f, 0.34f, ctx.clrWhite, "osu!", 0.22f);
+
+                // Escala visual de Offset (-150 ms .. 0 .. +150 ms)
+                float barX = boxX + 14.0f, barY = boxY + 86.0f, barW = boxW - 28.0f;
+                C2D_DrawRectSolid(barX, barY, 0.19f, barW, 6.0f, Ui::rgba(35, 30, 55));
+                C2D_DrawRectSolid(barX + barW * 0.5f - 1.0f, barY - 3.0f, 0.20f, 2.0f, 12.0f, ctx.clrWhite);
+                float needleNorm = (ctx.settings.audioOffsetMs + 150.0f) / 300.0f;
+                float needleX = barX + std::max(0.0f, std::min(1.0f, needleNorm)) * barW;
+                C2D_DrawCircleSolid(needleX, barY + 3.0f, 0.22f, 5.5f, Ui::rgba(45, 235, 160));
+                char offStr[48];
+                std::snprintf(offStr, sizeof(offStr), "Offset: %+d ms", ctx.settings.audioOffsetMs);
+                drawCenteredText(ctx.textBuf, cx, boxY + 100.0f, 0.32f, Ui::rgba(45, 235, 160), offStr, 0.22f);
+
+                char volSummary[64];
+                std::snprintf(volSummary, sizeof(volSummary), "%s: %d%%   ·   SFX: %d%%",
+                    esp ? "Música" : "Music", ctx.settings.musicVolume, ctx.settings.sfxVolume);
+                drawCenteredText(ctx.textBuf, panL_X + panW * 0.5f, panY + 152.0f, 0.32f, Ui::rgba(195, 190, 225), volSummary, 0.20f);
+            } else if (activeTab == 3) {
+                drawTextWithShadow(ctx.textBuf, panL_X + 10.0f, panY + 7.0f, 0.33f, Ui::rgba(255, 85, 170),
+                    esp ? "SIMULACIÓN DE JUGABILIDAD" : "GAMEPLAY SIMULATION", 0.18f);
+                float boxX = panL_X + 10.0f, boxY = panY + 24.0f, boxW = panW - 20.0f, boxH = 120.0f;
+                Ui::panel(boxX, boxY, boxW, boxH, 0.16f, Ui::rgba(8, 6, 16, 245), Ui::rgba(55, 42, 85));
+
+                float animP = (ctx.animTick % 90) / 90.0f;
+                float sEnd = ctx.settings.snakingSliders ? (boxX + 36.0f + animP * 92.0f) : (boxX + 128.0f);
+                Ui::pill(boxX + 24.0f, boxY + 42.0f, std::max(24.0f, sEnd - (boxX + 24.0f)), 24.0f, 0.19f, Ui::rgba(255, 65, 150, 160));
+                C2D_DrawCircleSolid(boxX + 36.0f, boxY + 54.0f, 0.21f, 13.0f, Ui::rgba(255, 65, 150));
+                drawRing(boxX + 36.0f, boxY + 54.0f, 13.0f, 1.8f, ctx.clrWhite, 20, 0.22f);
+                drawCenteredText(ctx.textBuf, boxX + 36.0f, boxY + 48.0f, 0.36f, ctx.clrWhite, "1", 0.23f);
+
+                if (ctx.settings.showHit300) {
+                    drawCenteredTextWithShadow(ctx.textBuf, boxX + 122.0f, boxY + 20.0f, 0.40f, Ui::rgba(80, 225, 255), "300", 0.23f);
+                }
+                drawCenteredText(ctx.textBuf, boxX + boxW * 0.5f, boxY + 94.0f, 0.33f, Ui::rgba(45, 235, 160),
+                    ctx.settings.getGameModeName(), 0.22f);
+                drawCenteredText(ctx.textBuf, panL_X + panW * 0.5f, panY + 152.0f, 0.32f, Ui::rgba(195, 190, 225),
+                    ctx.settings.getLanguageName(), 0.20f);
+            } else {
+                drawTextWithShadow(ctx.textBuf, panL_X + 10.0f, panY + 7.0f, 0.33f, Ui::rgba(255, 85, 170),
+                    esp ? "PREVISUALIZACIÓN VISUAL" : "LIVE VISUAL PREVIEW", 0.18f);
+                float boxX = panL_X + 10.0f, boxY = panY + 24.0f, boxW = panW - 20.0f, boxH = 120.0f;
+                Ui::panel(boxX, boxY, boxW, boxH, 0.16f, Ui::rgba(8, 6, 16, 245), Ui::rgba(55, 42, 85));
+                if (ctx.bgTex.loaded) {
+                    ctx.bgTex.drawRect(boxX + 2.0f, boxY + 2.0f, boxW - 4.0f, boxH - 4.0f, 0.17f, 255);
+                }
+                u8 previewDim = static_cast<u8>((ctx.settings.bgDim * 235) / 100);
+                C2D_DrawRectSolid(boxX + 2.0f, boxY + 2.0f, 0.18f, boxW - 4.0f, boxH - 4.0f, Ui::rgba(10, 8, 18, previewDim));
+                if (ctx.settings.showPlayfieldBorder) {
+                    drawRectOutline(boxX + 10.0f, boxY + 10.0f, boxW - 20.0f, boxH - 20.0f, 1.5f, Ui::rgba(255, 255, 255, 190), 0.19f);
+                }
+                // Colores del skin activo y cursor a escala real
+                for (size_t c = 0; c < std::min((size_t)4, activeSkin.comboColors.size()); ++c) {
+                    u32 cc = C2D_Color32(activeSkin.comboColors[c].r, activeSkin.comboColors[c].g, activeSkin.comboColors[c].b, 255);
+                    C2D_DrawCircleSolid(boxX + 34.0f + c * 26.0f, boxY + 46.0f, 0.20f, 9.0f, cc);
+                    drawRing(boxX + 34.0f + c * 26.0f, boxY + 46.0f, 9.0f, 1.4f, ctx.clrWhite, 16, 0.21f);
+                }
+                float cRad = 7.0f * ctx.settings.cursorScale;
+                Ui::glow(boxX + 128.0f, boxY + 80.0f, 0.21f, cRad * 1.8f, Ui::withAlpha(ctx.clrCursor, 130), 2);
+                C2D_DrawCircleSolid(boxX + 128.0f, boxY + 80.0f, 0.22f, cRad, ctx.clrCursor);
+                C2D_DrawCircleSolid(boxX + 128.0f, boxY + 80.0f, 0.23f, 2.2f, ctx.clrWhite);
+
+                char visStr[64];
+                std::snprintf(visStr, sizeof(visStr), "Cursor: %.1fx   ·   Dim: %d%%", ctx.settings.cursorScale, ctx.settings.bgDim);
+                drawCenteredText(ctx.textBuf, panL_X + panW * 0.5f, panY + 152.0f, 0.32f, Ui::rgba(195, 190, 225), visStr, 0.20f);
             }
+
+            // Panel Derecho: Inspector claro del apartado seleccionado + progreso en la sección
+            std::string mTitle, mSub, mVal, mDet1, mDet2;
+            getOptionMeta(ctx.settingsOption, mTitle, mSub, mVal, mDet1, mDet2);
+            int curRow = getRowInTab(activeTab, ctx.settingsOption) + 1;
+            int totRow = tabItemCounts[activeTab];
+            char idxBadge[32];
+            std::snprintf(idxBadge, sizeof(idxBadge), "%d / %d", curRow, totRow);
+
+            drawTextWithShadow(ctx.textBuf, panR_X + 10.0f, panY + 7.0f, 0.32f, Ui::rgba(65, 205, 255),
+                esp ? "DETALLE DEL APARTADO" : "SETTING INSPECTOR", 0.18f);
+            drawRightAlignedText(ctx.textBuf, panR_X + panW - 10.0f, panY + 7.5f, 0.31f, Ui::rgba(255, 110, 185), idxBadge, 0.18f);
+
+            Ui::panel(panR_X + 8.0f, panY + 24.0f, panW - 16.0f, 52.0f, 0.16f, Ui::rgba(24, 18, 44, 240), ctx.clrPrimary);
+            drawTextWithShadow(ctx.textBuf, panR_X + 15.0f, panY + 29.0f, 0.37f, ctx.clrWhite, truncateString(mTitle, 24).c_str(), 0.20f);
+            Ui::pill(panR_X + 14.0f, panY + 49.0f, panW - 28.0f, 20.0f, 0.19f, Ui::rgba(45, 32, 78, 245));
+            drawCenteredTextWithShadow(ctx.textBuf, panR_X + panW * 0.5f, panY + 59.0f, 0.35f, Ui::rgba(65, 235, 195), mVal.c_str(), 0.21f);
+
+            // Explicación clara dividida en líneas legibles
+            auto drawWrapped = [&](float startY, const std::string& text, u32 clr) {
+                const size_t maxChars = 31;
+                if (text.size() <= maxChars) {
+                    drawText(ctx.textBuf, panR_X + 10.0f, startY, 0.30f, clr, text.c_str(), 0.20f);
+                } else {
+                    size_t split = text.rfind(' ', maxChars);
+                    if (split == std::string::npos) split = maxChars;
+                    std::string l1 = text.substr(0, split);
+                    std::string l2 = text.substr(split + (text[split] == ' ' ? 1 : 0));
+                    drawText(ctx.textBuf, panR_X + 10.0f, startY, 0.30f, clr, l1.c_str(), 0.20f);
+                    drawText(ctx.textBuf, panR_X + 10.0f, startY + 13.0f, 0.30f, clr, truncateString(l2, 33).c_str(), 0.20f);
+                }
+            };
+            drawWrapped(panY + 84.0f, mDet1, Ui::rgba(225, 220, 245));
+            drawWrapped(panY + 116.0f, mDet2, Ui::rgba(155, 205, 245));
+
+            Ui::panel(panR_X + 8.0f, panY + 145.0f, panW - 16.0f, 22.0f, 0.17f, Ui::rgba(10, 12, 22, 240), Ui::rgba(55, 48, 85));
+            drawCenteredText(ctx.textBuf, panR_X + panW * 0.5f, panY + 156.0f, 0.29f, Ui::rgba(180, 175, 210),
+                esp ? "Desliza la lista táctil o usa Arriba/Abajo" : "Scroll touch list or use D-Pad Up/Down", 0.20f);
         }
 
-        if (ctx.capturingKeyIndex != -1 && activeTab != 1) {
-            float dCap = eyeSign * ctx.slider3D * 5.0f;
-            C2D_DrawRectSolid(0.0f, 0.0f, 0.92f, 400.0f, 240.0f, Ui::rgba(8, 6, 16, 215));
-            Ui::panel(40.0f + dCap, 50.0f, 320.0f, 130.0f, 0.94f, Ui::rgba(26, 20, 44, 250), ctx.clrCursor);
-            int cIdx = std::max(0, std::min(3, ctx.capturingKeyIndex - 4));
-            const char* capModeName = (ctx.settingsControlsMode == MODE_TAIKO) ? "TAIKO" : ((ctx.settingsControlsMode == MODE_CATCH) ? "CATCH" : ((ctx.settingsControlsMode == MODE_MANIA) ? "MANIA" : "STANDARD"));
-            const char* capRowName = "CONTROL";
-            char maniaCap[4][32];
-            if (ctx.settingsControlsMode == MODE_STD) {
-                const char* n[4] = { LOC(STR_KEY_K1), LOC(STR_KEY_K2), LOC(STR_KEY_SMOKE), LOC(STR_KEY_RETRY) };
-                capRowName = n[cIdx];
-            } else if (ctx.settingsControlsMode == MODE_TAIKO) {
-                const char* n[4] = { LOC(STR_KEY_DON_L), LOC(STR_KEY_DON_R), LOC(STR_KEY_KAT_L), LOC(STR_KEY_KAT_R) };
-                capRowName = n[cIdx];
-            } else if (ctx.settingsControlsMode == MODE_CATCH) {
-                const char* n[4] = { LOC(STR_KEY_MOVE_L), LOC(STR_KEY_MOVE_R), LOC(STR_KEY_DASH), LOC(STR_KEY_RETRY) };
-                capRowName = n[cIdx];
-            } else if (ctx.settingsControlsMode == MODE_MANIA) {
-                for (int c = 0; c < 4; ++c) {
-                    std::snprintf(maniaCap[c], sizeof(maniaCap[c]), LOC(STR_KEY_COL_FMT), c + 1);
-                }
-                capRowName = maniaCap[cIdx];
-            }
-            char capHead[64];
-            std::snprintf(capHead, sizeof(capHead), "%s [%s]", LOC(STR_CTRL_ASSIGNING), capModeName);
-            drawCenteredText(ctx.textBuf, 200.0f + dCap, 72.0f, 0.48f, ctx.clrCursor, capHead, 0.99f);
-            drawCenteredText(ctx.textBuf, 200.0f + dCap, 96.0f, 0.44f, ctx.clrWhite, capRowName, 0.99f);
-            drawCenteredText(ctx.textBuf, 200.0f + dCap, 126.0f, 0.38f, ctx.clr100, LOC(STR_CTRL_PRESS_ANY), 0.99f);
-            drawCenteredText(ctx.textBuf, 200.0f + dCap, 152.0f, 0.32f, ctx.clrMuted, LOC(STR_CTRL_CANCEL_HINT), 0.99f);
-        }
-
+        // Modal de Calibración en Pantalla Superior si está activo
         if (ctx.calibrationMode) {
-            float dCal = eyeSign * ctx.slider3D * 4.5f;
-            C2D_DrawRectSolid(0.0f, 0.0f, 0.88f, 400.0f, 240.0f, Ui::rgba(8, 6, 16, 185));
-            Ui::panel(30.0f + dCal, 52.0f, 340.0f, 128.0f, 0.90f, Ui::rgba(22, 18, 38, 250), ctx.clr300);
-            drawCenteredText(ctx.textBuf, 200.0f + dCal, 70.0f, 0.50f, ctx.clrCursor, LOC(STR_CALIB_TITLE), 0.98f);
-            drawCenteredText(ctx.textBuf, 200.0f + dCal, 94.0f, 0.40f, ctx.clrWhite, LOC(STR_CALIB_DESC), 0.98f);
+            float dCal = depthShift(4.0f);
+            C2D_DrawRectSolid(0.0f, 0.0f, 0.88f, 400.0f, 240.0f, Ui::rgba(8, 6, 16, 205));
+            Ui::panel(30.0f + dCal, 46.0f, 340.0f, 138.0f, 0.90f, Ui::rgba(22, 16, 40, 250), Ui::rgba(45, 235, 160));
+            drawCenteredTextWithShadow(ctx.textBuf, 200.0f + dCal, 62.0f, 0.48f, Ui::rgba(45, 235, 160), LOC(STR_CALIB_TITLE), 0.95f);
+            drawCenteredText(ctx.textBuf, 200.0f + dCal, 84.0f, 0.36f, ctx.clrWhite, LOC(STR_CALIB_DESC), 0.95f);
 
             u64 elapsed = osGetTime() - ctx.calibStartTick;
             float beatPhase = (elapsed % 500) / 500.0f;
-            float pulseR = 14.0f * (1.0f - beatPhase * 0.55f);
-            Ui::ring(200.0f + dCal, 122.0f, 0.96f, pulseR, 2.0f, ctx.clr300, 20);
+            float pulseR = 16.0f * (1.0f - beatPhase * 0.50f);
+            Ui::ring(200.0f + dCal, 116.0f, 0.96f, pulseR, 2.5f, ctx.clrPrimary, 24);
 
             char calStr[96];
             std::snprintf(calStr, sizeof(calStr), LOC(STR_CALIB_STATUS_FMT),
                 static_cast<int>(ctx.calibSamples.size()), ctx.settings.audioOffsetMs);
-            drawCenteredText(ctx.textBuf, 200.0f + dCal, 146.0f, 0.44f, ctx.clr100, calStr, 0.98f);
-            drawCenteredText(ctx.textBuf, 200.0f + dCal, 166.0f, 0.38f, ctx.clr300, LOC(STR_CALIB_APPLY_HINT), 0.98f);
+            drawCenteredTextWithShadow(ctx.textBuf, 200.0f + dCal, 144.0f, 0.42f, Ui::rgba(65, 215, 255), calStr, 0.96f);
+            drawCenteredText(ctx.textBuf, 200.0f + dCal, 164.0f, 0.33f, Ui::rgba(200, 195, 225), LOC(STR_CALIB_APPLY_HINT), 0.96f);
         }
 
-        Ui::gradV(0.0f, 212.0f, 400.0f, 28.0f, 0.3f, Ui::rgba(18, 15, 32, 170), Ui::rgba(18, 15, 32, 250));
-        drawText(ctx.textBuf, 8.0f, 219.0f, 0.37f, ctx.clr300, LOC(STR_SET_HELP_BAR));
+        // 3. Pie de Pantalla Superior con insignias circulares estilo consola (212..240)
+        Ui::gradV(0.0f, 212.0f, 400.0f, 28.0f, 0.30f, Ui::rgba(14, 10, 26, 210), Ui::rgba(10, 7, 20, 250));
+        C2D_DrawCircleSolid(20.0f, 226.0f, 0.33f, 7.5f, Ui::rgba(235, 45, 65));
+        drawCenteredTextWithShadow(ctx.textBuf, 20.0f, 226.0f, 0.31f, ctx.clrWhite, "B", 0.35f);
+        drawTextWithShadow(ctx.textBuf, 32.0f, 220.0f, 0.32f, Ui::rgba(225, 220, 245), esp ? "Volver" : "Back", 0.34f);
 
-        float testR = 6.0f * ctx.settings.cursorScale;
-        float dCur = eyeSign * ctx.slider3D * 4.5f;
-        Ui::glow(osuToTopX(ctx.cursorOsuX) + dCur, osuToTopY(ctx.cursorOsuY), 0.94f, testR * 1.9f, Ui::withAlpha(ctx.clrCursor, 110), 3);
-        C2D_DrawCircleSolid(osuToTopX(ctx.cursorOsuX) + dCur, osuToTopY(ctx.cursorOsuY), 0.95f, testR, ctx.clrCursor);
-        C2D_DrawCircleSolid(osuToTopX(ctx.cursorOsuX) + dCur, osuToTopY(ctx.cursorOsuY), 0.97f, 2.0f, ctx.clrWhite);
+        C2D_DrawCircleSolid(88.0f, 226.0f, 0.33f, 7.5f, Ui::rgba(35, 195, 115));
+        drawCenteredTextWithShadow(ctx.textBuf, 88.0f, 226.0f, 0.31f, ctx.clrWhite, "X", 0.35f);
+        const char* xHint = (activeTab == 1) ? (esp ? "Restablecer" : "Default") : ((activeTab == 0) ? (esp ? "Editor Área" : "Area Editor") : (esp ? "Calibrar" : "Calibrate"));
+        drawTextWithShadow(ctx.textBuf, 100.0f, 220.0f, 0.32f, Ui::rgba(225, 220, 245), xHint, 0.34f);
+
+        C2D_DrawCircleSolid(186.0f, 226.0f, 0.33f, 7.5f, Ui::rgba(235, 175, 40));
+        drawCenteredTextWithShadow(ctx.textBuf, 186.0f, 226.0f, 0.31f, ctx.clrBgDark, "Y", 0.35f);
+        drawTextWithShadow(ctx.textBuf, 198.0f, 220.0f, 0.32f, Ui::rgba(225, 220, 245), esp ? "Centrar Área" : "Reset Area", 0.34f);
+
+        drawRightAlignedText(ctx.textBuf, 392.0f, 220.0f, 0.31f, Ui::rgba(135, 130, 165), "400x240 (5:3)", 0.34f);
         Ui::drawTransition(400.0f, 240.0f, ctx.screenFade, ctx.clrPrimary);
     }
 
-    // --- PANTALLA INFERIOR: CONTROL TÁCTIL INTERACTIVO + EDITOR DE ÁREA ---
+    // =========================================================================
+    // PANTALLA INFERIOR (320x240) — MENÚ DESPLAZABLE POR SECCIÓN + EDITOR VISUAL
+    // =========================================================================
     C2D_TargetClear(ctx.bottomScreen, ctx.clrTabletBg);
     C2D_SceneBegin(ctx.bottomScreen);
 
-    Ui::backdrop(320.0f, 240.0f, static_cast<float>(ctx.animTick), Ui::rgba(26, 20, 44), Ui::rgba(12, 10, 22), ctx.clrPrimary, 0.02f);
-    if (ctx.bgTex.loaded) {
-        ctx.bgTex.drawRect(0.0f, 0.0f, 320.0f, 240.0f, 0.03f, 60);
-        C2D_DrawRectSolid(0.0f, 0.0f, 0.04f, 320.0f, 240.0f, Ui::rgba(14, 11, 24, 180));
+    Ui::backdrop(320.0f, 240.0f, static_cast<float>(ctx.animTick), Ui::rgba(20, 14, 36), Ui::rgba(10, 7, 18), ctx.clrPrimary, 0.01f);
+
+    if (s_tabletEditorOpen) {
+        // --- LIENZO INTERACTIVO DE PANTALLA COMPLETA PARA AJUSTAR EL ÁREA DE TABLET ---
+        C2D_DrawRectSolid(0.0f, 0.0f, 0.05f, 320.0f, 240.0f, Ui::rgba(12, 9, 22, 245));
+        for (int gx = 40; gx < 320; gx += 40) {
+            C2D_DrawLine(gx, 0.0f, Ui::rgba(45, 38, 70, 120), gx, 240.0f, Ui::rgba(45, 38, 70, 120), 1.0f, 0.06f);
+        }
+        for (int gy = 40; gy < 240; gy += 40) {
+            C2D_DrawLine(0.0f, gy, Ui::rgba(45, 38, 70, 120), 320.0f, gy, Ui::rgba(45, 38, 70, 120), 1.0f, 0.06f);
+        }
+
+        Ui::panel(rx, ry, rw, rh, 0.12f, Ui::rgba(255, 55, 145, 75), Ui::rgba(255, 75, 165));
+        drawRectOutline(rx, ry, rw, rh, 2.0f, Ui::rgba(255, 85, 170), 0.15f);
+        C2D_DrawLine(rx + rw * 0.5f, ry, Ui::rgba(255, 255, 255, 110), rx + rw * 0.5f, ry + rh, Ui::rgba(255, 255, 255, 110), 1.0f, 0.14f);
+        C2D_DrawLine(rx, ry + rh * 0.5f, Ui::rgba(255, 255, 255, 110), rx + rw, ry + rh * 0.5f, Ui::rgba(255, 255, 255, 110), 1.0f, 0.14f);
+        drawRing(ctx.settings.tabletCenterX, ctx.settings.tabletCenterY, 7.0f, 2.0f, ctx.clrCursor, 20, 0.20f);
+
+        char edInfo[96];
+        std::snprintf(edInfo, sizeof(edInfo), "%s: %d%% (%dx%d px) · Centro: %.0f, %.0f",
+            esp ? "Área" : "Area", static_cast<int>(std::round(ctx.settings.tabletScale * 100.0f)),
+            (int)rw, (int)rh, ctx.settings.tabletCenterX, ctx.settings.tabletCenterY);
+        Ui::pill(16.0f, 8.0f, 288.0f, 20.0f, 0.30f, Ui::rgba(18, 14, 34, 235));
+        drawCenteredTextWithShadow(ctx.textBuf, 160.0f, 18.0f, 0.32f, Ui::rgba(65, 220, 255), edInfo, 0.32f);
+
+        drawCenteredTextWithShadow(ctx.textBuf, 160.0f, 36.0f, 0.31f, ctx.clrWhite,
+            esp ? "Toca/arrastra para mover · L/R cambia tamaño · Y centra" : "Drag to move · L/R changes size · Y centers", 0.32f);
+
+        Ui::button(90.0f, 205.0f, 140.0f, 26.0f, 0.30f, Ui::rgba(255, 42, 133), Ui::rgba(255, 160, 210), true);
+        drawCenteredTextWithShadow(ctx.textBuf, 160.0f, 218.0f, 0.35f, ctx.clrWhite,
+            esp ? "Listo / Guardar (B)" : "Done / Save (B)", 0.35f);
+    } else {
+        // --- CONTENIDO DESPLAZABLE DE LA SECCIÓN ACTIVA (z = 0.12..0.28) ---
+        float vTop, vBot, cardH, cardStep, maxSc;
+        getViewportMetrics(activeTab, vTop, vBot, cardH, cardStep, maxSc);
+        float curScroll = s_scrollY[activeTab];
+        int itemCount = tabItemCounts[activeTab];
+
+        for (int i = 0; i < itemCount; ++i) {
+            float cy = vTop + 2.0f + i * cardStep - curScroll;
+            if (cy + cardH < vTop - 4.0f || cy > vBot + 4.0f) continue;
+
+            int opt = tabItems[activeTab][i];
+            bool sel = (ctx.settingsOption == opt);
+            float cx = 8.0f;
+            float cw = 296.0f;
+
+            u32 cardBg = sel ? Ui::rgba(36, 24, 58, 245) : Ui::rgba(18, 15, 30, 235);
+            u32 borderClr = sel ? Ui::rgba(255, 55, 145) : Ui::rgba(48, 42, 74);
+            Ui::panel(cx, cy, cw, cardH, 0.14f, cardBg, sel ? Ui::rgba(255, 55, 145) : 0);
+            drawRectOutline(cx, cy, cw, cardH, sel ? 1.5f : 1.0f, borderClr, 0.16f);
+
+            if (activeTab == 1 && opt >= 4 && opt <= 7) {
+                // Tarjetas de asignación de teclas estilo imagen de referencia
+                int row = opt - 4;
+                const char* actTitle = "";
+                const char* actHint  = "";
+                uint32_t mask = 0;
+                if (ctx.settingsControlsMode == MODE_STD) {
+                    const char* t[4] = {
+                        "Click 1 / Tap 1 (K1)",
+                        "Click 2 / Tap 2 (K2)",
+                        esp ? "Rastro de Humo (Smoke)" : "Smoke Trail",
+                        esp ? "Reintento Rápido" : "Quick Retry"
+                    };
+                    const char* h[4] = {
+                        esp ? "Golpe principal" : "Primary tap",
+                        esp ? "Golpe secundario" : "Secondary tap",
+                        esp ? "Dibujar en pantalla" : "Draw cursor trail",
+                        esp ? "Mantener para reiniciar" : "Hold to restart"
+                    };
+                    uint32_t m[4] = { ctx.settings.keyOsuK1, ctx.settings.keyOsuK2, ctx.settings.keyOsuSmoke, ctx.settings.keyQuickRetry };
+                    actTitle = t[row]; actHint = h[row]; mask = m[row];
+                } else if (ctx.settingsControlsMode == MODE_TAIKO) {
+                    const char* t[4] = {
+                        esp ? "Don Izquierdo (Rojo)" : "Left Don (Red)",
+                        esp ? "Don Derecho (Rojo)" : "Right Don (Red)",
+                        esp ? "Katsu Izquierdo (Azul)" : "Left Katsu (Blue)",
+                        esp ? "Katsu Derecho (Azul)" : "Right Katsu (Blue)"
+                    };
+                    const char* h[4] = { "Centro izq.", "Centro der.", "Borde izq.", "Borde der." };
+                    uint32_t m[4] = { ctx.settings.keyTaikoDonLeft, ctx.settings.keyTaikoDonRight, ctx.settings.keyTaikoKatsuLeft, ctx.settings.keyTaikoKatsuRight };
+                    actTitle = t[row]; actHint = h[row]; mask = m[row];
+                } else if (ctx.settingsControlsMode == MODE_CATCH) {
+                    const char* t[4] = {
+                        esp ? "Mover a la Izquierda" : "Move Left",
+                        esp ? "Mover a la Derecha" : "Move Right",
+                        esp ? "Acelerar / Dash" : "Dash (Boost)",
+                        esp ? "Reintento Rápido" : "Quick Retry"
+                    };
+                    const char* h[4] = {
+                        esp ? "Plato <-" : "Plate <-",
+                        esp ? "Plato ->" : "Plate ->",
+                        esp ? "Velocidad x2" : "Speed x2",
+                        esp ? "Reiniciar" : "Retry"
+                    };
+                    uint32_t m[4] = { ctx.settings.keyCatchLeft, ctx.settings.keyCatchRight, ctx.settings.keyCatchDash, ctx.settings.keyQuickRetry };
+                    actTitle = t[row]; actHint = h[row]; mask = m[row];
+                } else {
+                    const char* t[4] = {
+                        esp ? "Columna 1 (Extrema Izq.)" : "Column 1 (Far Left)",
+                        esp ? "Columna 2 (Centro Izq.)"  : "Column 2 (Mid Left)",
+                        esp ? "Columna 3 (Centro Der.)"  : "Column 3 (Mid Right)",
+                        esp ? "Columna 4 (Extrema Der.)" : "Column 4 (Far Right)"
+                    };
+                    const char* h[4] = {
+                        esp ? "Carril 1" : "Lane 1",
+                        esp ? "Carril 2" : "Lane 2",
+                        esp ? "Carril 3" : "Lane 3",
+                        esp ? "Carril 4" : "Lane 4"
+                    };
+                    uint32_t m[4] = { ctx.settings.keyManiaCol1, ctx.settings.keyManiaCol2, ctx.settings.keyManiaCol3, ctx.settings.keyManiaCol4 };
+                    actTitle = t[row]; actHint = h[row]; mask = m[row];
+                }
+
+                drawTextWithShadow(ctx.textBuf, cx + 10.0f, cy + 6.0f, 0.36f, ctx.clrWhite, actTitle, 0.18f);
+                drawText(ctx.textBuf, cx + 10.0f, cy + 21.0f, 0.29f, Ui::rgba(165, 160, 195), actHint, 0.18f);
+
+                std::string kFmt = truncateString(GameSettings::formatKeyMask(mask), 14);
+                Ui::pill(cx + 172.0f, cy + 8.0f, 114.0f, 22.0f, 0.19f, Ui::rgba(85, 22, 58, 245));
+                drawRectOutline(cx + 172.0f, cy + 8.0f, 114.0f, 22.0f, 1.0f, Ui::rgba(255, 65, 150), 0.20f);
+                drawCenteredTextWithShadow(ctx.textBuf, cx + 229.0f, cy + 19.0f, 0.32f, Ui::rgba(255, 110, 185), kFmt.c_str(), 0.21f);
+            } else {
+                std::string mTitle, mSub, mVal, mDet1, mDet2;
+                getOptionMeta(opt, mTitle, mSub, mVal, mDet1, mDet2);
+
+                drawTextWithShadow(ctx.textBuf, cx + 10.0f, cy + 5.0f, 0.36f, sel ? ctx.clrWhite : Ui::rgba(235, 230, 250),
+                    truncateString(mTitle, 24).c_str(), 0.18f);
+                drawText(ctx.textBuf, cx + 10.0f, cy + 21.0f, 0.28f, Ui::rgba(165, 160, 195),
+                    truncateString(mSub, 28).c_str(), 0.18f);
+
+                // Controles a la derecha según el tipo de apartado
+                if (opt == 1 || opt == 2 || opt == 3 || opt == 8 || opt == 9 || opt == 10 || opt == 17 || opt == 18) {
+                    float ratio = 0.5f;
+                    if (opt == 1) ratio = (ctx.settings.tabletScale - 0.30f) / 0.70f;
+                    else if (opt == 2) ratio = ctx.settings.tabletCenterX / 320.0f;
+                    else if (opt == 3) ratio = ctx.settings.tabletCenterY / 240.0f;
+                    else if (opt == 8) ratio = ctx.settings.musicVolume / 100.0f;
+                    else if (opt == 9) ratio = ctx.settings.sfxVolume / 100.0f;
+                    else if (opt == 10) ratio = (ctx.settings.audioOffsetMs + 150.0f) / 300.0f;
+                    else if (opt == 17) ratio = (ctx.settings.cursorScale - 0.5f) / 1.5f;
+                    else if (opt == 18) ratio = (ctx.settings.bgDim - 20.0f) / 80.0f;
+
+                    drawRightAlignedText(ctx.textBuf, cx + cw - 10.0f, cy + 5.0f, 0.31f, Ui::rgba(65, 220, 255), mVal.c_str(), 0.19f);
+                    Ui::sliderBar(cx + 174.0f, cy + 21.0f, 110.0f, 9.0f, 0.19f, ratio, sel ? Ui::rgba(255, 65, 150) : Ui::rgba(65, 195, 255), sel);
+                } else if (opt == 11 || opt == 27 || opt == 14 || opt == 15 || opt == 20 || opt == 28 || opt == 19) {
+                    bool isOn = false;
+                    if (opt == 11) isOn = ctx.settings.beatmapHitsounds;
+                    else if (opt == 27) isOn = ctx.settings.songPreview;
+                    else if (opt == 14) isOn = ctx.settings.snakingSliders;
+                    else if (opt == 15) isOn = ctx.settings.comboBursts;
+                    else if (opt == 20) isOn = ctx.settings.showHit300;
+                    else if (opt == 28) isOn = ctx.settings.showPlayfieldBorder;
+                    else if (opt == 19) isOn = ctx.settings.enableVideo;
+                    Ui::toggleSwitch(cx + cw - 58.0f, cy + 10.0f, 48.0f, 18.0f, 0.19f, isOn, Ui::rgba(45, 225, 150));
+                } else {
+                    u32 pillBg = sel ? Ui::rgba(255, 42, 133, 240) : Ui::rgba(45, 34, 76, 240);
+                    if (opt == 0) pillBg = ctx.settings.playOnBottomScreen ? Ui::rgba(28, 145, 105, 240) : Ui::rgba(145, 40, 135, 240);
+                    else if (opt == 24 || opt == 26) pillBg = Ui::rgba(35, 125, 215, 240);
+                    Ui::pill(cx + 174.0f, cy + 8.0f, 112.0f, 22.0f, 0.19f, pillBg);
+                    drawCenteredTextWithShadow(ctx.textBuf, cx + 230.0f, cy + 19.0f, 0.31f, ctx.clrWhite,
+                        truncateString(mVal, 15).c_str(), 0.21f);
+                }
+            }
+        }
+
+        // Barra de desplazamiento vertical derecha (x = 309, y = vTop+2..vBot-2)
+        float sbX = 309.0f;
+        float sbY = vTop + 2.0f;
+        float sbH = (vBot - vTop) - 4.0f;
+        C2D_DrawRectSolid(sbX + 1.0f, sbY, 0.25f, 3.0f, sbH, Ui::rgba(26, 22, 44, 220));
+        if (maxSc > 0.0f) {
+            float thumbH = std::max(20.0f, sbH * ((vBot - vTop) / ((vBot - vTop) + maxSc)));
+            float thumbY = sbY + (curScroll / maxSc) * (sbH - thumbH);
+            C2D_DrawRectSolid(sbX, thumbY, 0.27f, 5.0f, thumbH, Ui::rgba(255, 65, 150, 240));
+        } else {
+            C2D_DrawRectSolid(sbX + 1.0f, sbY, 0.27f, 3.0f, sbH, Ui::rgba(95, 75, 145, 180));
+        }
+
+        // --- CAPA SUPERIOR FIJA EN PANTALLA INFERIOR (Cubre bordes del scroll con z = 0.42..0.55) ---
+        float headerH = (activeTab == 1) ? 54.0f : 31.0f;
+        C2D_DrawRectSolid(0.0f, 0.0f, 0.40f, 320.0f, headerH, Ui::rgba(12, 9, 22, 252));
+        C2D_DrawLine(0.0f, headerH, Ui::rgba(255, 55, 145, 160), 320.0f, headerH, Ui::rgba(255, 55, 145, 160), 1.0f, 0.41f);
+
+        // 5 Pestañas superiores estilo osu!lazer (PANTALLA | TECLAS | AUDIO | JUEGO | VISUAL)
+        for (int t = 0; t < 5; ++t) {
+            float tx = 6.0f + t * 62.0f;
+            float tw = 59.0f;
+            float th = 22.0f;
+            bool isTab = (activeTab == t);
+            u32 tabBg = isTab ? Ui::rgba(85, 18, 56, 250) : Ui::rgba(20, 17, 34, 240);
+            Ui::panel(tx, 4.0f, tw, th, 0.44f, tabBg, 0);
+            if (isTab) {
+                drawRectOutline(tx, 4.0f, tw, th, 1.5f, Ui::rgba(255, 65, 150), 0.46f);
+            }
+            drawCenteredTextWithShadow(ctx.textBuf, tx + tw * 0.5f, 15.0f, 0.30f,
+                isTab ? ctx.clrWhite : Ui::rgba(165, 160, 195), tabShortNames[t], 0.48f);
+        }
+
+        // Sub-selector de modo en la pestaña TECLAS: [Standard] [Taiko] [Catch] [Mania]
+        if (activeTab == 1) {
+            const char* modePills[4] = { "Standard", "Taiko", "Catch", "Mania" };
+            for (int m = 0; m < 4; ++m) {
+                float mx = 8.0f + m * 76.0f;
+                float mw = 72.0f;
+                float mh = 19.0f;
+                bool isCurM = (ctx.settingsControlsMode == m);
+                u32 mBg = isCurM ? Ui::rgba(255, 38, 130, 250) : Ui::rgba(22, 19, 36, 240);
+                Ui::pill(mx, 31.0f, mw, mh, 0.45f, mBg);
+                drawCenteredTextWithShadow(ctx.textBuf, mx + mw * 0.5f, 40.5f, 0.31f,
+                    isCurM ? ctx.clrWhite : Ui::rgba(175, 170, 205), modePills[m], 0.48f);
+            }
+        }
+
+        // --- PIE FIJO DE PANTALLA INFERIOR (y = 199..240, z = 0.42..0.55) ---
+        C2D_DrawRectSolid(0.0f, 199.0f, 0.40f, 320.0f, 41.0f, Ui::rgba(12, 9, 22, 252));
+        C2D_DrawLine(0.0f, 199.0f, Ui::rgba(60, 50, 95, 180), 320.0f, 199.0f, Ui::rgba(60, 50, 95, 180), 1.0f, 0.41f);
+
+        // Botón Izquierdo: [<- Volver al Menú]
+        Ui::button(8.0f, 205.0f, 146.0f, 28.0f, 0.44f, Ui::rgba(24, 22, 38, 250), Ui::rgba(75, 70, 110), false);
+        drawCenteredTextWithShadow(ctx.textBuf, 81.0f, 219.0f, 0.34f, Ui::rgba(220, 215, 240),
+            esp ? "<- Volver al Menú" : "<- Back to Menu", 0.48f);
+
+        // Botón Derecho: [Guardar Cambios] en rosa osu!lazer
+        Ui::button(166.0f, 205.0f, 146.0f, 28.0f, 0.44f, Ui::rgba(255, 38, 130, 250), Ui::rgba(255, 145, 200), true);
+        drawCenteredTextWithShadow(ctx.textBuf, 239.0f, 219.0f, 0.35f, ctx.clrWhite,
+            esp ? "Guardar Cambios" : "Save Changes", 0.48f);
     }
 
-    // Botones de pestañas táctiles arriba (5 pestañas)
-    const char* tabNames[5] = {
-        LOC(STR_TAB_TABLET),
-        LOC(STR_TAB_CONTROLS),
-        LOC(STR_TAB_AUDIO),
-        LOC(STR_TAB_GAME),
-        LOC(STR_TAB_VISUAL)
-    };
-    for (int t = 0; t < 5; ++t) {
-        float tx = 7.0f + t * 62.0f;
-        float tw = 58.0f;
-        float th = 22.0f;
-        bool isTab = (activeTab == t);
-        u32 tabBg = isTab ? ctx.clrPrimary : Ui::rgba(24, 20, 36, 235);
-        Ui::panel(tx, 6.0f, tw, th, 0.20f, tabBg, isTab ? Ui::rgba(255, 255, 255) : 0);
-        if (isTab) {
-            Ui::glow(tx + tw * 0.5f, 17.0f, 0.18f, tw * 0.45f, Ui::withAlpha(ctx.clrPrimary, 90), 2);
-        }
-        const char* tLbl = tabNames[t];
-        if (tLbl[0] >= '1' && tLbl[0] <= '5' && tLbl[1] == '.') tLbl += 3;
-        drawCenteredTextWithShadow(ctx.textBuf, tx + tw * 0.5f, 17.0f, 0.32f, isTab ? ctx.clrWhite : Ui::rgba(180, 175, 205), tLbl, 0.25f);
-    }
+    // Modal Táctil de Asignación de Teclas cuando se está capturando un botón
+    if (ctx.capturingKeyIndex != -1) {
+        C2D_DrawRectSolid(0.0f, 0.0f, 0.85f, 320.0f, 240.0f, Ui::rgba(8, 6, 16, 235));
+        Ui::panel(10.0f, 24.0f, 300.0f, 192.0f, 0.88f, Ui::rgba(20, 15, 36, 252), Ui::rgba(255, 65, 150));
 
-    // Contenido central interactivo
-    if (activeTab == 0) { // Controles / Tablet
-        if (ctx.settings.playOnBottomScreen) {
-            Ui::panel(10.0f, 36.0f, 300.0f, 162.0f, 0.15f, Ui::rgba(28, 22, 48, 225), ctx.clr100);
-            drawCenteredText(ctx.textBuf, 160.0f, 52.0f, 0.44f, ctx.clr100, LOC(STR_CTRL_TOUCH_1TO1));
-            drawCenteredText(ctx.textBuf, 160.0f, 72.0f, 0.36f, ctx.clrWhite, LOC(STR_CTRL_TOUCH_1TO1_DESC));
-            drawRing(160.0f, 122.0f, 22.0f, 2.5f, ctx.clrPrimary, 24, 0.3f);
-            C2D_DrawCircleSolid(160.0f, 122.0f, 0.25f, 22.0f, Ui::withAlpha(ctx.clrPrimary, 140));
-            drawCenteredText(ctx.textBuf, 160.0f, 122.0f, 0.55f, ctx.clrWhite, "1", 0.35f);
-        } else {
-            Ui::panel(rx, ry, rw, rh, 0.15f, Ui::rgba(42, 34, 70, 225), ctx.clrPrimary);
-            u32 gridClr = C2D_Color32(110, 95, 160, 140);
-            C2D_DrawLine(rx + rw * 0.5f, ry, gridClr, rx + rw * 0.5f, ry + rh, gridClr, 1.0f, 0.2f);
-            C2D_DrawLine(rx, ry + rh * 0.5f, gridClr, rx + rw, ry + rh * 0.5f, gridClr, 1.0f, 0.2f);
-            drawRectOutline(rx, ry, rw, rh, 2.0f, ctx.clrPrimary, 0.25f);
-            drawRing(ctx.settings.tabletCenterX, ctx.settings.tabletCenterY, 7.0f, 1.5f, ctx.clrCursor, 18, 0.3f);
+        drawCenteredTextWithShadow(ctx.textBuf, 160.0f, 38.0f, 0.42f, Ui::rgba(255, 85, 170),
+            esp ? "PRESIONA UN BOTÓN O TÓCALO ABAJO" : "PRESS ANY BUTTON OR TAP BELOW", 0.92f);
+        drawCenteredText(ctx.textBuf, 160.0f, 58.0f, 0.32f, Ui::rgba(195, 190, 225),
+            esp ? "Pulsa B físico para cancelar o toca el botón en pantalla" : "Press physical B to cancel or tap a button chip below", 0.92f);
 
-            char areaCaption[64];
-            std::snprintf(areaCaption, sizeof(areaCaption), LOC(STR_TABLET_AREA_FMT),
-                static_cast<int>(std::round(ctx.settings.tabletScale * 100.0f)), (int)rw, (int)rh);
-            drawCenteredText(ctx.textBuf, ctx.settings.tabletCenterX, std::max(40.0f, ry + 14.0f), 0.38f, ctx.clrWhite, areaCaption);
-        }
-    } else if (activeTab == 1) { // Pestaña CONTROLES: Modo 3DS Interactivo
-        // 1. Selector táctil de modo (STD / TAIKO / CATCH / MANIA)
-        const char* subModeNames[4] = { "STANDARD", "TAIKO", "CATCH", "MANIA" };
-        u32 subModeColors[4] = { Ui::rgba(255, 102, 171), Ui::rgba(255, 75, 80), Ui::rgba(45, 215, 115), Ui::rgba(60, 205, 255) };
-
-        for (int m = 0; m < 4; ++m) {
-            float sx = 6.0f + m * 77.0f;
-            bool isCurM = (ctx.settingsControlsMode == m);
-            u32 pillBg = isCurM ? Ui::withAlpha(subModeColors[m], 235) : Ui::rgba(32, 26, 48, 235);
-            Ui::pill(sx, 31.0f, 74.0f, 17.0f, 0.22f, pillBg);
-            if (isCurM) drawRectOutline(sx, 31.0f, 74.0f, 17.0f, 1.2f, ctx.clrWhite, 0.24f);
-            drawCenteredTextWithShadow(ctx.textBuf, sx + 37.0f, 39.5f, 0.32f, isCurM ? ctx.clrWhite : Ui::rgba(220, 215, 240), subModeNames[m], 0.30f);
-
-            if (ctx.touchJustDown && ctx.touch.px >= sx && ctx.touch.px <= sx + 74.0f && ctx.touch.py >= 29.0f && ctx.touch.py <= 49.0f) {
-                ctx.settingsControlsMode = m;
-                ctx.audio.playHitSound(2);
-            }
-        }
-
-        // 2. 4 Pastillas de acción para el modo activo
-        const char* kShortNames[4];
-        uint32_t kMasks[4];
-        u32 actColors[4];
-
-        if (ctx.settingsControlsMode == MODE_STD) {
-            kShortNames[0] = "K1";         kMasks[0] = ctx.settings.keyOsuK1;      actColors[0] = Ui::rgba(180, 70, 240);
-            kShortNames[1] = "K2";         kMasks[1] = ctx.settings.keyOsuK2;      actColors[1] = Ui::rgba(255, 95, 180);
-            kShortNames[2] = LOC(STR_KEY_SMOKE); kMasks[2] = ctx.settings.keyOsuSmoke;   actColors[2] = Ui::rgba(240, 200, 50);
-            kShortNames[3] = LOC(STR_KEY_RETRY); kMasks[3] = ctx.settings.keyQuickRetry; actColors[3] = Ui::rgba(255, 75, 75);
-        } else if (ctx.settingsControlsMode == MODE_TAIKO) {
-            kShortNames[0] = LOC(STR_KEY_DON_L);    kMasks[0] = ctx.settings.keyTaikoDonLeft;    actColors[0] = Ui::rgba(245, 60, 65);
-            kShortNames[1] = LOC(STR_KEY_DON_R);    kMasks[1] = ctx.settings.keyTaikoDonRight;   actColors[1] = Ui::rgba(245, 60, 65);
-            kShortNames[2] = LOC(STR_KEY_KAT_L);  kMasks[2] = ctx.settings.keyTaikoKatsuLeft;  actColors[2] = Ui::rgba(45, 135, 255);
-            kShortNames[3] = LOC(STR_KEY_KAT_R);  kMasks[3] = ctx.settings.keyTaikoKatsuRight; actColors[3] = Ui::rgba(45, 135, 255);
-        } else if (ctx.settingsControlsMode == MODE_CATCH) {
-            kShortNames[0] = LOC(STR_KEY_MOVE_L);  kMasks[0] = ctx.settings.keyCatchLeft;  actColors[0] = Ui::rgba(50, 210, 120);
-            kShortNames[1] = LOC(STR_KEY_MOVE_R);  kMasks[1] = ctx.settings.keyCatchRight; actColors[1] = Ui::rgba(50, 210, 120);
-            kShortNames[2] = LOC(STR_KEY_DASH);    kMasks[2] = ctx.settings.keyCatchDash;   actColors[2] = Ui::rgba(255, 175, 30);
-            kShortNames[3] = LOC(STR_KEY_RETRY);   kMasks[3] = ctx.settings.keyQuickRetry;  actColors[3] = Ui::rgba(255, 75, 75);
-        } else {
-            kShortNames[0] = "Col 1";      kMasks[0] = ctx.settings.keyManiaCol1;  actColors[0] = Ui::rgba(50, 160, 255);
-            kShortNames[1] = "Col 2";      kMasks[1] = ctx.settings.keyManiaCol2;  actColors[1] = Ui::rgba(235, 235, 245);
-            kShortNames[2] = "Col 3";      kMasks[2] = ctx.settings.keyManiaCol3;  actColors[2] = Ui::rgba(235, 235, 245);
-            kShortNames[3] = "Col 4";      kMasks[3] = ctx.settings.keyManiaCol4;  actColors[3] = Ui::rgba(50, 160, 255);
-        }
-
-        for (int i = 0; i < 4; ++i) {
-            float bx = 6.0f + i * 77.0f;
-            float by = 50.0f;
-            float bw = 74.0f;
-            float bh = 22.0f;
-            int optIdx = 4 + i;
-            bool sel = (ctx.settingsOption == optIdx);
-            bool cap = (ctx.capturingKeyIndex == optIdx);
-
-            u32 pillBg = cap ? Ui::rgba(255, 180, 40) : (sel ? Ui::rgba(52, 40, 85, 250) : Ui::rgba(24, 20, 38, 230));
-            Ui::panel(bx, by, bw, bh, 0.15f, pillBg, cap ? ctx.clrWhite : (sel ? ctx.clrCursor : actColors[i]));
-            drawCenteredTextWithShadow(ctx.textBuf, bx + bw * 0.5f, by + 4.5f, 0.31f, cap ? ctx.clrBgDark : (sel ? ctx.clrWhite : actColors[i]), kShortNames[i], 0.85f);
-            std::string mStr = cap ? LOC(STR_PRESS_SHORT) : truncateString(GameSettings::formatKeyMask(kMasks[i]), 11);
-            drawCenteredTextWithShadow(ctx.textBuf, bx + bw * 0.5f, by + 14.5f, 0.28f, cap ? ctx.clrBgDark : (sel ? ctx.clrCursor : Ui::rgba(235, 230, 255)), mStr.c_str(), 0.85f);
-
-            if (ctx.touchJustDown && ctx.touch.px >= bx && ctx.touch.px <= bx + bw && ctx.touch.py >= by && ctx.touch.py <= by + bh) {
-                ctx.settingsOption = optIdx;
-                ctx.capturingKeyIndex = optIdx;
-                ctx.audio.playHitSound(2);
-            }
-        }
-
-        // 3. Dibujo estilizado de la consola Nintendo 3DS
-        float chassisX = 22.0f, chassisY = 75.0f, chassisW = 276.0f, chassisH = 124.0f;
-        Ui::panel(chassisX, chassisY, chassisW, chassisH, 0.12f, Ui::rgba(28, 24, 42, 250), Ui::rgba(65, 55, 90));
-        C2D_DrawRectSolid(chassisX + 30.0f, chassisY + 1.0f, 0.13f, chassisW - 60.0f, 2.0f, Ui::rgba(45, 38, 65));
-
-        // Pantalla interior de la 3DS
-        float scX = 96.0f, scY = 85.0f, scW = 128.0f, scH = 86.0f;
-        Ui::panel(scX, scY, scW, scH, 0.14f, Ui::rgba(10, 8, 16, 255), Ui::rgba(65, 55, 95));
-
-        if (ctx.capturingKeyIndex != -1) {
-            int cIdx = std::max(0, std::min(3, ctx.capturingKeyIndex - 4));
-            Ui::glow(scX + scW * 0.5f, scY + scH * 0.5f, 0.15f, 32.0f, Ui::rgba(255, 180, 40, 60), 2);
-            drawCenteredTextWithShadow(ctx.textBuf, scX + scW * 0.5f, scY + 14.0f, 0.35f, ctx.clrCursor, LOC(STR_CTRL_REASSIGN_TITLE), 0.90f);
-            drawCenteredTextWithShadow(ctx.textBuf, scX + scW * 0.5f, scY + 32.0f, 0.40f, ctx.clrWhite, kShortNames[cIdx], 0.90f);
-            drawCenteredTextWithShadow(ctx.textBuf, scX + scW * 0.5f, scY + 50.0f, 0.33f, ctx.clr100, LOC(STR_CTRL_PRESS_ANY), 0.90f);
-            drawCenteredTextWithShadow(ctx.textBuf, scX + scW * 0.5f, scY + 68.0f, 0.30f, ctx.clrWhite, LOC(STR_CTRL_CANCEL_HINT), 0.90f);
-        } else {
-            int selIdx = std::max(0, std::min(3, ctx.settingsOption - 4));
-            drawCenteredTextWithShadow(ctx.textBuf, scX + scW * 0.5f, scY + 12.0f, 0.35f, subModeColors[ctx.settingsControlsMode], subModeNames[ctx.settingsControlsMode], 0.90f);
-            drawCenteredTextWithShadow(ctx.textBuf, scX + scW * 0.5f, scY + 28.0f, 0.36f, ctx.clrWhite, kShortNames[selIdx], 0.90f);
-            std::string curKeyFmt = GameSettings::formatKeyMask(kMasks[selIdx]);
-            drawCenteredTextWithShadow(ctx.textBuf, scX + scW * 0.5f, scY + 44.0f, 0.33f, ctx.clrCursor, curKeyFmt.c_str(), 0.90f);
-            drawCenteredTextWithShadow(ctx.textBuf, scX + scW * 0.5f, scY + 62.0f, 0.32f, Ui::rgba(140, 240, 255), LOC(STR_CTRL_REASSIGN_HINT), 0.90f);
-            drawCenteredTextWithShadow(ctx.textBuf, scX + scW * 0.5f, scY + 74.0f, 0.30f, ctx.clrWhite, LOC(STR_CTRL_REASSIGN_SUB), 0.90f);
-        }
-
-        auto getBtnClr = [&](uint32_t mask, u32 defClr) -> u32 {
-            if (ctx.kHeld & mask) return Ui::rgba(255, 255, 255);
-            for (int a = 0; a < 4; ++a) {
-                if (kMasks[a] & mask) return actColors[a];
-            }
-            return defClr;
+        struct TouchKeyChip { float x, y, w, h; const char* lbl; u32 clr; };
+        const TouchKeyChip chips[] = {
+            { 18.0f,  86.0f, 42.0f, 22.0f, "L",      Ui::rgba(55, 48, 85) },
+            { 64.0f,  86.0f, 42.0f, 22.0f, "ZL",     Ui::rgba(45, 40, 72) },
+            { 214.0f, 86.0f, 42.0f, 22.0f, "ZR",     Ui::rgba(45, 40, 72) },
+            { 260.0f, 86.0f, 42.0f, 22.0f, "R",      Ui::rgba(55, 48, 85) },
+            { 18.0f,  116.0f, 42.0f, 22.0f, "D-Arr", Ui::rgba(48, 42, 76) },
+            { 64.0f,  116.0f, 42.0f, 22.0f, "D-Aba", Ui::rgba(48, 42, 76) },
+            { 18.0f,  144.0f, 42.0f, 22.0f, "D-Izq", Ui::rgba(48, 42, 76) },
+            { 64.0f,  144.0f, 42.0f, 22.0f, "D-Der", Ui::rgba(48, 42, 76) },
+            { 214.0f, 116.0f, 42.0f, 22.0f, "X",     Ui::rgba(45, 115, 210) },
+            { 260.0f, 116.0f, 42.0f, 22.0f, "Y",     Ui::rgba(40, 175, 95) },
+            { 214.0f, 144.0f, 42.0f, 22.0f, "A",     Ui::rgba(220, 55, 75) },
+            { 260.0f, 144.0f, 42.0f, 22.0f, "B",     Ui::rgba(215, 165, 35) },
+            { 114.0f, 144.0f, 44.0f, 22.0f, "SEL",   Ui::rgba(60, 52, 90) },
+            { 162.0f, 144.0f, 44.0f, 22.0f, "START", Ui::rgba(60, 52, 90) }
         };
-
-        // Gatillos L / R / ZL / ZR
-        u32 clrL = getBtnClr(KEY_L, Ui::rgba(55, 48, 75));
-        u32 clrR = getBtnClr(KEY_R, Ui::rgba(55, 48, 75));
-        u32 clrZL = getBtnClr(KEY_ZL, Ui::rgba(45, 40, 62));
-        u32 clrZR = getBtnClr(KEY_ZR, Ui::rgba(45, 40, 62));
-
-        Ui::pill(28.0f, 67.0f, 42.0f, 12.0f, 0.16f, clrL);
-        drawCenteredTextWithShadow(ctx.textBuf, 49.0f, 73.0f, 0.33f, ctx.clrWhite, "L", 0.85f);
-
-        Ui::pill(250.0f, 67.0f, 42.0f, 12.0f, 0.16f, clrR);
-        drawCenteredTextWithShadow(ctx.textBuf, 271.0f, 73.0f, 0.33f, ctx.clrWhite, "R", 0.85f);
-
-        Ui::pill(72.0f, 68.0f, 26.0f, 11.0f, 0.16f, clrZL);
-        drawCenteredTextWithShadow(ctx.textBuf, 85.0f, 73.5f, 0.29f, ctx.clrWhite, "ZL", 0.85f);
-
-        Ui::pill(222.0f, 68.0f, 26.0f, 11.0f, 0.16f, clrZR);
-        drawCenteredTextWithShadow(ctx.textBuf, 235.0f, 73.5f, 0.29f, ctx.clrWhite, "ZR", 0.85f);
-
-        // Circle Pad
-        C2D_DrawCircleSolid(60.0f, 108.0f, 0.15f, 14.0f, Ui::rgba(40, 35, 55));
-        C2D_DrawCircleSolid(60.0f, 108.0f, 0.16f, 11.0f, Ui::rgba(80, 75, 100));
-        drawRing(60.0f, 108.0f, 7.0f, 1.2f, Ui::rgba(55, 50, 75), 16, 0.17f);
-        C2D_DrawCircleSolid(60.0f, 108.0f, 0.18f, 2.0f, Ui::rgba(55, 50, 75));
-
-        // D-Pad (Cruz direccional)
-        u32 clrDUP = getBtnClr(KEY_DUP, Ui::rgba(55, 48, 75));
-        u32 clrDDOWN = getBtnClr(KEY_DDOWN, Ui::rgba(55, 48, 75));
-        u32 clrDLEFT = getBtnClr(KEY_DLEFT, Ui::rgba(55, 48, 75));
-        u32 clrDRIGHT = getBtnClr(KEY_DRIGHT, Ui::rgba(55, 48, 75));
-
-        C2D_DrawRectSolid(55.0f, 137.0f, 0.16f, 10.0f, 30.0f, Ui::rgba(35, 30, 50));
-        C2D_DrawRectSolid(45.0f, 147.0f, 0.16f, 30.0f, 10.0f, Ui::rgba(35, 30, 50));
-
-        C2D_DrawRectSolid(55.0f, 137.0f, 0.17f, 10.0f, 10.0f, clrDUP);
-        C2D_DrawRectSolid(55.0f, 157.0f, 0.17f, 10.0f, 10.0f, clrDDOWN);
-        C2D_DrawRectSolid(45.0f, 147.0f, 0.17f, 10.0f, 10.0f, clrDLEFT);
-        C2D_DrawRectSolid(65.0f, 147.0f, 0.17f, 10.0f, 10.0f, clrDRIGHT);
-
-        drawCenteredTextWithShadow(ctx.textBuf, 60.0f, 140.0f, 0.26f, ctx.clrWhite, "^", 0.85f);
-        drawCenteredTextWithShadow(ctx.textBuf, 60.0f, 160.0f, 0.26f, ctx.clrWhite, "v", 0.85f);
-        drawCenteredTextWithShadow(ctx.textBuf, 50.0f, 150.0f, 0.26f, ctx.clrWhite, "<", 0.85f);
-        drawCenteredTextWithShadow(ctx.textBuf, 70.0f, 150.0f, 0.26f, ctx.clrWhite, ">", 0.85f);
-
-        // C-Stick (N3DS)
-        C2D_DrawCircleSolid(238.0f, 104.0f, 0.16f, 5.0f, Ui::rgba(85, 80, 105));
-
-        // ABXY Diamond
-        u32 clrX = getBtnClr(KEY_X, Ui::rgba(60, 100, 200));
-        u32 clrB = getBtnClr(KEY_B, Ui::rgba(210, 175, 40));
-        u32 clrY = getBtnClr(KEY_Y, Ui::rgba(60, 180, 80));
-        u32 clrA = getBtnClr(KEY_A, Ui::rgba(220, 55, 65));
-
-        C2D_DrawCircleSolid(258.0f, 124.0f, 0.17f, 8.0f, clrX);
-        drawCenteredTextWithShadow(ctx.textBuf, 258.0f, 124.0f, 0.34f, ctx.clrWhite, "X", 0.85f);
-
-        C2D_DrawCircleSolid(258.0f, 156.0f, 0.17f, 8.0f, clrB);
-        drawCenteredTextWithShadow(ctx.textBuf, 258.0f, 156.0f, 0.34f, ctx.clrWhite, "B", 0.85f);
-
-        C2D_DrawCircleSolid(242.0f, 140.0f, 0.17f, 8.0f, clrY);
-        drawCenteredTextWithShadow(ctx.textBuf, 242.0f, 140.0f, 0.34f, ctx.clrWhite, "Y", 0.85f);
-
-        C2D_DrawCircleSolid(274.0f, 140.0f, 0.17f, 8.0f, clrA);
-        drawCenteredTextWithShadow(ctx.textBuf, 274.0f, 140.0f, 0.34f, ctx.clrWhite, "A", 0.85f);
-
-        // START / SELECT / HOME
-        u32 clrSel = getBtnClr(KEY_SELECT, Ui::rgba(50, 44, 70));
-        u32 clrStr = getBtnClr(KEY_START, Ui::rgba(50, 44, 70));
-
-        Ui::pill(116.0f, 176.0f, 24.0f, 9.0f, 0.16f, clrSel);
-        drawCenteredTextWithShadow(ctx.textBuf, 128.0f, 180.5f, 0.28f, ctx.clrWhite, "SEL", 0.85f);
-
-        Ui::pill(148.0f, 176.0f, 24.0f, 9.0f, 0.16f, Ui::rgba(40, 36, 58));
-        drawCenteredTextWithShadow(ctx.textBuf, 160.0f, 180.5f, 0.27f, Ui::rgba(210, 205, 230), "HOME", 0.85f);
-
-        Ui::pill(180.0f, 176.0f, 24.0f, 9.0f, 0.16f, clrStr);
-        drawCenteredTextWithShadow(ctx.textBuf, 192.0f, 180.5f, 0.28f, ctx.clrWhite, "STR", 0.85f);
-    } else { // Pestañas Audio (2), Juego (3) o Visual (4): tarjetas táctiles para ajustar con stylus
-        int count = tabItemCounts[activeTab];
-        float bCardH = (count == 6) ? 25.0f : ((count == 5) ? 30.0f : 37.0f);
-        float bCardStep = (count == 6) ? 28.0f : ((count == 5) ? 33.0f : 41.0f);
-        float bStartY = (count == 6) ? 32.0f : ((count == 5) ? 33.0f : 36.0f);
-        float bTitleYOff = (count == 6) ? 1.0f : ((count == 5) ? 2.0f : 5.0f);
-        float bDescYOff  = (count == 6) ? 13.5f : ((count == 5) ? 15.5f : 20.0f);
-        float bSwYOff    = (count == 6) ? 3.5f : ((count == 5) ? 6.0f : 10.0f);
-        float bSldYOff   = (count == 6) ? 8.0f : ((count == 5) ? 10.0f : 14.0f);
-        float bPillYOff  = (count == 6) ? 3.5f : ((count == 5) ? 5.0f : 8.0f);
-
-        for (int i = 0; i < count; ++i) {
-            int optIdx = tabItems[activeTab][i];
-            float cy = bStartY + i * bCardStep;
-            bool sel = (ctx.settingsOption == optIdx);
-            Ui::panel(10.0f, cy, 300.0f, bCardH, 0.15f, sel ? Ui::rgba(42, 34, 70, 240) : Ui::rgba(22, 19, 36, 220), sel ? ctx.clrCursor : 0);
-
-            // Detección de toque en la fila
-            if (ctx.isTouching && ctx.touch.px >= 10 && ctx.touch.px <= 310 && ctx.touch.py >= cy && ctx.touch.py <= cy + bCardH) {
-                ctx.settingsOption = optIdx;
-                if (optIdx == 8) { // Música
-                    ctx.settings.musicVolume = std::max(0, std::min(100, (int)(((ctx.touch.px - 180.0f) / 115.0f) * 100.0f)));
-                    ctx.audio.setVolumes(ctx.settings.musicVolume, ctx.settings.sfxVolume);
-                } else if (optIdx == 9) { // SFX
-                    ctx.settings.sfxVolume = std::max(0, std::min(100, (int)(((ctx.touch.px - 180.0f) / 115.0f) * 100.0f)));
-                    ctx.audio.setVolumes(ctx.settings.musicVolume, ctx.settings.sfxVolume);
-                } else if (optIdx == 10) { // Offset
-                    ctx.settings.audioOffsetMs = std::max(-150, std::min(150, (int)(((ctx.touch.px - 180.0f) / 115.0f) * 300.0f - 150.0f)));
-                } else if (optIdx == 11 && ctx.touchJustDown) { // Hitsounds Beatmap
-                    ctx.settings.beatmapHitsounds = !ctx.settings.beatmapHitsounds;
-                } else if (optIdx == 22 && ctx.touchJustDown) { // Idioma / Language
-                    ctx.settings.language = (ctx.settings.language + 1) % LANG_COUNT;
-                    Localization::setLanguage(static_cast<AppLanguage>(ctx.settings.language));
-                    ctx.settings.save();
-                    ctx.audio.playHitSound(2);
-                } else if (optIdx == 12 && ctx.touchJustDown) { // Modo de Juego
-                    ctx.settings.gameMode = static_cast<GameMode>((ctx.settings.gameMode + 1) % 4);
-                    ctx.settings.save();
-                } else if (optIdx == 13 && ctx.touchJustDown) { // Skin
-                    ctx.settings.skinIndex = (ctx.settings.skinIndex + 1) % std::max(1, (int)ctx.skinMgr.skins.size());
-                    ctx.applyActiveSkinAudio();
-                } else if (optIdx == 14 && ctx.touchJustDown) { // Sliders Serpiente
-                    ctx.settings.snakingSliders = !ctx.settings.snakingSliders;
-                } else if (optIdx == 15 && ctx.touchJustDown) { // Combo Bursts
-                    ctx.settings.comboBursts = !ctx.settings.comboBursts;
-                } else if (optIdx == 20 && ctx.touchJustDown) { // Efecto Golpes 300
-                    ctx.settings.showHit300 = !ctx.settings.showHit300;
-                    ctx.audio.playHitSound(0);
-                } else if (optIdx == 16 && ctx.touchJustDown) { // Fondo Taiko
-                    ctx.settings.taikoBgMode = (ctx.settings.taikoBgMode + 1) % 3;
-                    ctx.settings.save();
-                } else if (optIdx == 17) { // Cursor
-                    ctx.settings.cursorScale = std::max(0.5f, std::min(2.0f, 0.5f + ((ctx.touch.px - 180.0f) / 115.0f) * 1.5f));
-                } else if (optIdx == 18) { // BgDim
-                    ctx.settings.bgDim = std::max(20, std::min(100, (int)(20 + ((ctx.touch.px - 180.0f) / 115.0f) * 80.0f)));
-                } else if (optIdx == 19 && ctx.touchJustDown) { // Videos
-                    ctx.settings.enableVideo = !ctx.settings.enableVideo;
-                } else if (optIdx == 21 && ctx.touchJustDown) { // Descargas Multijugador
-                    ctx.settings.multiDlOption = (ctx.settings.multiDlOption + 1) % 2;
-                    ctx.multiMgr.enableBgDownload = (ctx.settings.multiDlOption != 0);
-                    ctx.settings.save();
-                }
-                ctx.settings.clampValues();
-            }
-
-            if (optIdx == 8) {
-                drawText(ctx.textBuf, 20.0f, cy + bTitleYOff, 0.40f, ctx.clrWhite, LOC(STR_SET_MUSIC_VOL));
-                char desc[32]; std::snprintf(desc, sizeof(desc), "%d%%", ctx.settings.musicVolume);
-                drawText(ctx.textBuf, 20.0f, cy + bDescYOff, 0.33f, ctx.clr300, desc);
-                Ui::sliderBar(180.0f, cy + bSldYOff, 115.0f, 9.0f, 0.25f, ctx.settings.musicVolume / 100.0f, ctx.clrCursor, sel);
-            } else if (optIdx == 9) {
-                drawText(ctx.textBuf, 20.0f, cy + bTitleYOff, 0.40f, ctx.clrWhite, LOC(STR_SET_SFX_VOL));
-                char desc[32]; std::snprintf(desc, sizeof(desc), "%d%%", ctx.settings.sfxVolume);
-                drawText(ctx.textBuf, 20.0f, cy + bDescYOff, 0.33f, ctx.clr300, desc);
-                Ui::sliderBar(180.0f, cy + bSldYOff, 115.0f, 9.0f, 0.25f, ctx.settings.sfxVolume / 100.0f, ctx.clrCursor, sel);
-            } else if (optIdx == 10) {
-                drawText(ctx.textBuf, 20.0f, cy + bTitleYOff, 0.40f, ctx.clrWhite, LOC(STR_SET_OFFSET));
-                char desc[32]; std::snprintf(desc, sizeof(desc), "%+d ms", ctx.settings.audioOffsetMs);
-                drawText(ctx.textBuf, 20.0f, cy + bDescYOff, 0.33f, ctx.clr100, desc);
-                float r = (ctx.settings.audioOffsetMs + 150) / 300.0f;
-                Ui::sliderBar(180.0f, cy + bSldYOff, 115.0f, 9.0f, 0.25f, r, ctx.clr300, sel);
-            } else if (optIdx == 11) {
-                drawText(ctx.textBuf, 20.0f, cy + bTitleYOff, 0.40f, ctx.clrWhite, LOC(STR_SET_MAP_HITSOUNDS));
-                drawText(ctx.textBuf, 20.0f, cy + bDescYOff, 0.33f, ctx.clrMuted, ctx.settings.beatmapHitsounds ? LOC(STR_ON) : LOC(STR_OFF));
-                Ui::toggleSwitch(245.0f, cy + bSwYOff, 48.0f, 18.0f, 0.25f, ctx.settings.beatmapHitsounds, ctx.clr100);
-            } else if (optIdx == 22) {
-                drawText(ctx.textBuf, 20.0f, cy + bTitleYOff, 0.40f, ctx.clrWhite, LOC(STR_SET_LANGUAGE));
-                drawText(ctx.textBuf, 20.0f, cy + bDescYOff, 0.33f, ctx.clr300, ctx.settings.getLanguageName());
-                u32 lPill = Ui::rgba(45, 115, 215);
-                Ui::pill(232.0f, cy + bPillYOff, 68.0f, (count == 6) ? 18.0f : 20.0f, 0.25f, lPill);
-                drawCenteredText(ctx.textBuf, 266.0f, cy + bPillYOff + ((count == 6) ? 9.0f : 10.0f), 0.33f, ctx.clrWhite, ctx.settings.getLanguageName(), 0.85f);
-            } else if (optIdx == 12) {
-                drawText(ctx.textBuf, 20.0f, cy + bTitleYOff, 0.40f, ctx.clrWhite, LOC(STR_SET_MAIN_MODE));
-                drawText(ctx.textBuf, 20.0f, cy + bDescYOff, 0.33f, ctx.clr300, ctx.settings.getGameModeName());
-                u32 mPill = (ctx.settings.gameMode == MODE_TAIKO) ? Ui::rgba(180, 45, 45) : ((ctx.settings.gameMode == MODE_CATCH) ? Ui::rgba(35, 160, 85) : ((ctx.settings.gameMode == MODE_MANIA) ? Ui::rgba(140, 35, 175) : Ui::rgba(55, 40, 95)));
-                Ui::pill(232.0f, cy + bPillYOff, 68.0f, 20.0f, 0.25f, mPill);
-                drawCenteredText(ctx.textBuf, 266.0f, cy + bPillYOff + 10.0f, 0.33f, ctx.clrWhite, ctx.settings.getGameModeShortName(), 0.85f);
-            } else if (optIdx == 13) {
-                drawText(ctx.textBuf, 20.0f, cy + bTitleYOff, 0.40f, ctx.clrWhite, LOC(STR_SET_ACTIVE_SKIN));
-                drawText(ctx.textBuf, 20.0f, cy + bDescYOff, 0.33f, ctx.clr300, truncateString(activeSkin.name, 20).c_str());
-                for (size_t c = 0; c < std::min((size_t)4, activeSkin.comboColors.size()); ++c) {
-                    u32 cc = C2D_Color32(activeSkin.comboColors[c].r, activeSkin.comboColors[c].g, activeSkin.comboColors[c].b, 255);
-                    C2D_DrawCircleSolid(225.0f + c * 18.0f, cy + bPillYOff + 10.0f, 0.25f, 6.0f, cc);
-                }
-            } else if (optIdx == 14) {
-                drawText(ctx.textBuf, 20.0f, cy + bTitleYOff, 0.40f, ctx.clrWhite, LOC(STR_SET_SNAKING));
-                drawText(ctx.textBuf, 20.0f, cy + bDescYOff, 0.33f, ctx.clrMuted, ctx.settings.snakingSliders ? LOC(STR_ON) : LOC(STR_OFF));
-                Ui::toggleSwitch(245.0f, cy + bSwYOff, 48.0f, 18.0f, 0.25f, ctx.settings.snakingSliders, ctx.clr100);
-            } else if (optIdx == 15) {
-                drawText(ctx.textBuf, 20.0f, cy + bTitleYOff, 0.40f, ctx.clrWhite, LOC(STR_SET_BURSTS));
-                drawText(ctx.textBuf, 20.0f, cy + bDescYOff, 0.33f, ctx.clrMuted, ctx.settings.comboBursts ? LOC(STR_ON) : LOC(STR_OFF));
-                Ui::toggleSwitch(245.0f, cy + bSwYOff, 48.0f, 18.0f, 0.25f, ctx.settings.comboBursts, ctx.clr100);
-            } else if (optIdx == 20) {
-                drawText(ctx.textBuf, 20.0f, cy + bTitleYOff, 0.40f, ctx.clrWhite, LOC(STR_SET_HIT300));
-                drawText(ctx.textBuf, 20.0f, cy + bDescYOff, 0.33f, ctx.clrMuted, ctx.settings.showHit300 ? LOC(STR_ON) : LOC(STR_OFF));
-                Ui::toggleSwitch(245.0f, cy + bSwYOff, 48.0f, 18.0f, 0.25f, ctx.settings.showHit300, ctx.clr100);
-            } else if (optIdx == 16) {
-                drawText(ctx.textBuf, 20.0f, cy + bTitleYOff, 0.40f, ctx.clrWhite, LOC(STR_SET_TAIKO_BG));
-                drawText(ctx.textBuf, 20.0f, cy + bDescYOff, 0.33f, ctx.clr300, ctx.settings.getTaikoBgModeName());
-                u32 bClr = (ctx.settings.taikoBgMode == 0) ? Ui::rgba(225, 145, 25) : ((ctx.settings.taikoBgMode == 1) ? Ui::rgba(45, 130, 215) : Ui::rgba(165, 55, 185));
-                Ui::pill(180.0f, cy + bPillYOff + 1.0f, 115.0f, 20.0f, 0.25f, bClr);
-                drawCenteredText(ctx.textBuf, 237.5f, cy + bPillYOff + 11.0f, 0.32f, ctx.clrWhite, ctx.settings.getTaikoBgModeName(), 0.35f);
-            } else if (optIdx == 17) {
-                drawText(ctx.textBuf, 20.0f, cy + bTitleYOff, 0.40f, ctx.clrWhite, LOC(STR_SET_CURSOR_SIZE));
-                char desc[32]; std::snprintf(desc, sizeof(desc), "%.1fx", ctx.settings.cursorScale);
-                drawText(ctx.textBuf, 20.0f, cy + bDescYOff, 0.33f, ctx.clr300, desc);
-                float r = (ctx.settings.cursorScale - 0.5f) / 1.5f;
-                Ui::sliderBar(180.0f, cy + bSldYOff, 115.0f, 9.0f, 0.25f, r, ctx.clrCursor, sel);
-            } else if (optIdx == 18) {
-                drawText(ctx.textBuf, 20.0f, cy + bTitleYOff, 0.40f, ctx.clrWhite, LOC(STR_SET_BG_DIM));
-                char desc[32]; std::snprintf(desc, sizeof(desc), "%d%%", ctx.settings.bgDim);
-                drawText(ctx.textBuf, 20.0f, cy + bDescYOff, 0.33f, ctx.clr300, desc);
-                float r = (ctx.settings.bgDim - 20) / 80.0f;
-                Ui::sliderBar(180.0f, cy + bSldYOff, 115.0f, 9.0f, 0.25f, r, ctx.clrPrimary, sel);
-            } else if (optIdx == 19) {
-                drawText(ctx.textBuf, 20.0f, cy + bTitleYOff, 0.40f, ctx.clrWhite, LOC(STR_SET_VIDEOS));
-                drawText(ctx.textBuf, 20.0f, cy + bDescYOff, 0.33f, ctx.clrMuted, ctx.settings.enableVideo ? LOC(STR_ON) : LOC(STR_OFF));
-                Ui::toggleSwitch(245.0f, cy + bSwYOff, 48.0f, 18.0f, 0.25f, ctx.settings.enableVideo, ctx.clr100);
-            } else if (optIdx == 21) {
-                drawText(ctx.textBuf, 20.0f, cy + bTitleYOff, 0.40f, ctx.clrWhite, LOC(STR_SET_MULTI_DL));
-                drawText(ctx.textBuf, 20.0f, cy + bDescYOff, 0.33f, ctx.clr300, ctx.settings.getMultiDlOptionName());
-                u32 dClr = (ctx.settings.multiDlOption == 1) ? Ui::rgba(45, 130, 215) : Ui::rgba(110, 95, 140);
-                Ui::pill(175.0f, cy + bPillYOff + 1.0f, 120.0f, 20.0f, 0.25f, dClr);
-                drawCenteredText(ctx.textBuf, 235.0f, cy + bPillYOff + 11.0f, 0.30f, ctx.clrWhite, ctx.settings.getMultiDlOptionName(), 0.35f);
-            }
+        for (const auto& ch : chips) {
+            Ui::pill(ch.x, ch.y, ch.w, ch.h, 0.91f, ch.clr);
+            drawCenteredTextWithShadow(ctx.textBuf, ch.x + ch.w * 0.5f, ch.y + ch.h * 0.5f, 0.32f, ctx.clrWhite, ch.lbl, 0.93f);
         }
+
+        Ui::button(90.0f, 180.0f, 140.0f, 24.0f, 0.91f, Ui::rgba(45, 32, 68), Ui::rgba(255, 75, 150), false);
+        drawCenteredTextWithShadow(ctx.textBuf, 160.0f, 192.0f, 0.33f, ctx.clrWhite,
+            esp ? "Cancelar (B)" : "Cancel (B)", 0.94f);
     }
-
-    if (ctx.capturingKeyIndex != -1 && activeTab != 1) {
-        C2D_DrawRectSolid(0.0f, 0.0f, 0.88f, 320.0f, 240.0f, Ui::rgba(8, 6, 16, 215));
-        Ui::panel(20.0f, 50.0f, 280.0f, 140.0f, 0.90f, Ui::rgba(26, 20, 44, 250), ctx.clrCursor);
-        const char* capNames[4] = { LOC(STR_KEY_K1), LOC(STR_KEY_K2), LOC(STR_KEY_SMOKE), LOC(STR_KEY_RETRY) };
-        int cIdx = std::max(0, std::min(3, ctx.capturingKeyIndex - 4));
-        drawCenteredText(ctx.textBuf, 160.0f, 72.0f, 0.48f, ctx.clrCursor, LOC(STR_CTRL_ASSIGN_KEY_TITLE), 0.95f);
-        drawCenteredText(ctx.textBuf, 160.0f, 96.0f, 0.42f, ctx.clrWhite, capNames[cIdx], 0.95f);
-        drawCenteredText(ctx.textBuf, 160.0f, 126.0f, 0.36f, ctx.clr100, LOC(STR_CTRL_PRESS_ANY), 0.95f);
-        drawCenteredText(ctx.textBuf, 160.0f, 154.0f, 0.32f, ctx.clrMuted, LOC(STR_CTRL_CANCEL_HINT), 0.95f);
-        if (ctx.touchJustDown) {
-            ctx.capturingKeyIndex = -1;
-            ctx.audio.playHitSound(0);
-        }
-    }
-
-    // Barra inferior con 3 botones de acción estilo multijugador
-    Ui::button(10.0f, 204.0f, 96.0f, 28.0f, 0.20f, Ui::rgba(20, 36, 60, 240), Ui::rgba(40, 180, 240), false);
-    Ui::pill(15.0f, 209.0f, 18.0f, 18.0f, 0.24f, Ui::rgba(40, 180, 240));
-    drawCenteredText(ctx.textBuf, 24.0f, 218.0f, 0.30f, Ui::rgba(0, 0, 0, 240), "X", 0.28f);
-    drawTextWithShadow(ctx.textBuf, 37.0f, 211.0f, 0.33f, ctx.clrWhite, (activeTab == 1) ? LOC(STR_DEFAULT) : LOC(STR_CALIBRATE), 0.28f);
-
-    Ui::button(112.0f, 204.0f, 96.0f, 28.0f, 0.20f, Ui::rgba(45, 35, 20, 240), Ui::rgba(255, 180, 40), false);
-    Ui::pill(117.0f, 209.0f, 18.0f, 18.0f, 0.24f, Ui::rgba(255, 180, 40));
-    drawCenteredText(ctx.textBuf, 126.0f, 218.0f, 0.30f, Ui::rgba(0, 0, 0, 240), "Y", 0.28f);
-    drawTextWithShadow(ctx.textBuf, 140.0f, 211.0f, 0.34f, ctx.clrWhite, LOC(STR_RESET), 0.28f);
-
-    Ui::button(214.0f, 204.0f, 96.0f, 28.0f, 0.20f, Ui::rgba(42, 20, 52, 240), ctx.clrPrimary, true);
-    Ui::pill(219.0f, 209.0f, 18.0f, 18.0f, 0.24f, ctx.clrPrimary);
-    drawCenteredText(ctx.textBuf, 228.0f, 218.0f, 0.30f, ctx.clrWhite, "B", 0.28f);
-    drawTextWithShadow(ctx.textBuf, 242.0f, 211.0f, 0.34f, ctx.clrWhite, LOC(STR_SAVE), 0.28f);
 
     if (ctx.isTouching) {
-        Ui::glow(ctx.touch.px, ctx.touch.py, 0.75f, 11.0f, Ui::withAlpha(ctx.clr300, 140), 3);
-        C2D_DrawCircleSolid(ctx.touch.px, ctx.touch.py, 0.8f, 4.5f, ctx.clr300);
+        Ui::glow(ctx.touch.px, ctx.touch.py, 0.95f, 10.0f, Ui::withAlpha(ctx.clr300, 130), 3);
+        C2D_DrawCircleSolid(ctx.touch.px, ctx.touch.py, 0.96f, 4.0f, ctx.clr300);
     }
     Ui::drawTransition(320.0f, 240.0f, ctx.screenFade, ctx.clrPrimary);
 

@@ -15,6 +15,7 @@
 #include "Settings.hpp"
 #include "SkinManager.hpp"
 #include "ScoreManager.hpp"
+#include "Replay.hpp"
 #include "WifiServer.hpp"
 #include "TextureLoader.hpp"
 #include "VideoPlayer.hpp"
@@ -93,12 +94,49 @@ struct AppContext {
 
     // Texturas GPU dinámicas y reproductor de video
     LoadedTexture bgTex;
+
+    // osu!standard
     LoadedTexture texSkinCursor;
     LoadedTexture texSkinCursorTrail;
     LoadedTexture texSkinCircle;
     LoadedTexture texSkinOverlay;
     LoadedTexture texSkinApproach;
     LoadedTexture texSkinComboBurst;
+    LoadedTexture texSkinSliderBall;
+    LoadedTexture texSkinSliderFollow;
+    LoadedTexture texSkinReverseArrow;
+    LoadedTexture texSkinHit0;
+    LoadedTexture texSkinHit50;
+    LoadedTexture texSkinHit100;
+    LoadedTexture texSkinHit300;
+
+    // osu!taiko
+    LoadedTexture texTaikoDon;
+    LoadedTexture texTaikoKat;
+    LoadedTexture texTaikoDonBig;
+    LoadedTexture texTaikoKatBig;
+    LoadedTexture texTaikoHitCircle;
+    LoadedTexture texTaikoHitCircleOverlay;
+    LoadedTexture texTaikoDrum;
+    LoadedTexture texTaikoDrumDon;
+    LoadedTexture texTaikoDrumKat;
+
+    // osu!mania
+    LoadedTexture texManiaNote1;
+    LoadedTexture texManiaNote2;
+    LoadedTexture texManiaNoteS;
+    LoadedTexture texManiaStageLight;
+    LoadedTexture texManiaStageBottom;
+
+    // osu!catch
+    LoadedTexture texCatchFruitApple;
+    LoadedTexture texCatchFruitOrange;
+    LoadedTexture texCatchFruitGrape;
+    LoadedTexture texCatchFruitStrawberry;
+    LoadedTexture texCatchFruitBanana;
+    LoadedTexture texCatchFruitDrop;
+    LoadedTexture texCatchPlate;
+    LoadedTexture texCatchCatcher;
 
     bool isNew3DS = false;
     int bgMaxW = 256;
@@ -128,6 +166,7 @@ struct AppContext {
 
     bool modMenuOpen = false;
     int modCursor = 0;
+    int modTab = 0;
     bool deleteConfirmOpen = false;
 
     bool searchKeyboardOpen = false;
@@ -138,8 +177,26 @@ struct AppContext {
     int footerCardHover = -1;
 
     int songSelectTab = 0;
+    bool songInfoHidden = false;
     bool rankingExpanded = false;
     int rankingScroll = 0;
+    bool selectingReplayMode = false;
+    int selectedRecordIdx = 0;
+    float songSelectCardAnim = 1.0f;
+
+    // Transición estilo osu!lazer y carga escalonada al iniciar una canción
+    bool inSongIntro = false;
+    int songIntroTick = 0;
+    int songIntroLoadStage = 0;
+    int songIntroLeadInMs = 1500;
+    std::string songIntroOsuPath = "";
+    std::string songIntroTitle = "";
+    std::string songIntroArtist = "";
+    std::string songIntroVersion = "";
+    std::string songIntroCreator = "";
+    float songIntroStars = 0.0f;
+    float songIntroCS = 5.0f, songIntroAR = 5.0f, songIntroOD = 5.0f, songIntroHP = 5.0f;
+    int songIntroMode = 0;
 
     bool calibrationMode = false;
     u64 calibStartTick = 0;
@@ -245,5 +302,14 @@ struct AppContext {
     bool startSelectedBeatmap();
     void toggleModByIndex(int idx);
     std::string findLocalMapFile(const std::string& folder, const std::string& file);
+    // Sistema de repeticiones (Replays)
+    ReplayData currentReplay;
+    bool isReplayPlaying = false;
+    size_t replayPlaybackIndex = 0;
+    std::string replayToastMessage = "";
+    int replayToastTimer = 0;
+
     void triggerSuddenDeathFail();
+    bool playReplay(const ReplayData& rep);
+    bool playReplayFromFile(const std::string& path);
 };

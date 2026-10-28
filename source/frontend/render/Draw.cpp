@@ -6,7 +6,7 @@
 
 void drawRingZ(float x, float y, float z, float radius, float thickness, u32 color, int segments) {
     if (radius < 0.5f) return;
-    int segs = std::max(12, std::min(segments, 24));
+    int segs = std::max(12, std::min(segments, 36));
     const float step = (2.0f * static_cast<float>(M_PI)) / segs;
     float prevX = x + radius;
     float prevY = y;
@@ -73,6 +73,13 @@ void drawCenteredTextWithShadow(C2D_TextBuf buf, float cx, float cy, float scale
     C2D_DrawText(&text, C2D_WithColor, rx, ry, z, scale, scale, color);
 }
 
+void drawRightAlignedText(C2D_TextBuf buf, float rx, float y, float scale, u32 color, const char* str, float z) {
+    C2D_Text text;
+    C2D_TextParse(&text, buf, str);
+    C2D_TextOptimize(&text);
+    C2D_DrawText(&text, C2D_WithColor | C2D_AlignRight, rx, y, z, scale, scale, color);
+}
+
 void drawKeyBadge(C2D_TextBuf buf, float x, float y, const char* key, const char* label, u32 keyClr, u32 textClr, float z) {
     float rx = std::round(x);
     float ry = std::round(y);
@@ -85,16 +92,21 @@ void drawKeyBadge(C2D_TextBuf buf, float x, float y, const char* key, const char
 
 void drawReverseArrow(float cx, float cy, float targetX, float targetY, float size, u32 color, float z) {
     float angle = std::atan2(targetY - cy, targetX - cx);
-    float tipX = cx + std::cos(angle) * (size * 0.45f);
-    float tipY = cy + std::sin(angle) * (size * 0.45f);
-    float wingAngle = 2.45f; // ~140 grados
-    float w1X = tipX + std::cos(angle + wingAngle) * (size * 0.75f);
-    float w1Y = tipY + std::sin(angle + wingAngle) * (size * 0.75f);
-    float w2X = tipX + std::cos(angle - wingAngle) * (size * 0.75f);
-    float w2Y = tipY + std::sin(angle - wingAngle) * (size * 0.75f);
+    float tipX = cx + std::cos(angle) * (size * 0.48f);
+    float tipY = cy + std::sin(angle) * (size * 0.48f);
+    float wingAngle = 2.42f; // ~138 grados
+    float w1X = tipX + std::cos(angle + wingAngle) * (size * 0.80f);
+    float w1Y = tipY + std::sin(angle + wingAngle) * (size * 0.80f);
+    float w2X = tipX + std::cos(angle - wingAngle) * (size * 0.80f);
+    float w2Y = tipY + std::sin(angle - wingAngle) * (size * 0.80f);
+    float notchX = cx - std::cos(angle) * (size * 0.05f);
+    float notchY = cy - std::sin(angle) * (size * 0.05f);
 
-    C2D_DrawLine(w1X, w1Y, color, tipX, tipY, color, 2.0f, z);
-    C2D_DrawLine(w2X, w2Y, color, tipX, tipY, color, 2.0f, z);
+    // Chevron solido estilizado de flecha de retorno
+    C2D_DrawTriangle(tipX, tipY, color, w1X, w1Y, color, notchX, notchY, color, z);
+    C2D_DrawTriangle(tipX, tipY, color, w2X, w2Y, color, notchX, notchY, color, z);
+    C2D_DrawLine(w1X, w1Y, color, tipX, tipY, color, 2.2f, z + 0.0001f);
+    C2D_DrawLine(w2X, w2Y, color, tipX, tipY, color, 2.2f, z + 0.0001f);
 }
 
 std::string truncateString(const std::string& str, size_t maxLen) {

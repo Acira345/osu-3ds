@@ -25,6 +25,7 @@ struct SkinProfile {
     bool cursorExpand = true;
     bool cursorTrail = true;
     bool darkCircleCenter = false;
+    bool hitCircleOverlayAboveNumber = false;
     float ringThickness = 2.2f;
 
     std::string hitNormalWav  = "romfs:/drum-hitnormal2.wav";
@@ -37,13 +38,49 @@ struct SkinProfile {
     std::string nightcoreHatWav  = "";
     int synthPreset = 0; // 0 = RomFS Classic, 1 = Soft/Minimal Click, 2 = Rafis Ping, 3 = Neon Synth
 
-    // Sprites PNG opcionales de skins personalizados (.osk)
+    // Sprites opcionales de skins personalizados (.osk)
+    // osu!standard
     std::string cursorPng           = "";
     std::string cursorTrailPng      = "";
     std::string hitCirclePng        = "";
     std::string hitCircleOverlayPng = "";
     std::string approachCirclePng   = "";
     std::string comboBurstPng       = "";
+    std::string sliderBallPng       = "";
+    std::string sliderFollowPng     = "";
+    std::string reverseArrowPng     = "";
+    std::string hit0Png             = "";
+    std::string hit50Png            = "";
+    std::string hit100Png           = "";
+    std::string hit300Png           = "";
+
+    // osu!taiko
+    std::string taikoDonPng         = "";
+    std::string taikoKatPng         = "";
+    std::string taikoDonBigPng      = "";
+    std::string taikoKatBigPng      = "";
+    std::string taikoHitCirclePng   = "";
+    std::string taikoHitCircleOverlayPng = "";
+    std::string taikoDrumPng        = "";
+    std::string taikoDrumDonPng     = "";
+    std::string taikoDrumKatPng     = "";
+
+    // osu!mania
+    std::string maniaNote1Png       = "";
+    std::string maniaNote2Png       = "";
+    std::string maniaNoteSPng       = "";
+    std::string maniaStageLightPng  = "";
+    std::string maniaStageBottomPng = "";
+
+    // osu!catch
+    std::string catchFruitApplePng  = "";
+    std::string catchFruitOrangePng = "";
+    std::string catchFruitGrapePng  = "";
+    std::string catchFruitStrawberryPng = "";
+    std::string catchFruitBananaPng = "";
+    std::string catchFruitDropPng   = "";
+    std::string catchPlatePng       = "";
+    std::string catchCatcherPng     = "";
 };
 
 class SkinManager {
@@ -164,27 +201,30 @@ private:
     static bool parseRGB(const std::string& val, RGBColor& out) {
         std::vector<std::string> parts = Beatmap::split(val, ',');
         if (parts.size() < 3) return false;
-        out.r = static_cast<uint8_t>(std::max(0, std::min(255, std::atoi(parts[0].c_str()))));
-        out.g = static_cast<uint8_t>(std::max(0, std::min(255, std::atoi(parts[1].c_str()))));
-        out.b = static_cast<uint8_t>(std::max(0, std::min(255, std::atoi(parts[2].c_str()))));
+        out.r = static_cast<uint8_t>(std::max(0, std::min(255, std::atoi(Beatmap::trim(parts[0]).c_str()))));
+        out.g = static_cast<uint8_t>(std::max(0, std::min(255, std::atoi(Beatmap::trim(parts[1]).c_str()))));
+        out.b = static_cast<uint8_t>(std::max(0, std::min(255, std::atoi(Beatmap::trim(parts[2]).c_str()))));
         return true;
     }
 
-    static std::string findWavInSkinFolder(const std::string& folder, const std::vector<std::string>& candidates, const std::string& fallback) {
+    static std::vector<std::string> getFilesInFolder(const std::string& folder) {
+        std::vector<std::string> files;
         std::string openPath = folder;
         if (openPath.size() > 1 && openPath.back() == '/' && openPath.find(":/") != openPath.size() - 2) {
             openPath.pop_back();
         }
         DIR* dir = opendir(openPath.c_str());
-        if (!dir) return fallback;
+        if (!dir) return files;
 
-        std::vector<std::string> files;
         struct dirent* entry;
         while ((entry = readdir(dir)) != nullptr) {
             files.push_back(entry->d_name);
         }
         closedir(dir);
+        return files;
+    }
 
+    static std::string findFileInList(const std::string& folder, const std::vector<std::string>& files, const std::vector<std::string>& candidates) {
         for (const auto& cand : candidates) {
             std::string candLow = Beatmap::toLower(cand);
             for (const auto& f : files) {
@@ -193,7 +233,49 @@ private:
                 }
             }
         }
+        return "";
+    }
+
+    static std::string findImageInFolder(const std::string& folder, const std::vector<std::string>& files, const std::vector<std::string>& baseNames) {
+        for (const auto& base : baseNames) {
+            std::vector<std::string> cands = {
+                base + ".png",
+                base + "@2x.png",
+                base + ".jpg",
+                base + "@2x.jpg",
+                base + ".jpeg"
+            };
+            std::string res = findFileInList(folder, files, cands);
+            if (!res.empty()) return res;
+        }
+        return "";
+    }
+
+    static std::string findAudioInFolder(const std::string& folder, const std::vector<std::string>& files, const std::vector<std::string>& baseNames, const std::string& fallback) {
+        for (const auto& base : baseNames) {
+            std::vector<std::string> cands = {
+                base + ".wav",
+                base + ".ogg",
+                base + ".mp3"
+            };
+            std::string res = findFileInList(folder, files, cands);
+            if (!res.empty()) return res;
+        }
         return fallback;
+    }
+
+    static std::string findImageWithSubdirs(const std::string& folder, const std::vector<std::string>& files, const std::vector<std::string>& baseNames, const std::string& subDirName = "") {
+        std::string res = findImageInFolder(folder, files, baseNames);
+        if (!res.empty()) return res;
+        if (!subDirName.empty()) {
+            std::string subPath = folder + subDirName + "/";
+            auto subFiles = getFilesInFolder(subPath);
+            if (!subFiles.empty()) {
+                res = findImageInFolder(subPath, subFiles, baseNames);
+                if (!res.empty()) return res;
+            }
+        }
+        return "";
     }
 
     void loadCustomSkinFolder(const std::string& folderPath, const std::string& folderName) {
@@ -207,8 +289,11 @@ private:
         s.hasSliderTrackOverride = true;
         s.sliderTrackColor = RGBColor(22, 22, 32);
 
+        // Listar archivos del directorio de skin una sola vez en memoria
+        std::vector<std::string> files = getFilesInFolder(folderPath);
+
         // Buscar skin.ini (insensible a mayúsculas)
-        std::string iniPath = findWavInSkinFolder(folderPath, {"skin.ini"}, "");
+        std::string iniPath = findFileInList(folderPath, files, {"skin.ini"});
         if (!iniPath.empty()) {
             std::ifstream file(iniPath.c_str());
             if (file.is_open()) {
@@ -219,8 +304,13 @@ private:
                         (unsigned char)line[1] == 0xBB && (unsigned char)line[2] == 0xBF) {
                         line = line.substr(3);
                     }
+                    // Quitar comentarios // antes de interpretar la línea
+                    size_t commentPos = line.find("//");
+                    if (commentPos != std::string::npos) {
+                        line = line.substr(0, commentPos);
+                    }
                     line = Beatmap::trim(line);
-                    if (line.empty() || line.rfind("//", 0) == 0) continue;
+                    if (line.empty()) continue;
 
                     if (line.front() == '[' && line.back() == ']') {
                         section = Beatmap::toLower(Beatmap::trim(line.substr(1, line.size() - 2)));
@@ -229,32 +319,28 @@ private:
 
                     size_t sep = line.find(':');
                     if (sep == std::string::npos) continue;
-                    std::string key = Beatmap::trim(line.substr(0, sep));
+                    std::string key = Beatmap::toLower(Beatmap::trim(line.substr(0, sep)));
                     std::string val = Beatmap::trim(line.substr(sep + 1));
-                    // Quitar comentarios inline si existen
-                    size_t commentPos = val.find("//");
-                    if (commentPos != std::string::npos) {
-                        val = Beatmap::trim(val.substr(0, commentPos));
-                    }
 
                     if (section == "general") {
-                        if (key == "Name" && !val.empty()) s.name = "[SD] " + val;
-                        else if (key == "Author" && !val.empty()) s.author = val;
-                        else if (key == "CursorExpand") s.cursorExpand = (std::atoi(val.c_str()) != 0);
-                        else if (key == "CursorTrail")  s.cursorTrail  = (std::atoi(val.c_str()) != 0);
-                        else if (key == "DarkCircleCenter") s.darkCircleCenter = (std::atoi(val.c_str()) != 0);
+                        if (key == "name" && !val.empty()) s.name = "[SD] " + val;
+                        else if (key == "author" && !val.empty()) s.author = val;
+                        else if (key == "cursorexpand") s.cursorExpand = (std::atoi(val.c_str()) != 0);
+                        else if (key == "cursortrail")  s.cursorTrail  = (std::atoi(val.c_str()) != 0);
+                        else if (key == "darkcirclecenter") s.darkCircleCenter = (std::atoi(val.c_str()) != 0);
+                        else if (key == "hitcircleoverlayabovenumber") s.hitCircleOverlayAboveNumber = (std::atoi(val.c_str()) != 0);
                     } else if (section == "colours" || section == "colors") {
                         RGBColor rgb;
-                        if (key.rfind("Combo", 0) == 0 && parseRGB(val, rgb)) {
+                        if (key.rfind("combo", 0) == 0 && parseRGB(val, rgb)) {
                             s.comboColors.push_back(rgb);
-                        } else if (key == "SliderBorder" && parseRGB(val, rgb)) {
+                        } else if (key == "sliderborder" && parseRGB(val, rgb)) {
                             s.sliderBorderColor = rgb;
-                        } else if (key == "SliderTrackOverride" && parseRGB(val, rgb)) {
+                        } else if (key == "slidertrackoverride" && parseRGB(val, rgb)) {
                             s.hasSliderTrackOverride = true;
                             s.sliderTrackColor = rgb;
-                        } else if (key == "Cursor" && parseRGB(val, rgb)) {
+                        } else if (key == "cursor" && parseRGB(val, rgb)) {
                             s.cursorColor = rgb;
-                        } else if (key == "CursorTrail" && parseRGB(val, rgb)) {
+                        } else if (key == "cursortrail" && parseRGB(val, rgb)) {
                             s.cursorTrailColor = rgb;
                         }
                     }
@@ -271,53 +357,71 @@ private:
             };
         }
 
-        // Resolver hitsounds reales (.wav o .ogg) del skin en la SD
-        s.hitNormalWav = findWavInSkinFolder(folderPath, {
-            "soft-hitnormal.wav", "normal-hitnormal.wav", "drum-hitnormal.wav",
-            "soft-hitnormal.ogg", "normal-hitnormal.ogg", "drum-hitnormal.ogg",
-            "soft-hitnormal2.wav", "normal-hitnormal2.wav", "drum-hitnormal2.wav"
+        // Resolver hitsounds (.wav, .ogg o .mp3) del skin en la SD
+        s.hitNormalWav = findAudioInFolder(folderPath, files, {
+            "soft-hitnormal", "normal-hitnormal", "drum-hitnormal", "hitnormal", "soft-hitnormal2"
         }, "romfs:/drum-hitnormal2.wav");
 
-        s.hitWhistleWav = findWavInSkinFolder(folderPath, {
-            "soft-hitwhistle.wav", "normal-hitwhistle.wav", "drum-hitwhistle.wav",
-            "soft-hitwhistle.ogg", "normal-hitwhistle.ogg", "drum-hitwhistle.ogg",
-            "soft-hitwhistle2.wav", "normal-hitwhistle2.wav", "drum-hitwhistle2.wav"
+        s.hitWhistleWav = findAudioInFolder(folderPath, files, {
+            "soft-hitwhistle", "normal-hitwhistle", "drum-hitwhistle", "hitwhistle", "soft-hitwhistle2"
         }, "romfs:/drum-hitwhistle2.wav");
 
-        s.hitFinishWav = findWavInSkinFolder(folderPath, {
-            "soft-hitfinish.wav", "normal-hitfinish.wav", "drum-hitfinish.wav",
-            "soft-hitfinish.ogg", "normal-hitfinish.ogg", "drum-hitfinish.ogg",
-            "soft-hitfinish2.wav", "normal-hitfinish2.wav", "drum-hitfinish2.wav",
-            "soft-hitclap.wav", "normal-hitclap.wav", "drum-hitclap.wav"
+        s.hitFinishWav = findAudioInFolder(folderPath, files, {
+            "soft-hitfinish", "normal-hitfinish", "drum-hitfinish", "hitfinish", "soft-hitclap"
         }, "romfs:/drum-hitclap2.wav");
 
-        s.hitClapWav = findWavInSkinFolder(folderPath, {
-            "soft-hitclap.wav", "normal-hitclap.wav", "drum-hitclap.wav",
-            "soft-hitclap.ogg", "normal-hitclap.ogg", "drum-hitclap.ogg",
-            "soft-hitclap2.wav", "normal-hitclap2.wav", "drum-hitclap2.wav"
+        s.hitClapWav = findAudioInFolder(folderPath, files, {
+            "soft-hitclap", "normal-hitclap", "drum-hitclap", "hitclap", "soft-hitclap2"
         }, "romfs:/drum-hitclap2.wav");
 
-        s.comboBreakWav = findWavInSkinFolder(folderPath, {
-            "combobreak.wav", "combobreak.ogg"
-        }, "");
+        s.comboBreakWav = findAudioInFolder(folderPath, files, {"combobreak"}, "");
 
-        s.nightcoreKickWav = findWavInSkinFolder(folderPath, {
-            "nightcore-kick.wav", "nightcore-kick.ogg"
-        }, "");
-        s.nightcoreClapWav = findWavInSkinFolder(folderPath, {
-            "nightcore-clap.wav", "nightcore-clap.ogg"
-        }, "");
-        s.nightcoreHatWav  = findWavInSkinFolder(folderPath, {
-            "nightcore-hat.wav", "nightcore-hat.ogg"
-        }, "");
+        s.nightcoreKickWav = findAudioInFolder(folderPath, files, {"nightcore-kick"}, "");
+        s.nightcoreClapWav = findAudioInFolder(folderPath, files, {"nightcore-clap"}, "");
+        s.nightcoreHatWav  = findAudioInFolder(folderPath, files, {"nightcore-hat"}, "");
 
-        // Resolver sprites PNG opcionales del skin
-        s.cursorPng           = findWavInSkinFolder(folderPath, {"cursor.png"}, "");
-        s.cursorTrailPng      = findWavInSkinFolder(folderPath, {"cursortrail.png"}, "");
-        s.hitCirclePng        = findWavInSkinFolder(folderPath, {"hitcircle.png"}, "");
-        s.hitCircleOverlayPng = findWavInSkinFolder(folderPath, {"hitcircleoverlay.png"}, "");
-        s.approachCirclePng   = findWavInSkinFolder(folderPath, {"approachcircle.png"}, "");
-        s.comboBurstPng       = findWavInSkinFolder(folderPath, {"comboburst.png", "comboburst-0.png", "comboburst-1.png"}, "");
+        // Sprites PNG/JPG de osu!standard (con soporte nativo para 1x y @2x)
+        s.cursorPng           = findImageInFolder(folderPath, files, {"cursor"});
+        s.cursorTrailPng      = findImageInFolder(folderPath, files, {"cursortrail"});
+        s.hitCirclePng        = findImageInFolder(folderPath, files, {"hitcircle"});
+        s.hitCircleOverlayPng = findImageInFolder(folderPath, files, {"hitcircleoverlay"});
+        s.approachCirclePng   = findImageInFolder(folderPath, files, {"approachcircle"});
+        s.comboBurstPng       = findImageInFolder(folderPath, files, {"comboburst", "comboburst-0", "comboburst-1"});
+        s.sliderBallPng       = findImageInFolder(folderPath, files, {"sliderb0", "sliderb", "sliderball"});
+        s.sliderFollowPng     = findImageInFolder(folderPath, files, {"sliderfollowcircle"});
+        s.reverseArrowPng     = findImageInFolder(folderPath, files, {"reversearrow"});
+        s.hit0Png             = findImageInFolder(folderPath, files, {"hit0-0", "hit0"});
+        s.hit50Png            = findImageInFolder(folderPath, files, {"hit50-0", "hit50"});
+        s.hit100Png           = findImageInFolder(folderPath, files, {"hit100-0", "hit100", "hit100k-0", "hit100k"});
+        s.hit300Png           = findImageInFolder(folderPath, files, {"hit300-0", "hit300", "hit300g-0", "hit300g", "hit300k-0", "hit300k"});
+
+        // Sprites de osu!taiko (busca en raíz y en subcarpeta taiko/)
+        s.taikoDonPng         = findImageWithSubdirs(folderPath, files, {"taiko-normal", "don_note"}, "taiko");
+        s.taikoKatPng         = findImageWithSubdirs(folderPath, files, {"taiko-clap", "kat_note"}, "taiko");
+        s.taikoDonBigPng      = findImageWithSubdirs(folderPath, files, {"taiko-big-normal", "don_big"}, "taiko");
+        s.taikoKatBigPng      = findImageWithSubdirs(folderPath, files, {"taiko-big-clap", "kat_big"}, "taiko");
+        s.taikoHitCirclePng   = findImageWithSubdirs(folderPath, files, {"taiko-hit-circle", "taikohitcircle"}, "taiko");
+        s.taikoHitCircleOverlayPng = findImageWithSubdirs(folderPath, files, {"taiko-hit-circle-overlay", "taikohitcircleoverlay"}, "taiko");
+        s.taikoDrumPng        = findImageWithSubdirs(folderPath, files, {"taiko-drum", "taiko-bar-left", "drum_idle"}, "taiko");
+        s.taikoDrumDonPng     = findImageWithSubdirs(folderPath, files, {"taiko-drum-inner", "drum_don"}, "taiko");
+        s.taikoDrumKatPng     = findImageWithSubdirs(folderPath, files, {"taiko-drum-outer", "drum_kat"}, "taiko");
+
+        // Sprites de osu!mania (busca en raíz y en subcarpeta mania/)
+        s.maniaNote1Png       = findImageWithSubdirs(folderPath, files, {"mania-note1", "note1", "mania-note1h", "mania-key1"}, "mania");
+        s.maniaNote2Png       = findImageWithSubdirs(folderPath, files, {"mania-note2", "note2", "mania-note2h", "mania-key2"}, "mania");
+        s.maniaNoteSPng       = findImageWithSubdirs(folderPath, files, {"mania-notes", "notes", "mania-notesh", "mania-keys"}, "mania");
+        s.maniaStageLightPng  = findImageWithSubdirs(folderPath, files, {"mania-stage-light", "stage-light", "lightingn"}, "mania");
+        s.maniaStageBottomPng = findImageWithSubdirs(folderPath, files, {"mania-stage-bottom", "stage-bottom", "mania-stage-hint"}, "mania");
+
+        // Sprites de osu!catch (busca en raíz y en subcarpeta catch/)
+        s.catchFruitApplePng      = findImageWithSubdirs(folderPath, files, {"fruit-apple", "fruit-apple-overlay"}, "catch");
+        s.catchFruitOrangePng     = findImageWithSubdirs(folderPath, files, {"fruit-orange", "fruit-orange-overlay"}, "catch");
+        s.catchFruitGrapePng      = findImageWithSubdirs(folderPath, files, {"fruit-grapes", "fruit-grape"}, "catch");
+        s.catchFruitStrawberryPng = findImageWithSubdirs(folderPath, files, {"fruit-strawberry"}, "catch");
+        s.catchFruitBananaPng     = findImageWithSubdirs(folderPath, files, {"fruit-bananas", "fruit-banana"}, "catch");
+        s.catchFruitDropPng       = findImageWithSubdirs(folderPath, files, {"fruit-drop", "fruit-droplet"}, "catch");
+        s.catchPlatePng           = findImageWithSubdirs(folderPath, files, {"fruit-plate", "plate"}, "catch");
+        s.catchCatcherPng         = findImageWithSubdirs(folderPath, files, {"fruit-catcher-idle", "catcher-idle", "fruit-ryuuta"}, "catch");
 
         skins.push_back(s);
     }

@@ -1,16 +1,30 @@
 #include "QrRenderer.hpp"
 #include <citro2d.h>
 #include <cmath>
+#include <cstring>
 #include "qrcodegen.h"
+
+static char s_cachedText[128] = {0};
+static uint8_t s_cachedQrcode[qrcodegen_BUFFER_LEN_FOR_VERSION(10)];
+static int s_cachedQrSize = 0;
+static bool s_hasCachedQr = false;
 
 void renderQrCode(const char* text, float startX, float startY, float maxBoxSize) {
     if (!text || text[0] == '\0') return;
-    uint8_t qrcode[qrcodegen_BUFFER_LEN_FOR_VERSION(10)];
-    uint8_t tempBuffer[qrcodegen_BUFFER_LEN_FOR_VERSION(10)];
-    if (!qrcodegen_encodeText(text, tempBuffer, qrcode, qrcodegen_Ecc_LOW, 1, 10, qrcodegen_Mask_AUTO, true)) {
-        return;
+
+    if (!s_hasCachedQr || std::strncmp(s_cachedText, text, sizeof(s_cachedText)) != 0) {
+        uint8_t tempBuffer[qrcodegen_BUFFER_LEN_FOR_VERSION(10)];
+        if (!qrcodegen_encodeText(text, tempBuffer, s_cachedQrcode, qrcodegen_Ecc_LOW, 1, 10, qrcodegen_Mask_AUTO, true)) {
+            s_hasCachedQr = false;
+            return;
+        }
+        std::strncpy(s_cachedText, text, sizeof(s_cachedText) - 1);
+        s_cachedText[sizeof(s_cachedText) - 1] = '\0';
+        s_cachedQrSize = qrcodegen_getSize(s_cachedQrcode);
+        s_hasCachedQr = true;
     }
-    int qrSize = qrcodegen_getSize(qrcode);
+
+    int qrSize = s_cachedQrSize;
     int border = 2;
     int totalModules = qrSize + border * 2;
     float modSize = std::floor(maxBoxSize / static_cast<float>(totalModules));
@@ -25,7 +39,7 @@ void renderQrCode(const char* text, float startX, float startY, float maxBoxSize
     u32 clrBlack = C2D_Color32(18, 16, 26, 255);
     for (int y = 0; y < qrSize; ++y) {
         for (int x = 0; x < qrSize; ++x) {
-            if (qrcodegen_getModule(qrcode, x, y)) {
+            if (qrcodegen_getModule(s_cachedQrcode, x, y)) {
                 C2D_DrawRectSolid(ox + (x + border) * modSize,
                                   oy + (y + border) * modSize,
                                   0.30f, modSize, modSize, clrBlack);

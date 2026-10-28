@@ -12,6 +12,7 @@
 #include "MultiResultsScreen.hpp"
 #include "MultiSyncScreen.hpp"
 #include "GameplayScreen.hpp"
+#include "SplashScreen.hpp"
 
 // Aumentar pila del hilo principal en la 3DS a 256 KB (por defecto libctru asigna solo 32 KB)
 extern "C" {
@@ -30,6 +31,7 @@ int main(int argc, char* argv[]) {
 
     AppContext ctx;
     ctx.init();
+    runSplashScreen(ctx);
 
     while (aptMainLoop()) {
         ctx.beginFrame();

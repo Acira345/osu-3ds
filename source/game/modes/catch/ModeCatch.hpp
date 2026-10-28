@@ -10,6 +10,8 @@
 #include "AudioPlayer.hpp"
 #include "UiKit.hpp"
 
+struct AppContext;
+
 enum CatchFruitType {
     FRUIT_APPLE = 0,       // Manzana roja (300 pts, +1 combo)
     FRUIT_ORANGE = 1,      // Naranja (300 pts, +1 combo)
@@ -126,7 +128,7 @@ public:
 
 private:
     static void drawCenteredText(C2D_TextBuf buf, float cx, float cy, float scale, u32 color, const char* str, float z = 0.85f);
-    void renderFruit(float x, float y, CatchFruitType type, bool isHyper, float z);
+    void renderFruit(float x, float y, CatchFruitType type, bool isHyper, float z, const struct AppContext* pCtx = nullptr);
     void renderFruitMini(float x, float y, CatchFruitType type, float z);
     void renderCatcherChibi(float cx, float cy, int dir, bool dashing, float z);
 
@@ -139,6 +141,6 @@ public:
     void handleTouch(float px, float py, bool isDown);
 
     // Renderizado visual (CatchRenderer.cpp)
-    void renderTopScreen(C2D_TextBuf textBuf, int songTime, float speedRate, float eyeSign, float slider3DVal, bool inKiai);
-    void renderBottomDeck(C2D_TextBuf textBuf, float animTick, int songTime);
+    void renderTopScreen(C2D_TextBuf textBuf, int songTime, float speedRate, float eyeSign, float slider3DVal, bool inKiai, const struct AppContext* pCtx = nullptr);
+    void renderBottomDeck(C2D_TextBuf textBuf, float animTick, int songTime, const struct AppContext* pCtx = nullptr);
 };

@@ -209,7 +209,8 @@ public:
     }
 
     // Guarda el récord si supera la puntuación o PP anterior (y no se usó Autoplay)
-    bool submitScore(const std::string& osuPath, int score, int maxCombo, float acc, const std::string& grade, uint32_t mods, float pp, int mode = 0) {
+    bool submitScore(const std::string& osuPath, int score, int maxCombo, float acc, const std::string& grade, uint32_t mods, float pp, int mode = 0, int* outRank = nullptr) {
+        if (outRank) *outRank = -1;
         if (mods & MOD_AUTO) return false;
         std::string key = makeKey(osuPath);
 
@@ -231,6 +232,17 @@ public:
         std::sort(mapRecords.begin(), mapRecords.end(), [](const ScoreRecord& a, const ScoreRecord& b) {
             return a.bestScore > b.bestScore;
         });
+
+        if (outRank) {
+            for (size_t i = 0; i < mapRecords.size() && i < 10; ++i) {
+                if (mapRecords[i].bestScore == score && mapRecords[i].bestCombo == maxCombo &&
+                    mapRecords[i].bestMods == mods && std::abs(mapRecords[i].bestAcc - acc) < 0.001f) {
+                    *outRank = static_cast<int>(i + 1);
+                    break;
+                }
+            }
+        }
+
         if (mapRecords.size() > 10) mapRecords.resize(10);
 
         std::vector<ScoreRecord> remaining;
