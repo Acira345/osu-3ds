@@ -13,7 +13,8 @@ El juego está ultra-optimizado para funcionar a **60 FPS estables** incluso en 
 Escanea el siguiente código QR desde la aplicación **FBI** en tu consola (`Remote Install` ➔ `Scan QR Code`) para descargar e instalar el archivo `.cia` directamente vía Wi-Fi:
 
 <div align="center">
- <img width="1113" height="1113" alt="Osu V3 5" src="https://github.com/user-attachments/assets/3d7de3cd-86f1-4298-a2df-218b79590a10" />
+ <img width="1113" height="1113" alt="Osu V4 0" src="https://github.com/user-attachments/assets/f9d78bdb-e29e-4a7c-901c-a00cbd57bf34" />
+
 
 
 
@@ -140,7 +141,7 @@ make -j4
 Port personalizado del popular juego de ritmo **osu!** para la familia de consolas **Nintendo 3DS / 2DS**, diseñado con experiencia de juego tipo tableta digitalizadora y compatibilidad nativa con beatmaps oficiales.
 
 
-## 🌟 Características Principales (v2.0)
+## 🌟 Características Principales (v4.0)
 
 * **Modo Tableta (Stylus Digitizer):** Mapeo de coordenadas absolutas en relación 4:3. La pantalla táctil inferior actúa como el área activa de una tableta gráfica, mientras que el campo de juego principal se proyecta en la pantalla superior.
 * **Descarga y Gestión de Canciones Integrada:** Sistema para transferir y almacenar beatmaps (`.osu` / `.osz`) directamente en la tarjeta SD (`sdmc:/3ds/osu/Songs/`) sin necesidad de recompilar el juego.
