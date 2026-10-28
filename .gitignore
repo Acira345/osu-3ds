@@ -1,0 +1,15 @@
+# devkitARM / Nintendo 3DS build output
+build/
+*.elf
+*.o
+*.d
+*.map
+*.lst
+
+# Temporary / editor files
+.DS_Store
+Thumbs.db
+*.swp
+*~
+.vscode/
+.idea/
