@@ -33,9 +33,25 @@ include $(DEVKITARM)/3ds_rules
 #---------------------------------------------------------------------------------
 TARGET := osu-3ds
 BUILD		:=	build
-SOURCES		:=	source
+SOURCES		:=	source \
+			source/app \
+			source/backend/audio \
+			source/backend/storage \
+			source/backend/net \
+			source/backend/i18n \
+			source/frontend/render \
+			source/frontend/screens \
+			source/game/core \
+			source/game/effects \
+			source/game/modes \
+			source/game/modes/standard \
+			source/game/modes/taiko \
+			source/game/modes/mania \
+			source/game/modes/catch \
+			third_party
 DATA		:=	data
-INCLUDES	:=	include
+INCLUDES	:=	$(SOURCES)
+ASSETS		:=	assets
 GRAPHICS	:=	gfx
 #GFXBUILD	:=	$(BUILD)
 ROMFS		:=	romfs
@@ -44,7 +60,7 @@ GFXBUILD	:=	$(ROMFS)/gfx
 APP_TITLE       := osu! 3DS
 APP_DESCRIPTION := Rhythm is just a click away!
 APP_AUTHOR      := Acira345
-ICON            := icon.png
+ICON            := $(ASSETS)/icon.png
 
 #---------------------------------------------------------------------------------
 # options for code generation
@@ -159,13 +175,13 @@ all:
 	@mkdir -p $(BUILD) $(GFXBUILD)
 	@$(MAKE) --no-print-directory -C $(BUILD) -f $(CURDIR)/Makefile
 	@bannertool makesmdh -s "$(APP_TITLE)" -l "$(APP_DESCRIPTION)" -p "$(APP_AUTHOR)" -i $(CURDIR)/$(ICON) -o $(CURDIR)/$(TARGET).smdh
-	@if [ -f "$(CURDIR)/banner.cgfx" ]; then \
-		bannertool makebanner -ci "$(CURDIR)/banner.cgfx" -a "$(CURDIR)/banner.wav" -o "$(BUILD)/banner.bnr" ; \
+	@if [ -f "$(CURDIR)/$(ASSETS)/banner.cgfx" ]; then \
+		bannertool makebanner -ci "$(CURDIR)/$(ASSETS)/banner.cgfx" -a "$(CURDIR)/$(ASSETS)/banner.wav" -o "$(BUILD)/banner.bnr" ; \
 	else \
-		bannertool makebanner -i "$(CURDIR)/banner.png" -a "$(CURDIR)/banner.wav" -o "$(BUILD)/banner.bnr" ; \
+		bannertool makebanner -i "$(CURDIR)/$(ASSETS)/banner.png" -a "$(CURDIR)/$(ASSETS)/banner.wav" -o "$(BUILD)/banner.bnr" ; \
 	fi
 	@rm -f $(CURDIR)/$(TARGET).cia
-	@makerom -f cia -o $(CURDIR)/$(TARGET).cia -DAPP_ENCRYPTED=false -rsf $(CURDIR)/cia.rsf -target t -exefslogo -elf $(CURDIR)/$(TARGET).elf -icon $(CURDIR)/$(TARGET).smdh -banner $(BUILD)/banner.bnr
+	@makerom -f cia -o $(CURDIR)/$(TARGET).cia -DAPP_ENCRYPTED=false -rsf $(CURDIR)/$(ASSETS)/cia.rsf -target t -exefslogo -elf $(CURDIR)/$(TARGET).elf -icon $(CURDIR)/$(TARGET).smdh -banner $(BUILD)/banner.bnr
 	@echo built ... $(TARGET).cia
 
 cia: all
