@@ -1,3 +1,5 @@
+**Español** · [English](README_en.md) · [Polski](README_pl.md) · [Русский](README_ru.md) · [Deutsch](README_de.md)
+
 # osu!3DS 🌸
 
 **osu!3DS** es un port nativo y completo de **osu!** para la familia de consolas **Nintendo 3DS, 2DS, New 3DS y New 2DS**, programado desde cero en C++20 con `libctru`, `Citro2D` y `Citro3D`.
@@ -119,7 +121,7 @@ El proyecto utiliza **devkitARM** y **libctru**.
 
 ```bash
 # Clonar el repositorio
-git clone https://github.com/tu-usuario/osu-3ds.git
+git clone https://github.com/Acira345/osu-3ds.git
 cd osu-3ds
 
 # Compilar binarios (.3dsx, .elf, .cia)
@@ -132,6 +134,7 @@ make -j4
 - **osu!** es propiedad de *ppy Pty Ltd* y Dean Herbert (peppy).
 - Librerías homebrew: *devkitPro*, *libctru*, *Citro2D*, *Citro3D*, *bannertool*, *makerom*.
 =======
+
 # osu! 3DS (v2.0)
 
 Port personalizado del popular juego de ritmo **osu!** para la familia de consolas **Nintendo 3DS / 2DS**, diseñado con experiencia de juego tipo tableta digitalizadora y compatibilidad nativa con beatmaps oficiales.
@@ -191,7 +194,7 @@ sdmc:/
 └── 3ds/
     └── osu/
         └── Songs/
-            └── NombreDeLaCancion/
+            └── SongName/
                 ├── audio.mp3
                 └── cancion.osu
-
+```

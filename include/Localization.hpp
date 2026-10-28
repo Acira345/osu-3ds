@@ -4,11 +4,12 @@
 #include <cstring>
 
 enum AppLanguage {
-    LANG_ES = 0, // Español
+    LANG_ES = 0, // Español/Spanish
     LANG_EN = 1, // English
-    LANG_RU = 2, // Русский
-    LANG_PL = 3, // Polski
-    LANG_COUNT = 4
+    LANG_RU = 2, // Русский/Russian
+    LANG_PL = 3, // Polski/Polish
+    LANG_DE = 4, // Deutsch/German
+    LANG_COUNT = 5
 };
 
 namespace Localization {
@@ -217,6 +218,7 @@ inline const char* getLanguageName(int lang) {
         case LANG_EN: return "English";
         case LANG_RU: return "Русский";
         case LANG_PL: return "Polski";
+        case LANG_DE: return "Deutsch";
         default:      return "English";
     }
 }
@@ -235,6 +237,9 @@ inline AppLanguage detectConsoleLanguage() {
     if (sysLang == CFG_LANGUAGE_RU) {
         return LANG_RU;
     }
+    if (sysLang == CFG_LANGUAGE_DE) {
+        return LANG_DE;
+    }   
     // Poland country detection (country ID 100 on European 3DS)
     if (countryId == 100) {
         return LANG_PL;
