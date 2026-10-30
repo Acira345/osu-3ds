@@ -13,7 +13,8 @@ El juego está ultra-optimizado para funcionar a **60 FPS estables** incluso en 
 Escanea el siguiente código QR desde la aplicación **FBI** en tu consola (`Remote Install` ➔ `Scan QR Code`) para descargar e instalar el archivo `.cia` directamente vía Wi-Fi:
 
 <div align="center">
- <img width="1113" height="1113" alt="Osu V4 0" src="https://github.com/user-attachments/assets/f9d78bdb-e29e-4a7c-901c-a00cbd57bf34" />
+ <img width="1947" height="1947" alt="image" src="https://github.com/user-attachments/assets/64367e7b-7b1a-45c2-8497-54259e4faed7" />
+
 
 
 
